@@ -5469,7 +5469,9 @@ interface IGasKillerSDK is IERC165 {
      * @param referenceBlockNumber The block number to use as reference for operator set
      * @param storageUpdates The storage updates to verify
      * @param transitionIndex The transition index
-     * @param targetFunction The target function selector
+     * @param anchorHash The block hash anchoring the execution to a specific Ethereum state
+     * @param callerAddress The address that initiated the original call (msg.sender)
+     * @param contractCalldata The full calldata for the contract call (not just selector)
      * @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
      */
     function verifyAndUpdate(
@@ -5478,7 +5480,9 @@ interface IGasKillerSDK is IERC165 {
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
-        bytes4 targetFunction,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
         IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
     ) external;
 }
@@ -5489,6 +5493,21 @@ interface IGasKillerSDK is IERC165 {
  * @title GasKillerSDK
  * @notice Base SDK for implementing Gas Killer functionality in contracts
  * @dev Inherit from this contract to add Gas Killer capabilities to your contract
+ *
+ * ## Slashing Support
+ *
+ * The signed message format includes all values needed for slashing verification:
+ * - transitionIndex: Sequential counter for replay protection
+ * - address(this): Target contract being updated
+ * - anchorHash: Block hash anchoring execution to specific Ethereum state
+ * - callerAddress: The msg.sender for the original call
+ * - contractCalldata: Full calldata (not just selector) for reproducibility
+ * - storageUpdates: The claimed storage changes
+ *
+ * To slash malicious operators, a challenger can:
+ * 1. Generate an SP1 proof of correct execution using the signed inputs
+ * 2. Compare the proven storage updates with the signed storage updates
+ * 3. If they differ, submit slashing proof to EigenLayer
  */
 abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     /// @custom:storage-location erc7201:gaskiller.GasKillerSDK.storage
@@ -5512,12 +5531,17 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
 
     /**
      * @notice Function to verify if a signature is valid and contains correct storage updates
+     * @dev The message hash must be computed as:
+     *      sha256(abi.encode(transitionIndex, address(this), anchorHash, callerAddress, contractCalldata, storageUpdates))
+     *      This format enables slashing by including all inputs needed to reproduce execution.
      * @param msgHash The hash of the message to verify
      * @param quorumNumbers The quorum numbers to check signatures for
      * @param referenceBlockNumber The block number to use as reference for operator set
      * @param storageUpdates The storage updates to verify
      * @param transitionIndex The transition index
-     * @param targetFunction The target function selector
+     * @param anchorHash The block hash anchoring the execution to a specific Ethereum state
+     * @param callerAddress The address that initiated the original call (msg.sender)
+     * @param contractCalldata The full calldata for the contract call (not just selector)
      * @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
      */
     function verifyAndUpdate(
@@ -5526,7 +5550,9 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
-        bytes4 targetFunction,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
         IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
     ) external trackState {
         GasKillerSDKStorage storage $ = _getGasKillerSDKStorage();
@@ -5537,7 +5563,22 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
 
         // Verify transition index and message hash
         require(transitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
-        bytes32 expectedHash = sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
+        
+        // Compute expected hash with all slashing-required fields:
+        // - transitionIndex: replay protection
+        // - address(this): target contract
+        // - anchorHash: block hash for state anchoring (enables slashing verification)
+        // - callerAddress: msg.sender (affects execution via access control, balances)
+        // - contractCalldata: full calldata with arguments (enables execution reproduction)
+        // - storageUpdates: the claimed storage changes
+        bytes32 expectedHash = sha256(abi.encode(
+            transitionIndex,
+            address(this),
+            anchorHash,
+            callerAddress,
+            contractCalldata,
+            storageUpdates
+        ));
         require(expectedHash == msgHash, InvalidSignature());
 
         // Verify the signatures using checkSignatures
@@ -5568,18 +5609,30 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     }
 
     /**
-     * @notice Function to get the expected hash for a given transition index, target function, and storage updates
+     * @notice Function to get the expected hash for a given set of execution parameters
+     * @dev This hash format enables slashing verification via SP1 proofs
      * @param transitionIndex The transition index
-     * @param targetFunction The target function selector
+     * @param anchorHash The block hash anchoring the execution
+     * @param callerAddress The caller address (msg.sender)
+     * @param contractCalldata The full contract calldata
      * @param storageUpdates The storage updates
-     * @return bytes32 The expected hash
+     * @return bytes32 The expected message hash
      */
-    function getMessageHash(uint256 transitionIndex, bytes4 targetFunction, bytes calldata storageUpdates)
-        external
-        view
-        returns (bytes32)
-    {
-        return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
+    function getMessageHash(
+        uint256 transitionIndex,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
+        bytes calldata storageUpdates
+    ) external view returns (bytes32) {
+        return sha256(abi.encode(
+            transitionIndex,
+            address(this),
+            anchorHash,
+            callerAddress,
+            contractCalldata,
+            storageUpdates
+        ));
     }
 
     /**
