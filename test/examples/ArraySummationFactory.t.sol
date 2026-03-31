@@ -43,12 +43,12 @@ contract ArraySummationFactoryTest is Test {
         address deployedAddress =
             factory.deployArraySummation(avsAddress1, blsSignatureChecker, arraySize1, maxValue1, seed1);
 
-        // Verify deployment tracking
+        /// Verify deployment tracking
         assertEq(factory.getDeployedContractCount(), 1);
         assertTrue(factory.isContractDeployedByFactory(deployedAddress));
         assertTrue(factory.isDeployedContract(deployedAddress));
 
-        // Verify contract info
+        /// Verify contract info
         ArraySummationFactory.ContractInfo memory info = factory.getContractInfo(deployedAddress);
         assertEq(info.avsAddress, avsAddress1);
         assertEq(info.arraySize, arraySize1);
@@ -57,7 +57,7 @@ contract ArraySummationFactoryTest is Test {
         assertEq(info.deploymentIndex, deploymentIndex);
         assertTrue(info.deploymentTimestamp > 0);
 
-        // Verify the deployed contract works
+        /// Verify the deployed contract works
         ArraySummation deployedContract = ArraySummation(deployedAddress);
         assertEq(deployedContract.avsAddress(), avsAddress1);
         assertEq(deployedContract.arraySize(), arraySize1);
@@ -88,7 +88,7 @@ contract ArraySummationFactoryTest is Test {
     }
 
     function testGetContractsByAVS() public {
-        // Deploy contracts with different AVS addresses
+        /// Deploy contracts with different AVS addresses
         factory.deployArraySummation(avsAddress1, blsSignatureChecker, arraySize1, maxValue1, seed1);
         factory.deployArraySummation(avsAddress2, blsSignatureChecker, arraySize2, maxValue2, seed2);
         factory.deployArraySummation(avsAddress1, blsSignatureChecker, arraySize2, maxValue2, seed2); // Another contract for avsAddress1
@@ -101,12 +101,12 @@ contract ArraySummationFactoryTest is Test {
     }
 
     function testGetDeployedContractsRange() public {
-        // Deploy 5 contracts
+        /// Deploy 5 contracts
         for (uint256 i = 0; i < 5; i++) {
             factory.deployArraySummation(avsAddress1, blsSignatureChecker, arraySize1, maxValue1, seed1 + i);
         }
 
-        // Test range queries
+        /// Test range queries
         address[] memory range1 = factory.getDeployedContractsRange(0, 2);
         address[] memory range2 = factory.getDeployedContractsRange(2, 5);
         address[] memory range3 = factory.getDeployedContractsRange(1, 3);
@@ -117,17 +117,17 @@ contract ArraySummationFactoryTest is Test {
     }
 
     function testGetDeployedContractsRangeInvalidBounds() public {
-        // Deploy 1 contract
+        /// Deploy 1 contract
         factory.deployArraySummation(avsAddress1, blsSignatureChecker, arraySize1, maxValue1, seed1);
 
-        // Test invalid ranges
+        /// Test invalid ranges
         vm.expectRevert("Start index out of bounds");
         factory.getDeployedContractsRange(1, 2);
 
         vm.expectRevert("End index out of bounds");
         factory.getDeployedContractsRange(0, 2);
 
-        // Test invalid range (start >= end) - need to deploy more contracts first
+        /// Test invalid range (start >= end) - need to deploy more contracts first
         factory.deployArraySummation(avsAddress1, blsSignatureChecker, arraySize2, maxValue2, seed2);
 
         vm.expectRevert("Invalid range");
@@ -139,31 +139,31 @@ contract ArraySummationFactoryTest is Test {
             factory.deployArraySummation(avsAddress1, blsSignatureChecker, arraySize1, maxValue1, seed1);
         ArraySummation deployedContract = ArraySummation(deployedAddress);
 
-        // Test that the deployed contract works as expected
+        /// Test that the deployed contract works as expected
         uint256[] memory emptyIndexes = new uint256[](0);
         deployedContract.sum(emptyIndexes);
 
         uint256 sum = deployedContract.currentSum();
         assertTrue(sum > 0, "Sum should be greater than 0");
 
-        // Test array element access
+        /// Test array element access
         uint256 element = deployedContract.getArrayElement(0);
         assertTrue(element < maxValue1, "Element should be in valid range");
     }
 
     function testMultipleDeploymentsWithSameParameters() public {
-        // Deploy multiple contracts with same parameters
+        /// Deploy multiple contracts with same parameters
         address address1 = factory.deployArraySummation(avsAddress1, blsSignatureChecker, arraySize1, maxValue1, seed1);
         address address2 = factory.deployArraySummation(avsAddress1, blsSignatureChecker, arraySize1, maxValue1, seed1);
 
-        // Verify they are different addresses
+        /// Verify they are different addresses
         assertTrue(address1 != address2);
 
-        // Verify both are tracked
+        /// Verify both are tracked
         assertTrue(factory.isContractDeployedByFactory(address1));
         assertTrue(factory.isContractDeployedByFactory(address2));
 
-        // Verify contract info
+        /// Verify contract info
         ArraySummationFactory.ContractInfo memory info1 = factory.getContractInfo(address1);
         ArraySummationFactory.ContractInfo memory info2 = factory.getContractInfo(address2);
 

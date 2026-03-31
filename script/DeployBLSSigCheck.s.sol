@@ -15,7 +15,7 @@ contract DeployBLSSigCheckScript is Script {
 
         vm.startBroadcast();
 
-        // Deploy the BLSSignatureChecker
+        /// Deploy the BLSSignatureChecker
         blsSigCheck = new BLSSignatureChecker(ISlashingRegistryCoordinator(registryCoordinator));
         console.log("BLSSignatureChecker deployed at:", address(blsSigCheck));
 
