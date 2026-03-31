@@ -5304,31 +5304,41 @@ interface IBLSSignatureChecker is IBLSSignatureCheckerErrors, IBLSSignatureCheck
 
 // src/interface/IGasKillerSDK.sol
 
-/**
- * @title IGasKillerSDK
- * @notice Interface for GasKillerSDK contracts
- * @dev This interface defines the core functionality that GasKillerSDK implementations must provide
- */
+/// @title IGasKillerSDK
+/// @notice Interface for GasKillerSDK contracts
+/// @dev Defines the core functionality that GasKillerSDK implementations must provide
 interface IGasKillerSDK is IERC165 {
     // Custom errors
+
+    /// @notice Thrown when `transitionIndex + 1` does not equal the current `stateTransitionCount`
     error InvalidTransitionIndex();
+
+    /// @notice Thrown when the reconstructed message hash does not match `msgHash`
     error InvalidSignature();
+
+    /// @notice Thrown when the provided storage updates cannot be decoded or applied
     error InvalidStorageUpdates();
+
+    /// @notice Thrown when an unrecognised state update operation type is encountered
     error InvalidOperation();
+
+    /// @notice Thrown when signatories hold less than `QUORUM_THRESHOLD`% of stake for any quorum
     error InsufficientQuorumThreshold();
+
+    /// @notice Thrown when `referenceBlockNumber` is older than `blockStaleMeasure` blocks ago
     error StaleBlockNumber();
+
+    /// @notice Thrown when `referenceBlockNumber` is greater than or equal to the current block number
     error FutureBlockNumber();
 
-    /**
-     * @notice Function to verify if a signature is valid and contains correct storage updates
-     * @param msgHash The hash of the message to verify
-     * @param quorumNumbers The quorum numbers to check signatures for
-     * @param referenceBlockNumber The block number to use as reference for operator set
-     * @param storageUpdates The storage updates to verify
-     * @param transitionIndex The transition index
-     * @param targetFunction The target function selector
-     * @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
-     */
+    /// @notice Verify BLS quorum signatures and apply the encoded state updates
+    /// @param msgHash The hash of the message to verify
+    /// @param quorumNumbers The quorum numbers to check signatures for
+    /// @param referenceBlockNumber The block number to use as reference for operator set
+    /// @param storageUpdates The storage updates to verify
+    /// @param transitionIndex The transition index
+    /// @param targetFunction The target function selector
+    /// @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
     function verifyAndUpdate(
         bytes32 msgHash,
         bytes calldata quorumNumbers,

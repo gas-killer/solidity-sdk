@@ -2266,16 +2266,28 @@ library SafeCastUpgradeable {
 
 // src/StateChangeHandlerLib.sol
 
+/// @notice Discriminator enum for the type of state update operation to execute
+/// @dev Each variant maps to a different EVM operation: storage writes, external calls, or log emissions
 enum StateUpdateType {
+    /// @notice Write a 32-byte value directly to a storage slot
     STORE,
+    /// @notice Execute an external call with optional ETH value transfer
     CALL,
+    /// @notice Emit a log with no indexed topics
     LOG0,
+    /// @notice Emit a log with one indexed topic
     LOG1,
+    /// @notice Emit a log with two indexed topics
     LOG2,
+    /// @notice Emit a log with three indexed topics
     LOG3,
+    /// @notice Emit a log with four indexed topics
     LOG4
 }
 
+/// @title StateChangeHandlerLib
+/// @notice Library for decoding and executing batched state update operations
+/// @dev Processes ABI-encoded arrays of typed state updates; supports STORE, CALL, and LOG0-LOG4
 library StateChangeHandlerLib {
     /// @notice Decodes and executes a series of state updates
     /// @dev This function processes an array of state updates, executing them in sequence. Each update can be one of:
@@ -2348,45 +2360,34 @@ library StateChangeHandlerLib {
         }
     }
 
+    /// @notice Thrown when `types` and `args` arrays have different lengths
     error InvalidArguments();
+
+    /// @notice Thrown when a CALL operation's external call reverts
+    /// @param index The zero-based position of the failing operation in the batch
+    /// @param target The contract address that was called
+    /// @param revertData The raw revert data returned by the failed call
+    /// @param callargs The calldata that was passed to the failed call
     error RevertingContext(uint256 index, address target, bytes revertData, bytes callargs);
 }
 
 // src/StateTracker.sol
 
-/**
- * @title StateTracker
- * @notice A contract that tracks state transitions using a storage slot
- * @dev This contract provides functionality to track the number of state transitions
- *      that have occurred in a contract. It uses a precomputed storage slot to store
- *      the transition count.
- *
- *      The storage slot is computed as:
- *      keccak256("gasKiller.stateTracker") - 1
- *
- *      This contract is meant to be inherited by other contracts that need to track
- *      their state transitions for Gas Killer functionality.
- */
+/// @title StateTracker
+/// @notice Tracks the number of state transitions that have occurred in a contract
+/// @dev Uses a precomputed ERC-7201-style storage slot to store the transition counter.
+///      The slot is computed as: `keccak256("gasKiller.stateTracker") - 1`
+///
+///      Inherit this contract to enable Gas Killer state-transition tracking.
 contract StateTracker {
-    /**
-     * @notice The precomputed storage slot for tracking state transitions
-     * @dev This slot is computed as keccak256("gasKiller.stateTracker") - 1
-     *      It is used to store the number of state transitions that have occurred
-     */
+    /// @notice Precomputed storage slot for the state transition counter
+    /// @dev Computed as `keccak256("gasKiller.stateTracker") - 1`
     bytes32 internal constant STATE_TRACKER_STORAGE_LOCATION =
         0xdebfdfd5a50ad117c10898d68b5ccf0893c6b40d4f443f902e2e7646601bdeaf;
 
-    /**
-     * @notice Modifier that increments the state transition counter
-     * @dev This modifier should be used on functions that modify the contract's state
-     *      and need to be tracked for Gas Killer functionality.
-     *
-     *      The modifier:
-     *      1. Loads the current transition count from storage
-     *      2. Increments it by 1
-     *      3. Stores the new count back to storage
-     *      4. Executes the modified function
-     */
+    /// @notice Increment the state transition counter before executing the modified function
+    /// @dev Apply this modifier to any function that constitutes a tracked state transition.
+    ///      Steps: load current count → increment by 1 → store → execute function body.
     modifier trackState() {
         assembly {
             let count := sload(STATE_TRACKER_STORAGE_LOCATION)
@@ -2395,11 +2396,8 @@ contract StateTracker {
         _;
     }
 
-    /**
-     * @notice Returns the current number of state transitions
-     * @return count The number of state transitions that have occurred
-     * @dev This function reads the transition count directly from storage
-     */
+    /// @notice Return the current number of state transitions that have occurred
+    /// @return count The total number of tracked state transitions
     function stateTransitionCount() public view returns (uint256 count) {
         assembly {
             count := sload(STATE_TRACKER_STORAGE_LOCATION)
@@ -5447,31 +5445,41 @@ interface IBLSSignatureChecker is IBLSSignatureCheckerErrors, IBLSSignatureCheck
 
 // src/interface/IGasKillerSDK.sol
 
-/**
- * @title IGasKillerSDK
- * @notice Interface for GasKillerSDK contracts
- * @dev This interface defines the core functionality that GasKillerSDK implementations must provide
- */
+/// @title IGasKillerSDK
+/// @notice Interface for GasKillerSDK contracts
+/// @dev Defines the core functionality that GasKillerSDK implementations must provide
 interface IGasKillerSDK is IERC165 {
     // Custom errors
+
+    /// @notice Thrown when `transitionIndex + 1` does not equal the current `stateTransitionCount`
     error InvalidTransitionIndex();
+
+    /// @notice Thrown when the reconstructed message hash does not match `msgHash`
     error InvalidSignature();
+
+    /// @notice Thrown when the provided storage updates cannot be decoded or applied
     error InvalidStorageUpdates();
+
+    /// @notice Thrown when an unrecognised state update operation type is encountered
     error InvalidOperation();
+
+    /// @notice Thrown when signatories hold less than `QUORUM_THRESHOLD`% of stake for any quorum
     error InsufficientQuorumThreshold();
+
+    /// @notice Thrown when `referenceBlockNumber` is older than `blockStaleMeasure` blocks ago
     error StaleBlockNumber();
+
+    /// @notice Thrown when `referenceBlockNumber` is greater than or equal to the current block number
     error FutureBlockNumber();
 
-    /**
-     * @notice Function to verify if a signature is valid and contains correct storage updates
-     * @param msgHash The hash of the message to verify
-     * @param quorumNumbers The quorum numbers to check signatures for
-     * @param referenceBlockNumber The block number to use as reference for operator set
-     * @param storageUpdates The storage updates to verify
-     * @param transitionIndex The transition index
-     * @param targetFunction The target function selector
-     * @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
-     */
+    /// @notice Verify BLS quorum signatures and apply the encoded state updates
+    /// @param msgHash The hash of the message to verify
+    /// @param quorumNumbers The quorum numbers to check signatures for
+    /// @param referenceBlockNumber The block number to use as reference for operator set
+    /// @param storageUpdates The storage updates to verify
+    /// @param transitionIndex The transition index
+    /// @param targetFunction The target function selector
+    /// @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
     function verifyAndUpdate(
         bytes32 msgHash,
         bytes calldata quorumNumbers,
@@ -5485,41 +5493,43 @@ interface IGasKillerSDK is IERC165 {
 
 // src/GasKillerSDK.sol
 
-/**
- * @title GasKillerSDK
- * @notice Base SDK for implementing Gas Killer functionality in contracts
- * @dev Inherit from this contract to add Gas Killer capabilities to your contract
- */
+/// @title GasKillerSDK
+/// @notice Base SDK for implementing Gas Killer functionality in contracts
+/// @dev Inherit from this contract to add Gas Killer capabilities to your contract
 abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     /// @custom:storage-location erc7201:gaskiller.GasKillerSDK.storage
     struct GasKillerSDKStorage {
-        bytes namespace; // Namespace for the contract
-        address avsAddress; // The AVS service manager address
-        IBLSSignatureChecker blsSignatureChecker; // The BLS signature checker contract
-        uint256 blockStaleMeasure; // Max block age for reference block validity
+        /// @notice Namespace derived from the AVS address; used to scope this contract within the AVS
+        bytes namespace;
+        /// @notice The AVS service manager address
+        address avsAddress;
+        /// @notice The BLS signature checker contract used to verify operator signatures
+        IBLSSignatureChecker blsSignatureChecker;
+        /// @notice Maximum number of blocks a reference block may lag behind the current block
+        uint256 blockStaleMeasure;
     }
 
     // keccak256(abi.encode(uint256(keccak256("gaskiller.GasKillerSDK.storage")) - 1)) & ~bytes32(uint256(0xff));
     bytes32 private constant GAS_KILLER_SDK_STORAGE_LOCATION =
         0x321ebf629ed2e1e368f0890e8fdd95cf9a2ae5961b66a1805f0b2ec84e21d000;
 
-    // Constants for stake threshold checking
+    /// @notice Denominator used when evaluating stake percentage thresholds (representing 100%)
     uint8 public constant THRESHOLD_DENOMINATOR = 100;
-    uint8 public constant QUORUM_THRESHOLD = 66; // 66% quorum threshold
 
-    // Default values for the storage
+    /// @notice Minimum percentage of quorum stake that must have signed to approve a state update (QUORUM_THRESHOLD/THRESHOLD_DENOMINATOR)
+    uint8 public constant QUORUM_THRESHOLD = 66;
+
+    /// @notice Default maximum age (in blocks) a reference block is considered valid when none is configured
     uint256 private constant DEFAULT_BLOCK_STALE_MEASURE = 300;
 
-    /**
-     * @notice Function to verify if a signature is valid and contains correct storage updates
-     * @param msgHash The hash of the message to verify
-     * @param quorumNumbers The quorum numbers to check signatures for
-     * @param referenceBlockNumber The block number to use as reference for operator set
-     * @param storageUpdates The storage updates to verify
-     * @param transitionIndex The transition index
-     * @param targetFunction The target function selector
-     * @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
-     */
+    /// @notice Verify BLS quorum signatures and apply the encoded state updates
+    /// @param msgHash The hash of the message to verify
+    /// @param quorumNumbers The quorum numbers to check signatures for
+    /// @param referenceBlockNumber The block number to use as reference for operator set
+    /// @param storageUpdates The storage updates to verify
+    /// @param transitionIndex The transition index
+    /// @param targetFunction The target function selector
+    /// @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
     function verifyAndUpdate(
         bytes32 msgHash,
         bytes calldata quorumNumbers,
@@ -5557,23 +5567,19 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         _stateChangeHandler(storageUpdates);
     }
 
-    /**
-     * @notice Query if a contract implements an interface
-     * @param interfaceId The interface identifier, as specified in ERC-165
-     * @return `true` if the contract implements `interfaceId` and `false` otherwise
-     * @dev This implementation supports ERC165 and IGasKillerSDK interface detection
-     */
+    /// @notice Query if a contract implements an interface
+    /// @dev Supports ERC-165 and IGasKillerSDK interface detection
+    /// @param interfaceId The interface identifier, as specified in ERC-165
+    /// @return `true` if the contract implements `interfaceId` and `false` otherwise
     function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
         return interfaceId == type(IERC165).interfaceId || interfaceId == type(IGasKillerSDK).interfaceId;
     }
 
-    /**
-     * @notice Function to get the expected hash for a given transition index, target function, and storage updates
-     * @param transitionIndex The transition index
-     * @param targetFunction The target function selector
-     * @param storageUpdates The storage updates
-     * @return bytes32 The expected hash
-     */
+    /// @notice Compute the expected message hash for a given transition, function, and storage updates
+    /// @param transitionIndex The transition index
+    /// @param targetFunction The target function selector
+    /// @param storageUpdates The ABI-encoded storage updates
+    /// @return The expected SHA-256 hash
     function getMessageHash(uint256 transitionIndex, bytes4 targetFunction, bytes calldata storageUpdates)
         external
         view
@@ -5582,88 +5588,68 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
     }
 
-    /**
-     * @notice Function to get the AVS address
-     * @return address The AVS address
-     */
+    /// @notice Return the configured AVS service manager address
+    /// @return The AVS address
     function avsAddress() external view returns (address) {
         return _getGasKillerSDKStorage().avsAddress;
     }
 
-    /**
-     * @notice Function to get the BLS signature checker address
-     * @return address The BLS signature checker address
-     */
+    /// @notice Return the configured BLS signature checker address
+    /// @return The BLS signature checker address
     function blsSignatureChecker() external view returns (address) {
         return address(_getGasKillerSDKStorage().blsSignatureChecker);
     }
 
-    /**
-     * @notice Function to get the namespace
-     * @return bytes The namespace
-     */
+    /// @notice Return the namespace bytes derived from the AVS address
+    /// @return The namespace
     function namespace() external view returns (bytes memory) {
         return _getGasKillerSDKStorage().namespace;
     }
 
-    /**
-     * @notice Function to get the block stale measure
-     * @return uint256 The block stale measure
-     */
+    /// @notice Return the configured block stale measure (or the default if unset)
+    /// @return The block stale measure
     function blockStaleMeasure() external view returns (uint256) {
         return _getBlockStaleMeasure();
     }
 
-    /**
-     * @notice Function to apply storage updates
-     * @param storageUpdates The storage updates to apply
-     */
+    /// @notice Decode and execute ABI-encoded storage updates
+    /// @param storageUpdates ABI-encoded `(StateUpdateType[], bytes[])` pair
     function _stateChangeHandler(bytes calldata storageUpdates) internal {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
         StateChangeHandlerLib._runStateUpdates(types, args);
     }
 
-    /**
-     * @notice Internal function to set the AVS address
-     * @dev Namespace is used to identify the contract in the AVS service manager
-     * @param _avsAddress The new AVS address
-     */
+    /// @notice Set the AVS address and derive the namespace from it
+    /// @dev The namespace is `abi.encodePacked(avsAddress, "gaskiller")`
+    /// @param _avsAddress The new AVS service manager address
     function _setAvsAddress(address _avsAddress) internal {
         GasKillerSDKStorage storage $ = _getGasKillerSDKStorage();
         $.avsAddress = _avsAddress;
         $.namespace = abi.encodePacked($.avsAddress, "gaskiller");
     }
 
-    /**
-     * @notice Internal function to set the BLS signature checker address
-     * @param _blsSignatureChecker The new BLS signature checker address
-     */
+    /// @notice Set the BLS signature checker contract
+    /// @param _blsSignatureChecker The new BLS signature checker address
     function _setBlsSignatureChecker(address _blsSignatureChecker) internal {
         GasKillerSDKStorage storage $ = _getGasKillerSDKStorage();
         $.blsSignatureChecker = IBLSSignatureChecker(_blsSignatureChecker);
     }
 
-    /**
-     * @notice Internal function to set the block stale measure
-     * @param _blockStaleMeasure The new block stale measure value
-     */
+    /// @notice Set the maximum number of blocks a reference block may lag behind the current block
+    /// @param _blockStaleMeasure The new block stale measure value
     function _setBlockStaleMeasure(uint256 _blockStaleMeasure) internal {
         _getGasKillerSDKStorage().blockStaleMeasure = _blockStaleMeasure;
     }
 
-    /**
-     * @notice Internal function to get the block stale measure
-     * @return uint256 The block stale measure
-     */
+    /// @notice Return the block stale measure, falling back to the default when unset
+    /// @return The effective block stale measure
     function _getBlockStaleMeasure() internal view returns (uint256) {
         uint256 value = _getGasKillerSDKStorage().blockStaleMeasure;
         return value == 0 ? DEFAULT_BLOCK_STALE_MEASURE : value;
     }
 
-    /**
-     * @notice Internal function to get the GasKillerSDK storage
-     * @return $ The GasKillerSDK storage struct
-     */
+    /// @notice Load the ERC-7201 storage struct for GasKillerSDK
+    /// @return $ The GasKillerSDK storage struct
     function _getGasKillerSDKStorage() private pure returns (GasKillerSDKStorage storage $) {
         assembly {
             $.slot := GAS_KILLER_SDK_STORAGE_LOCATION
@@ -5673,17 +5659,42 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
 
 // src/examples/array-summation/ArraySummation.sol
 
+/// @title ArraySummation
+/// @notice Example Gas Killer SDK consumer that maintains an on-chain array and computes sums off-chain
+/// @dev Demonstrates how to integrate GasKillerSDK: the `sum` and `setArrayElement` functions
+///      are guarded by `trackState` so off-chain operators can propose the state update via
+///      `verifyAndUpdate` rather than running the computation on-chain.
 contract ArraySummation is GasKillerSDK {
+    /// @notice Thrown when constructor arguments would produce an unusable contract
     error InvalidConfiguration();
 
+    /// @notice Emitted whenever a new sum is computed and stored
+    /// @param newSum The newly computed sum
+    /// @param timestamp The block timestamp at the time of computation
     event SumCalculated(uint256 newSum, uint256 timestamp);
+
+    /// @notice Emitted once during construction after the array is populated
+    /// @param size The number of elements initialised in the array
     event ArrayInitialized(uint256 size);
 
+    /// @notice Number of elements in `values`; fixed at construction
     uint256 public immutable arraySize;
+
+    /// @notice Upper bound (exclusive) for randomly generated array element values
     uint256 public immutable maxValue;
+
+    /// @notice The most recently computed sum of selected array elements
     uint256 public currentSum;
+
+    /// @notice The underlying array of pseudorandom values
     uint256[] public values;
 
+    /// @notice Deploy a new ArraySummation contract and initialise the array
+    /// @param _avsAddress The AVS service manager address used for BLS quorum validation
+    /// @param _blsSigChecker The BLS signature checker contract address
+    /// @param _arraySize Number of elements to generate; must be > 0
+    /// @param _maxValue Exclusive upper bound for element values; must be > 0
+    /// @param _seed Seed for pseudorandom generation; 0 falls back to `block.timestamp`
     constructor(address _avsAddress, address _blsSigChecker, uint256 _arraySize, uint256 _maxValue, uint256 _seed) {
         _setAvsAddress(_avsAddress);
         _setBlsSignatureChecker(_blsSigChecker);
@@ -5698,6 +5709,8 @@ contract ArraySummation is GasKillerSDK {
         _initializeArray(_seed);
     }
 
+    /// @notice Populate `values` with `arraySize` pseudorandom entries bounded by `maxValue`
+    /// @param _seed Entropy source; falls back to `block.timestamp` when 0
     function _initializeArray(uint256 _seed) private {
         if (_seed == 0) {
             _seed = block.timestamp;
@@ -5711,19 +5724,15 @@ contract ArraySummation is GasKillerSDK {
         emit ArrayInitialized(arraySize);
     }
 
-    /**
-     * @notice Calculate sum of specified array elements
-     * @dev Uses trackState modifier to track state transitions
-     * @param indexes Array of indexes to sum (if empty, sums all elements)
-     */
+    /// @notice Calculate the sum of specified array elements and record the state transition
+    /// @dev Pass an empty `indexes` array to sum all elements
+    /// @param indexes Zero-based positions in `values` to include in the sum
     function sum(uint256[] calldata indexes) public trackState {
         _calculateSum(indexes);
     }
 
-    /**
-     * @notice Internal function to calculate and store the sum
-     * @param indexes Array of indexes to sum (if empty, sums all elements)
-     */
+    /// @notice Compute the sum of the specified elements and store it in `currentSum`
+    /// @param indexes Zero-based positions to sum; sums the full array when empty
     function _calculateSum(uint256[] calldata indexes) internal {
         uint256 total = 0;
 
@@ -5744,24 +5753,36 @@ contract ArraySummation is GasKillerSDK {
         emit SumCalculated(total, block.timestamp);
     }
 
+    /// @notice Return the value at a specific array index
+    /// @param index Zero-based position in `values`
+    /// @return The element stored at `index`
     function getArrayElement(uint256 index) public view returns (uint256) {
         require(index < values.length, "Index out of bounds");
         return values[index];
     }
 
+    /// @notice Return the number of elements in `values`
+    /// @return The length of the array
     function getArrayLength() public view returns (uint256) {
         return values.length;
     }
 
+    /// @notice Return a memory copy of the full `values` array
+    /// @return The entire array of stored values
     function getFullArray() public view returns (uint256[] memory) {
         return values;
     }
 
+    /// @notice Overwrite a single array element and record the state transition
+    /// @param index Zero-based position in `values` to update
+    /// @param newValue Replacement value to store at `index`
     function setArrayElement(uint256 index, uint256 newValue) public trackState {
         require(index < values.length, "Index out of bounds");
         values[index] = newValue;
     }
 
+    /// @notice Clear the array and reinitialise it with a new seed, recording the state transition
+    /// @param _seed Entropy source for regeneration; 0 falls back to `block.timestamp`
     function resetArray(uint256 _seed) public trackState {
         delete values;
         _initializeArray(_seed);
@@ -5770,14 +5791,19 @@ contract ArraySummation is GasKillerSDK {
 
 // src/examples/array-summation/ArraySummationFactory.sol
 
-/**
- * @title ArraySummationFactory
- * @notice Factory contract for deploying ArraySummation contracts
- * @dev Allows permissionless deployment of new array summation contracts
- *      and provides tracking functionality for deployed contracts
- */
+/// @title ArraySummationFactory
+/// @notice Factory contract for deploying ArraySummation contracts
+/// @dev Allows permissionless deployment of new array summation contracts
+///      and provides tracking functionality for deployed contracts
 contract ArraySummationFactory {
-    // Events
+    /// @notice Emitted when a new ArraySummation contract is deployed via this factory
+    /// @param contractAddress Address of the newly deployed ArraySummation contract
+    /// @param avsAddress The AVS service manager address passed to the contract
+    /// @param blsSigChecker The BLS signature checker address passed to the contract
+    /// @param arraySize Number of elements in the initialised array
+    /// @param maxValue Upper bound used for element generation
+    /// @param seed Entropy seed used for array initialisation
+    /// @param deploymentIndex Zero-based position of this deployment in `deployedContracts`
     event ArraySummationDeployed(
         address indexed contractAddress,
         address indexed avsAddress,
@@ -5788,30 +5814,40 @@ contract ArraySummationFactory {
         uint256 deploymentIndex
     );
 
-    // State variables
+    /// @notice Ordered list of all ArraySummation contracts deployed through this factory
     address[] public deployedContracts;
+
+    /// @notice Quick membership check — true if an address was deployed by this factory
     mapping(address => bool) public isDeployedContract;
+
+    /// @notice Deployment metadata keyed by contract address
     mapping(address => ContractInfo) public contractInfo;
 
-    // Struct to store contract deployment information
+    /// @notice Metadata recorded at deployment time for each ArraySummation contract
     struct ContractInfo {
+        /// @notice The AVS service manager address the contract was configured with
         address avsAddress;
+        /// @notice The BLS signature checker address the contract was configured with
         address blsSigChecker;
+        /// @notice Number of elements in the contract's array
         uint256 arraySize;
+        /// @notice Upper bound used for element generation
         uint256 maxValue;
+        /// @notice Entropy seed used at deployment
         uint256 seed;
+        /// @notice Zero-based index of this contract in `deployedContracts`
         uint256 deploymentIndex;
+        /// @notice `block.timestamp` at the time of deployment
         uint256 deploymentTimestamp;
     }
 
-    /**
-     * @notice Deploy a new ArraySummation contract
-     * @param _avsAddress The AVS address for the new contract
-     * @param _arraySize The size of the array to initialize
-     * @param _maxValue The maximum value for array elements
-     * @param _seed The seed for array initialization
-     * @return contractAddress The address of the deployed contract
-     */
+    /// @notice Deploy a new ArraySummation contract
+    /// @param _avsAddress The AVS service manager address for the new contract
+    /// @param _blsSigChecker The BLS signature checker address for the new contract
+    /// @param _arraySize The size of the array to initialize
+    /// @param _maxValue The maximum value for array elements
+    /// @param _seed The seed for array initialization
+    /// @return contractAddress The address of the deployed contract
     function deployArraySummation(
         address _avsAddress,
         address _blsSigChecker,
@@ -5845,28 +5881,22 @@ contract ArraySummationFactory {
         );
     }
 
-    /**
-     * @notice Get the total number of deployed contracts
-     * @return count The number of deployed contracts
-     */
+    /// @notice Return the total number of contracts deployed by this factory
+    /// @return count The number of deployed contracts
     function getDeployedContractCount() external view returns (uint256 count) {
         return deployedContracts.length;
     }
 
-    /**
-     * @notice Get all deployed contract addresses
-     * @return addresses Array of all deployed contract addresses
-     */
+    /// @notice Return all contract addresses deployed by this factory
+    /// @return addresses Array of all deployed contract addresses
     function getAllDeployedContracts() external view returns (address[] memory addresses) {
         return deployedContracts;
     }
 
-    /**
-     * @notice Get deployed contracts within a range
-     * @param _startIndex Starting index (inclusive)
-     * @param _endIndex Ending index (exclusive)
-     * @return addresses Array of contract addresses in the specified range
-     */
+    /// @notice Return a slice of deployed contract addresses
+    /// @param _startIndex Starting index (inclusive)
+    /// @param _endIndex Ending index (exclusive)
+    /// @return addresses Array of contract addresses in the specified range
     function getDeployedContractsRange(uint256 _startIndex, uint256 _endIndex)
         external
         view
@@ -5884,21 +5914,17 @@ contract ArraySummationFactory {
         }
     }
 
-    /**
-     * @notice Get contract information for a specific deployed contract
-     * @param _contractAddress The address of the deployed contract
-     * @return info The contract information
-     */
+    /// @notice Return the deployment metadata for a specific contract
+    /// @param _contractAddress The address of the deployed contract
+    /// @return info The contract information
     function getContractInfo(address _contractAddress) external view returns (ContractInfo memory info) {
         require(isDeployedContract[_contractAddress], "Contract not deployed by factory");
         return contractInfo[_contractAddress];
     }
 
-    /**
-     * @notice Get contracts deployed by a specific AVS address
-     * @param _avsAddress The AVS address to filter by
-     * @return addresses Array of contract addresses deployed by the AVS
-     */
+    /// @notice Return all contracts deployed for a given AVS address
+    /// @param _avsAddress The AVS address to filter by
+    /// @return addresses Array of contract addresses deployed by the AVS
     function getContractsByAVS(address _avsAddress) external view returns (address[] memory addresses) {
         uint256 count = 0;
 
@@ -5920,11 +5946,9 @@ contract ArraySummationFactory {
         }
     }
 
-    /**
-     * @notice Verify if a contract was deployed by this factory
-     * @param _contractAddress The address to verify
-     * @return deployed True if the contract was deployed by this factory
-     */
+    /// @notice Check whether a contract was deployed by this factory
+    /// @param _contractAddress The address to verify
+    /// @return deployed True if the contract was deployed by this factory
     function isContractDeployedByFactory(address _contractAddress) external view returns (bool deployed) {
         return isDeployedContract[_contractAddress];
     }
