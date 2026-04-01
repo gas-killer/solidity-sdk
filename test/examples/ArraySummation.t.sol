@@ -155,7 +155,7 @@ contract ArraySummationTest is Test {
         assertTrue(address(arraySummation.blsSignatureChecker()) != address(0));
         assertEq(arraySummation.avsAddress(), avsAddress);
 
-        // Test that the verifyAndUpdate function is properly inherited from GasKillerSDK
+        /// Test that the verifyAndUpdate function is properly inherited from GasKillerSDK
         bytes4 selector = arraySummation.verifyAndUpdate.selector;
         assertTrue(selector != bytes4(0), "verifyAndUpdate selector should exist");
     }
@@ -203,7 +203,7 @@ contract ArraySummationTest is Test {
     }
 
     function testSumSubset() public {
-        // Test summing a specific subset of indexes
+        /// Test summing a specific subset of indexes
         uint256[] memory indexes = new uint256[](3);
         indexes[0] = 0;
         indexes[1] = 10;
@@ -212,7 +212,7 @@ contract ArraySummationTest is Test {
         arraySummation.sum(indexes);
         uint256 subsetSum = arraySummation.currentSum();
 
-        // Calculate expected sum manually
+        /// Calculate expected sum manually
         uint256 expectedSum = arraySummation.getArrayElement(0) + arraySummation.getArrayElement(10)
             + arraySummation.getArrayElement(100);
 
@@ -229,7 +229,7 @@ contract ArraySummationTest is Test {
     }
 
     function testSumLargeSubset() public {
-        // Test summing first 100 elements
+        /// Test summing first 100 elements
         uint256[] memory indexes = new uint256[](100);
         uint256 expectedSum = 0;
 
@@ -243,12 +243,12 @@ contract ArraySummationTest is Test {
     }
 
     function testSumEmptyVsFullArray() public {
-        // Sum with empty indexes (should sum all)
+        /// Sum with empty indexes (should sum all)
         uint256[] memory emptyIndexes = new uint256[](0);
         arraySummation.sum(emptyIndexes);
         uint256 allSum = arraySummation.currentSum();
 
-        // Calculate expected full sum
+        /// Calculate expected full sum
         uint256[] memory fullArray = arraySummation.getFullArray();
         uint256 expectedFullSum = 0;
         for (uint256 i = 0; i < fullArray.length; i++) {

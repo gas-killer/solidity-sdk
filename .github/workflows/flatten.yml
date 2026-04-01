@@ -2,7 +2,11 @@ name: Flatten Contracts
 
 on:
   push:
+    paths-ignore:
+      - 'flat/**'
   pull_request:
+    paths-ignore:
+      - 'flat/**'
   workflow_dispatch:
 
 env:
@@ -12,15 +16,6 @@ jobs:
   flatten:
     name: Flatten Solidity Contracts
     runs-on: ubuntu-latest
-
-    # Skip if the last commit only touched the generated flat/ folder
-    if: |
-      github.event_name == 'workflow_dispatch' || 
-      !(
-        contains(join(github.event.pull_request.changed_files || github.event.head_commit.added || '', ' '), 'flat/') &&
-        contains(join(github.event.pull_request.changed_files || github.event.head_commit.modified || '', ' '), 'flat/') &&
-        contains(join(github.event.pull_request.changed_files || github.event.head_commit.removed || '', ' '), 'flat/')
-      )
 
     permissions: # allow the default token to push back changes
       contents: write

@@ -3,16 +3,28 @@ pragma solidity ^0.8.0;
 
 // src/StateChangeHandlerLib.sol
 
+/// @notice Discriminator enum for the type of state update operation to execute
+/// @dev Each variant maps to a different EVM operation: storage writes, external calls, or log emissions
 enum StateUpdateType {
+    /// @notice Write a 32-byte value directly to a storage slot
     STORE,
+    /// @notice Execute an external call with optional ETH value transfer
     CALL,
+    /// @notice Emit a log with no indexed topics
     LOG0,
+    /// @notice Emit a log with one indexed topic
     LOG1,
+    /// @notice Emit a log with two indexed topics
     LOG2,
+    /// @notice Emit a log with three indexed topics
     LOG3,
+    /// @notice Emit a log with four indexed topics
     LOG4
 }
 
+/// @title StateChangeHandlerLib
+/// @notice Library for decoding and executing batched state update operations
+/// @dev Processes ABI-encoded arrays of typed state updates; supports STORE, CALL, and LOG0-LOG4
 library StateChangeHandlerLib {
     /// @notice Decodes and executes a series of state updates
     /// @dev This function processes an array of state updates, executing them in sequence. Each update can be one of:
@@ -85,6 +97,13 @@ library StateChangeHandlerLib {
         }
     }
 
+    /// @notice Thrown when `types` and `args` arrays have different lengths
     error InvalidArguments();
+
+    /// @notice Thrown when a CALL operation's external call reverts
+    /// @param index The zero-based position of the failing operation in the batch
+    /// @param target The contract address that was called
+    /// @param revertData The raw revert data returned by the failed call
+    /// @param callargs The calldata that was passed to the failed call
     error RevertingContext(uint256 index, address target, bytes revertData, bytes callargs);
 }

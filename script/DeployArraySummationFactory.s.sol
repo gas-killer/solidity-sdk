@@ -21,7 +21,7 @@ contract DeployArraySummationFactory is Script {
         console.log("ArraySummationFactory deployed at:", address(factory));
         console.log("Deployment completed successfully!");
 
-        // Verify the deployment
+        /// Verify the deployment
         console.log("Verifying deployment...");
         console.log("Deployed contract count:", factory.getDeployedContractCount());
         console.log("All deployed contracts length:", factory.getAllDeployedContracts().length);
