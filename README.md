@@ -10,7 +10,7 @@ Solidity SDK for integrating Gas Killer functionality into EigenLayer AVS contra
 
 ## Overview
 
-The SDK intercepts state-changing function calls so that the actual computation can happen off-chain. Operators sign a payload describing the resulting state updates, the router aggregates the BLS signatures when a quorum threshold is reached, and the result is submitted on-chain via `verifyAndUpdate`.
+Contracts that inherit GasKillerSDK expose a public `verifyAndUpdate` function, which enables expensive state-changing computations to be performed off-chain. Operators sign a payload describing the resulting state updates, the router aggregates the BLS signatures once a quorum threshold is reached, and the result is submitted on-chain through `verifyAndUpdate`.
 
 ## Repository Structure
 
