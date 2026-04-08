@@ -3,10 +3,12 @@ pragma solidity ^0.8.13;
 
 import {Test, console} from "forge-std/Test.sol";
 import {ArraySummation} from "../../src/examples/array-summation/ArraySummation.sol";
+import {IGasKillerServiceManager} from "../../src/interface/IGasKillerServiceManager.sol";
+import {MockGasKillerServiceManager} from "../mocks/MockGasKillerServiceManager.sol";
 
 contract ArraySummationTest is Test {
     ArraySummation public arraySummation;
-    address public avsAddress = address(0x1234);
+    MockGasKillerServiceManager public avsServiceManager;
     address public blsSignatureChecker = address(0x5678);
     uint256 public arraySize = 1000;
     uint256 public maxValue = 10000;
@@ -16,7 +18,8 @@ contract ArraySummationTest is Test {
     event ArrayInitialized(uint256 size);
 
     function setUp() public {
-        arraySummation = new ArraySummation(avsAddress, blsSignatureChecker, arraySize, maxValue, seed);
+        avsServiceManager = new MockGasKillerServiceManager();
+        arraySummation = new ArraySummation(address(avsServiceManager), blsSignatureChecker, arraySize, maxValue, seed);
     }
 
     function testInitialization() public view {
@@ -149,11 +152,11 @@ contract ArraySummationTest is Test {
     }
 
     function testGasKillerInheritance() public view {
-        assertEq(arraySummation.QUORUM_THRESHOLD(), 66);
-        assertEq(arraySummation.blockStaleMeasure(), 300);
-        assertEq(arraySummation.THRESHOLD_DENOMINATOR(), 100);
+        assertEq(avsServiceManager.QUORUM_THRESHOLD(), 66);
+        assertEq(avsServiceManager.BLOCK_STALE_MEASURE(), 300);
+        assertEq(avsServiceManager.THRESHOLD_DENOMINATOR(), 100);
         assertTrue(address(arraySummation.blsSignatureChecker()) != address(0));
-        assertEq(arraySummation.avsAddress(), avsAddress);
+        assertEq(address(arraySummation.avsServiceManager()), address(avsServiceManager));
 
         /// Test that the verifyAndUpdate function is properly inherited from GasKillerSDK
         bytes4 selector = arraySummation.verifyAndUpdate.selector;
@@ -181,8 +184,8 @@ contract ArraySummationTest is Test {
     }
 
     function testDeterministicInitialization() public {
-        ArraySummation array1 = new ArraySummation(avsAddress, blsSignatureChecker, arraySize, maxValue, 42);
-        ArraySummation array2 = new ArraySummation(avsAddress, blsSignatureChecker, arraySize, maxValue, 42);
+        ArraySummation array1 = new ArraySummation(address(avsServiceManager), blsSignatureChecker, arraySize, maxValue, 42);
+        ArraySummation array2 = new ArraySummation(address(avsServiceManager), blsSignatureChecker, arraySize, maxValue, 42);
 
         uint256[] memory arr1 = array1.getFullArray();
         uint256[] memory arr2 = array2.getFullArray();
@@ -194,12 +197,12 @@ contract ArraySummationTest is Test {
 
     function testInvalidConfigurationArraySize() public {
         vm.expectRevert(abi.encodeWithSignature("InvalidConfiguration()"));
-        new ArraySummation(avsAddress, blsSignatureChecker, 0, maxValue, seed);
+        new ArraySummation(address(avsServiceManager), blsSignatureChecker, 0, maxValue, seed);
     }
 
     function testInvalidConfigurationMaxValue() public {
         vm.expectRevert(abi.encodeWithSignature("InvalidConfiguration()"));
-        new ArraySummation(avsAddress, blsSignatureChecker, arraySize, 0, seed);
+        new ArraySummation(address(avsServiceManager), blsSignatureChecker, arraySize, 0, seed);
     }
 
     function testSumSubset() public {

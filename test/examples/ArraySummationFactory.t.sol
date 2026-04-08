@@ -4,6 +4,7 @@ pragma solidity ^0.8.13;
 import {Test, console} from "forge-std/Test.sol";
 import {ArraySummationFactory} from "../../src/examples/array-summation/ArraySummationFactory.sol";
 import {ArraySummation} from "../../src/examples/array-summation/ArraySummation.sol";
+import {IGasKillerServiceManager} from "../../src/interface/IGasKillerServiceManager.sol";
 
 contract ArraySummationFactoryTest is Test {
     ArraySummationFactory public factory;
@@ -59,7 +60,7 @@ contract ArraySummationFactoryTest is Test {
 
         /// Verify the deployed contract works
         ArraySummation deployedContract = ArraySummation(deployedAddress);
-        assertEq(deployedContract.avsAddress(), avsAddress1);
+        assertEq(address(deployedContract.avsServiceManager()), avsAddress1);
         assertEq(deployedContract.arraySize(), arraySize1);
         assertEq(deployedContract.maxValue(), maxValue1);
         assertEq(deployedContract.getArrayLength(), arraySize1);

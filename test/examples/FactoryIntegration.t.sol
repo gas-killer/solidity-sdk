@@ -4,6 +4,7 @@ pragma solidity ^0.8.13;
 import {Test, console} from "forge-std/Test.sol";
 import {ArraySummationFactory} from "../../src/examples/array-summation/ArraySummationFactory.sol";
 import {ArraySummation} from "../../src/examples/array-summation/ArraySummation.sol";
+import {IGasKillerServiceManager} from "../../src/interface/IGasKillerServiceManager.sol";
 
 /// @title FactoryIntegrationTest
 /// @notice Integration tests demonstrating real-world usage of the factory

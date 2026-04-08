@@ -54,23 +54,23 @@ contract ArraySummationFactory {
     }
 
     /// @notice Deploy a new ArraySummation contract
-    /// @param _avsAddress The AVS service manager address for the new contract
+    /// @param _avsServiceManager The AVS service manager contract for the new contract
     /// @param _blsSigChecker The BLS signature checker address for the new contract
     /// @param _arraySize The size of the array to initialize
     /// @param _maxValue The maximum value for array elements
     /// @param _seed The seed for array initialization
     /// @return contractAddress The address of the deployed contract
     function deployArraySummation(
-        address _avsAddress,
+        address _avsServiceManager,
         address _blsSigChecker,
         uint256 _arraySize,
         uint256 _maxValue,
         uint256 _seed
     ) external returns (address contractAddress) {
-        require(_avsAddress != address(0), "Invalid AVS address");
+        require(_avsServiceManager != address(0), "Invalid AVS address");
 
         // Deploy the new contract
-        ArraySummation newContract = new ArraySummation(_avsAddress, _blsSigChecker, _arraySize, _maxValue, _seed);
+        ArraySummation newContract = new ArraySummation(_avsServiceManager, _blsSigChecker, _arraySize, _maxValue, _seed);
         contractAddress = address(newContract);
 
         // Track the deployment
@@ -79,7 +79,7 @@ contract ArraySummationFactory {
         isDeployedContract[contractAddress] = true;
 
         contractInfo[contractAddress] = ContractInfo({
-            avsAddress: _avsAddress,
+            avsAddress: address(_avsServiceManager),
             blsSigChecker: _blsSigChecker,
             arraySize: _arraySize,
             maxValue: _maxValue,
@@ -89,7 +89,7 @@ contract ArraySummationFactory {
         });
 
         emit ArraySummationDeployed(
-            contractAddress, _avsAddress, _blsSigChecker, _arraySize, _maxValue, _seed, deploymentIndex
+            contractAddress, address(_avsServiceManager), _blsSigChecker, _arraySize, _maxValue, _seed, deploymentIndex
         );
     }
 
