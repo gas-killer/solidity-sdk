@@ -507,6 +507,22 @@ interface IERC20 {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
 }
 
+// src/interface/IGasKillerServiceManager.sol
+
+/// @title IGasKillerServiceManager
+/// @notice GasKiller-specific interface exposing quorum threshold and block staleness constants
+/// @dev Implemented by GasKillerServiceManagerWrapper; read by GasKillerSDK at runtime
+interface IGasKillerServiceManager {
+    /// @notice Numerator used when computing the quorum threshold
+    function QUORUM_THRESHOLD() external view returns (uint256);
+
+    /// @notice Denominator used when computing the quorum threshold (representing the full operator count)
+    function THRESHOLD_DENOMINATOR() external view returns (uint256);
+
+    /// @notice Maximum number of blocks a reference block may lag behind the current block
+    function BLOCK_STALE_MEASURE() external view returns (uint256);
+}
+
 // lib/eigenlayer-middleware/src/interfaces/IIndexRegistry.sol
 
 interface IIndexRegistryErrors {
@@ -5499,28 +5515,19 @@ interface IGasKillerSDK is IERC165 {
 abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     /// @custom:storage-location erc7201:gaskiller.GasKillerSDK.storage
     struct GasKillerSDKStorage {
-        /// @notice Namespace derived from the AVS address; used to scope this contract within the AVS
+        /// @notice Namespace derived from the AVS service manager address; used to scope this contract within the AVS
         bytes namespace;
-        /// @notice The AVS service manager address
-        address avsAddress;
+        /// @notice The AVS service manager contract
+        IGasKillerServiceManager avsServiceManager;
         /// @notice The BLS signature checker contract used to verify operator signatures
         IBLSSignatureChecker blsSignatureChecker;
-        /// @notice Maximum number of blocks a reference block may lag behind the current block
+        /// @notice Maximum number of blocks a reference block may lag behind the current block; 0 defers to avsServiceManager.BLOCK_STALE_MEASURE()
         uint256 blockStaleMeasure;
     }
 
     // keccak256(abi.encode(uint256(keccak256("gaskiller.GasKillerSDK.storage")) - 1)) & ~bytes32(uint256(0xff));
     bytes32 private constant GAS_KILLER_SDK_STORAGE_LOCATION =
         0x321ebf629ed2e1e368f0890e8fdd95cf9a2ae5961b66a1805f0b2ec84e21d000;
-
-    /// @notice Denominator used when evaluating stake percentage thresholds (representing 100%)
-    uint8 public constant THRESHOLD_DENOMINATOR = 100;
-
-    /// @notice Minimum percentage of quorum stake that must have signed to approve a state update (QUORUM_THRESHOLD/THRESHOLD_DENOMINATOR)
-    uint8 public constant QUORUM_THRESHOLD = 66;
-
-    /// @notice Default maximum age (in blocks) a reference block is considered valid when none is configured
-    uint256 private constant DEFAULT_BLOCK_STALE_MEASURE = 300;
 
     /// @notice Verify BLS quorum signatures and apply the encoded state updates
     /// @param msgHash The hash of the message to verify
@@ -5554,11 +5561,13 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         (IBLSSignatureCheckerTypes.QuorumStakeTotals memory stakeTotals,) = $.blsSignatureChecker
             .checkSignatures(msgHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
 
-        // Check that signatories own at least 66% of each quorum
+        // Check that signatories meet the quorum threshold defined by the service manager
+        uint256 quorumThreshold = $.avsServiceManager.QUORUM_THRESHOLD();
+        uint256 thresholdDenominator = $.avsServiceManager.THRESHOLD_DENOMINATOR();
         for (uint256 i = 0; i < quorumNumbers.length; i++) {
             require(
-                stakeTotals.signedStakeForQuorum[i] * THRESHOLD_DENOMINATOR
-                    >= stakeTotals.totalStakeForQuorum[i] * QUORUM_THRESHOLD,
+                stakeTotals.signedStakeForQuorum[i] * thresholdDenominator
+                    >= stakeTotals.totalStakeForQuorum[i] * quorumThreshold,
                 InsufficientQuorumThreshold()
             );
         }
@@ -5588,10 +5597,10 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
     }
 
-    /// @notice Return the configured AVS service manager address
-    /// @return The AVS address
-    function avsAddress() external view returns (address) {
-        return _getGasKillerSDKStorage().avsAddress;
+    /// @notice Return the configured AVS service manager contract
+    /// @return The AVS service manager
+    function avsServiceManager() external view returns (address) {
+        return address(_getGasKillerSDKStorage().avsServiceManager);
     }
 
     /// @notice Return the configured BLS signature checker address
@@ -5619,13 +5628,13 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         StateChangeHandlerLib._runStateUpdates(types, args);
     }
 
-    /// @notice Set the AVS address and derive the namespace from it
-    /// @dev The namespace is `abi.encodePacked(avsAddress, "gaskiller")`
-    /// @param _avsAddress The new AVS service manager address
-    function _setAvsAddress(address _avsAddress) internal {
+    /// @notice Set the AVS service manager and derive the namespace from its address
+    /// @dev The namespace is `abi.encodePacked(address(avsServiceManager), "gaskiller")`
+    /// @param _avsServiceManager The new AVS service manager contract
+    function _setAvsServiceManager(address _avsServiceManager) internal {
         GasKillerSDKStorage storage $ = _getGasKillerSDKStorage();
-        $.avsAddress = _avsAddress;
-        $.namespace = abi.encodePacked($.avsAddress, "gaskiller");
+        $.avsServiceManager = IGasKillerServiceManager(_avsServiceManager);
+        $.namespace = abi.encodePacked(_avsServiceManager, "gaskiller");
     }
 
     /// @notice Set the BLS signature checker contract
@@ -5641,11 +5650,12 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         _getGasKillerSDKStorage().blockStaleMeasure = _blockStaleMeasure;
     }
 
-    /// @notice Return the block stale measure, falling back to the default when unset
+    /// @notice Return the block stale measure, falling back to the service manager's value when unset
     /// @return The effective block stale measure
     function _getBlockStaleMeasure() internal view returns (uint256) {
-        uint256 value = _getGasKillerSDKStorage().blockStaleMeasure;
-        return value == 0 ? DEFAULT_BLOCK_STALE_MEASURE : value;
+        GasKillerSDKStorage storage $ = _getGasKillerSDKStorage();
+        uint256 value = $.blockStaleMeasure;
+        return value == 0 ? $.avsServiceManager.BLOCK_STALE_MEASURE() : value;
     }
 
     /// @notice Load the ERC-7201 storage struct for GasKillerSDK
