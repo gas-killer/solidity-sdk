@@ -6,6 +6,7 @@ import {IERC165} from "forge-std/interfaces/IERC165.sol";
 
 import "../src/GasKillerSDK.sol";
 import "./exposed/GasKillerSDKExposed.sol";
+import "./mocks/MockGasKillerServiceManager.sol";
 import {StateUpdateType} from "../src/StateChangeHandlerLib.sol";
 import {StateChangeHandlerLib} from "../src/StateChangeHandlerLib.sol";
 
@@ -13,7 +14,8 @@ contract GasKillerSDKTest is Test {
     GasKillerSDKExposed public sdk;
 
     function setUp() public {
-        sdk = new GasKillerSDKExposed(makeAddr("AVS"), makeAddr("BLS_SIG_CHECKER"));
+        MockGasKillerServiceManager avsServiceManager = new MockGasKillerServiceManager();
+        sdk = new GasKillerSDKExposed(address(avsServiceManager), makeAddr("BLS_SIG_CHECKER"));
     }
 
     function test_stateChangeHandlerExternal_Store() public {

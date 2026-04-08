@@ -3,6 +3,7 @@ pragma solidity ^0.8.13;
 
 import {Script, console} from "forge-std/Script.sol";
 import {ArraySummation} from "../src/examples/array-summation/ArraySummation.sol";
+import {IGasKillerServiceManager} from "../src/interface/IGasKillerServiceManager.sol";
 
 contract ArraySummationScript is Script {
     ArraySummation public arraySummation;
