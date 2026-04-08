@@ -70,7 +70,8 @@ contract ArraySummationFactory {
         require(_avsServiceManager != address(0), "Invalid AVS address");
 
         // Deploy the new contract
-        ArraySummation newContract = new ArraySummation(_avsServiceManager, _blsSigChecker, _arraySize, _maxValue, _seed);
+        ArraySummation newContract =
+            new ArraySummation(_avsServiceManager, _blsSigChecker, _arraySize, _maxValue, _seed);
         contractAddress = address(newContract);
 
         // Track the deployment

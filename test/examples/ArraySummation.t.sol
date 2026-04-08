@@ -184,8 +184,10 @@ contract ArraySummationTest is Test {
     }
 
     function testDeterministicInitialization() public {
-        ArraySummation array1 = new ArraySummation(address(avsServiceManager), blsSignatureChecker, arraySize, maxValue, 42);
-        ArraySummation array2 = new ArraySummation(address(avsServiceManager), blsSignatureChecker, arraySize, maxValue, 42);
+        ArraySummation array1 =
+            new ArraySummation(address(avsServiceManager), blsSignatureChecker, arraySize, maxValue, 42);
+        ArraySummation array2 =
+            new ArraySummation(address(avsServiceManager), blsSignatureChecker, arraySize, maxValue, 42);
 
         uint256[] memory arr1 = array1.getFullArray();
         uint256[] memory arr2 = array2.getFullArray();
