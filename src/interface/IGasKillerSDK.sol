@@ -47,5 +47,5 @@ interface IGasKillerSDK is IERC165 {
         uint256 transitionIndex,
         bytes4 targetFunction,
         IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
-    ) external;
+    ) external payable;
 }

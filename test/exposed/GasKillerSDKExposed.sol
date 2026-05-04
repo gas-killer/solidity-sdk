@@ -9,7 +9,7 @@ contract GasKillerSDKExposed is GasKillerSDK {
         _setBlsSignatureChecker(_blsSignatureChecker);
     }
 
-    function stateChangeHandlerExternal(bytes calldata storageUpdates) external {
+    function stateChangeHandlerExternal(bytes calldata storageUpdates) external payable {
         super._stateChangeHandler(storageUpdates);
     }
 }

@@ -56,7 +56,7 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         uint256 transitionIndex,
         bytes4 targetFunction,
         IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
-    ) external trackState {
+    ) external payable trackState {
         GasKillerSDKStorage storage $ = _getGasKillerSDKStorage();
 
         // Check block number validity

@@ -45,6 +45,23 @@ contract GasKillerSDKTest is Test {
         assertEq(target.value(), 42);
     }
 
+    function test_stateChangeHandlerExternal_Call_ForwardsValue() public {
+        SimpleTarget target = new SimpleTarget();
+        uint256 forwarded = 0.13 ether;
+        vm.deal(address(sdk), forwarded);
+
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        types[0] = StateUpdateType.CALL;
+
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encode(address(target), forwarded, abi.encodeWithSignature("setValue(uint256)", 7));
+
+        sdk.stateChangeHandlerExternal{value: forwarded}(abi.encode(types, args));
+
+        assertEq(address(target).balance, forwarded);
+        assertEq(target.value(), 7);
+    }
+
     function test_stateChangeHandlerExternal_Call_RevertingContext() public {
         SimpleTarget target = new SimpleTarget();
 
@@ -342,7 +359,7 @@ contract GasKillerSDKTest is Test {
 contract SimpleTarget {
     uint256 public value;
 
-    function setValue(uint256 _value) public {
+    function setValue(uint256 _value) public payable {
         value = _value;
     }
 
