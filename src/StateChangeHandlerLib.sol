@@ -2,7 +2,7 @@
 pragma solidity ^0.8.0;
 
 /// @notice Discriminator enum for the type of state update operation to execute
-/// @dev Each variant maps to a different EVM operation: storage writes, external calls, or log emissions
+/// @dev Each variant maps to a different EVM operation: storage writes, external calls, log emissions, or contract deployment
 enum StateUpdateType {
     /// @notice Write a 32-byte value directly to a storage slot
     STORE,
@@ -17,7 +17,11 @@ enum StateUpdateType {
     /// @notice Emit a log with three indexed topics
     LOG3,
     /// @notice Emit a log with four indexed topics
-    LOG4
+    LOG4,
+    /// @notice Deploy a contract using CREATE (nonce-derived address)
+    CREATE,
+    /// @notice Deploy a contract using CREATE2 (salt-derived deterministic address)
+    CREATE2
 }
 
 /// @title StateChangeHandlerLib
@@ -29,6 +33,8 @@ library StateChangeHandlerLib {
     ///      - STORE: Direct storage writes using assembly
     ///      - CALL: External contract calls with value transfer
     ///      - LOG0-LOG4: Event emission with 0-4 indexed topics
+    ///      - CREATE: Contract deployment via CREATE opcode
+    ///      - CREATE2: Deterministic contract deployment via CREATE2 opcode
     /// @param types Array of StateUpdateType enums indicating the type of each state update operation
     /// @param args Array of ABI-encoded arguments corresponding to each operation type
     /// @dev types and args arrays must be equal length, with args[i] containing the encoded parameters for types[i]
@@ -91,6 +97,20 @@ library StateChangeHandlerLib {
                 assembly {
                     log4(add(data, 0x20), mload(data), topic1, topic2, topic3, topic4)
                 }
+            } else if (stateUpdateType == StateUpdateType.CREATE) {
+                (bytes memory initcode) = abi.decode(arg, (bytes));
+                address deployed;
+                assembly {
+                    deployed := create(0, add(initcode, 0x20), mload(initcode))
+                }
+                require(deployed != address(0), DeploymentFailed());
+            } else if (stateUpdateType == StateUpdateType.CREATE2) {
+                (bytes32 salt, bytes memory initcode) = abi.decode(arg, (bytes32, bytes));
+                address deployed;
+                assembly {
+                    deployed := create2(0, add(initcode, 0x20), mload(initcode), salt)
+                }
+                require(deployed != address(0), DeploymentFailed());
             }
         }
     }
@@ -104,4 +124,7 @@ library StateChangeHandlerLib {
     /// @param revertData The raw revert data returned by the failed call
     /// @param callargs The calldata that was passed to the failed call
     error RevertingContext(uint256 index, address target, bytes revertData, bytes callargs);
+
+    /// @notice Thrown when a CREATE or CREATE2 operation returns address(0)
+    error DeploymentFailed();
 }
