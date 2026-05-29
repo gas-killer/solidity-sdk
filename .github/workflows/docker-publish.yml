@@ -1,8 +1,9 @@
 name: Publish deploy image
 
-# Builds and pushes the solidity-sdk deploy image (forge + contracts) to GHCR.
-# The service chart's deploy-target job uses it to deploy a demo target wired to a
-# real BLSSignatureChecker.
+# Builds the solidity-sdk deploy image (forge + contracts) and pushes it to GHCR on
+# push/tag/manual events; pull requests build only (no push), so forked PRs with a
+# read-only GITHUB_TOKEN still validate. The service chart's deploy-target job uses the
+# image to deploy a demo target wired to a real BLSSignatureChecker.
 on:
   push:
     branches:
@@ -36,7 +37,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Authenticate only when we intend to push (push/tag/manual). PR builds are
+      # build-only, so forked PRs (read-only GITHUB_TOKEN) won't fail on login/push.
       - name: Log in to GHCR
+        if: ${{ github.event_name != 'pull_request' }}
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -62,6 +66,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          # Build-only on PRs; push on push/tag/manual events.
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
