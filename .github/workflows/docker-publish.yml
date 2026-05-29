@@ -2,11 +2,19 @@ name: Publish deploy image
 
 # Builds and pushes the solidity-sdk deploy image (forge + contracts) to GHCR.
 # The service chart's deploy-target job uses it to deploy a demo target wired to a
-# real BLSSignatureChecker. Scaffolded for review — adjust triggers as needed.
+# real BLSSignatureChecker.
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - dev
+      - staging
     tags: ["v*"]
+  pull_request:
+    branches:
+      - main
+      - dev
+      - staging
   workflow_dispatch:
 
 env:
@@ -35,6 +43,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Tag with: sha (always), branch name (push to main/dev/staging), pr-<n> (PRs),
+      # and the git tag (v*). `latest` is applied ONLY on a push to the default branch
+      # (main) via is_default_branch — never on PRs or dev/staging pushes.
       - name: Derive image tags
         id: meta
         uses: docker/metadata-action@v5
@@ -42,6 +53,8 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=sha
+            type=ref,event=branch
+            type=ref,event=pr
             type=ref,event=tag
             type=raw,value=latest,enable={{is_default_branch}}
 
