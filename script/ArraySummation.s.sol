@@ -23,12 +23,15 @@ contract ArraySummationScript is Script {
     function setUp() public {}
 
     function run() public {
-        address avsAddress = vm.envOr("AVS_ADDRESS", address(0x1234));
+        address avsAddress = vm.envOr("AVS_ADDRESS", address(0));
         address sigChecker = vm.envOr("SIG_CHECKER_ADDRESS", address(0));
         address registryCoordinator = vm.envOr("REGISTRY_COORDINATOR_ADDRESS", address(0));
         uint256 arraySize = vm.envOr("ARRAY_SIZE", uint256(1000));
         uint256 maxValue = vm.envOr("MAX_VALUE", uint256(10000));
         uint256 seed = vm.envOr("ARRAY_SEED", uint256(block.timestamp));
+
+        // The AVS address scopes the target's namespace and must be set explicitly.
+        require(avsAddress != address(0), "AVS_ADDRESS must be set");
 
         vm.startBroadcast();
 
