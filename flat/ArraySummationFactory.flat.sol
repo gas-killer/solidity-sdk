@@ -2291,7 +2291,7 @@ enum StateUpdateType {
 
 /// @title StateChangeHandlerLib
 /// @notice Library for decoding and executing batched state update operations
-/// @dev Processes ABI-encoded arrays of typed state updates; supports STORE, CALL, and LOG0-LOG4
+/// @dev Processes ABI-encoded arrays of typed state updates; supports STORE, CALL, LOG0-LOG4, CREATE, and CREATE2
 library StateChangeHandlerLib {
     /// @notice Decodes and executes a series of state updates
     /// @dev This function processes an array of state updates, executing them in sequence. Each update can be one of:
