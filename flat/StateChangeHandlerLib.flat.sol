@@ -4,7 +4,7 @@ pragma solidity ^0.8.0;
 // src/StateChangeHandlerLib.sol
 
 /// @notice Discriminator enum for the type of state update operation to execute
-/// @dev Each variant maps to a different EVM operation: storage writes, external calls, or log emissions
+/// @dev Each variant maps to a different EVM operation: storage writes, external calls, log emissions, or contract deployment
 enum StateUpdateType {
     /// @notice Write a 32-byte value directly to a storage slot
     STORE,
@@ -19,18 +19,24 @@ enum StateUpdateType {
     /// @notice Emit a log with three indexed topics
     LOG3,
     /// @notice Emit a log with four indexed topics
-    LOG4
+    LOG4,
+    /// @notice Deploy a contract using CREATE (nonce-derived address)
+    CREATE,
+    /// @notice Deploy a contract using CREATE2 (salt-derived deterministic address)
+    CREATE2
 }
 
 /// @title StateChangeHandlerLib
 /// @notice Library for decoding and executing batched state update operations
-/// @dev Processes ABI-encoded arrays of typed state updates; supports STORE, CALL, and LOG0-LOG4
+/// @dev Processes ABI-encoded arrays of typed state updates; supports STORE, CALL, LOG0-LOG4, CREATE, and CREATE2
 library StateChangeHandlerLib {
     /// @notice Decodes and executes a series of state updates
     /// @dev This function processes an array of state updates, executing them in sequence. Each update can be one of:
     ///      - STORE: Direct storage writes using assembly
     ///      - CALL: External contract calls with value transfer
     ///      - LOG0-LOG4: Event emission with 0-4 indexed topics
+    ///      - CREATE: Contract deployment via CREATE opcode
+    ///      - CREATE2: Deterministic contract deployment via CREATE2 opcode
     /// @param types Array of StateUpdateType enums indicating the type of each state update operation
     /// @param args Array of ABI-encoded arguments corresponding to each operation type
     /// @dev types and args arrays must be equal length, with args[i] containing the encoded parameters for types[i]
@@ -93,6 +99,20 @@ library StateChangeHandlerLib {
                 assembly {
                     log4(add(data, 0x20), mload(data), topic1, topic2, topic3, topic4)
                 }
+            } else if (stateUpdateType == StateUpdateType.CREATE) {
+                (uint256 value, bytes memory initcode) = abi.decode(arg, (uint256, bytes));
+                address deployed;
+                assembly {
+                    deployed := create(value, add(initcode, 0x20), mload(initcode))
+                }
+                require(deployed != address(0), DeploymentFailed());
+            } else if (stateUpdateType == StateUpdateType.CREATE2) {
+                (bytes32 salt, uint256 value, bytes memory initcode) = abi.decode(arg, (bytes32, uint256, bytes));
+                address deployed;
+                assembly {
+                    deployed := create2(value, add(initcode, 0x20), mload(initcode), salt)
+                }
+                require(deployed != address(0), DeploymentFailed());
             }
         }
     }
@@ -106,4 +126,7 @@ library StateChangeHandlerLib {
     /// @param revertData The raw revert data returned by the failed call
     /// @param callargs The calldata that was passed to the failed call
     error RevertingContext(uint256 index, address target, bytes revertData, bytes callargs);
+
+    /// @notice Thrown when a CREATE or CREATE2 operation returns address(0)
+    error DeploymentFailed();
 }

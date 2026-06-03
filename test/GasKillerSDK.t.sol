@@ -93,6 +93,107 @@ contract GasKillerSDKTest is Test {
         sdk.stateChangeHandlerExternal(abi.encode(types, args));
     }
 
+    function test_stateChangeHandlerExternal_Create() public {
+        bytes memory initcode = type(Deployable).creationCode;
+
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        types[0] = StateUpdateType.CREATE;
+
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encode(uint256(0), initcode);
+
+        // CREATE derives the address from (deployer, nonce); the deployer is the sdk.
+        address predicted = vm.computeCreateAddress(address(sdk), vm.getNonce(address(sdk)));
+
+        sdk.stateChangeHandlerExternal(abi.encode(types, args));
+
+        assertGt(predicted.code.length, 0, "no code at predicted CREATE address");
+        assertEq(Deployable(predicted).x(), 42, "constructor did not run");
+    }
+
+    function test_stateChangeHandlerExternal_Create2() public {
+        bytes memory initcode = type(Deployable).creationCode;
+        bytes32 salt = keccak256("gas.killer.create2.salt");
+
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        types[0] = StateUpdateType.CREATE2;
+
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encode(salt, uint256(0), initcode);
+
+        // CREATE2 is deterministic: keccak256(0xff ++ deployer ++ salt ++ keccak256(initcode)).
+        address predicted = vm.computeCreate2Address(salt, keccak256(initcode), address(sdk));
+
+        sdk.stateChangeHandlerExternal(abi.encode(types, args));
+
+        assertGt(predicted.code.length, 0, "no code at predicted CREATE2 address");
+        assertEq(Deployable(predicted).x(), 42, "constructor did not run");
+    }
+
+    function test_stateChangeHandlerExternal_Create_ForwardsValue() public {
+        bytes memory initcode = type(Deployable).creationCode;
+        uint256 endowment = 1 ether;
+        vm.deal(address(sdk), endowment);
+
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        types[0] = StateUpdateType.CREATE;
+
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encode(endowment, initcode);
+
+        address predicted = vm.computeCreateAddress(address(sdk), vm.getNonce(address(sdk)));
+
+        sdk.stateChangeHandlerExternal(abi.encode(types, args));
+
+        assertEq(predicted.balance, endowment, "endowment not forwarded via CREATE");
+    }
+
+    function test_stateChangeHandlerExternal_Create2_ForwardsValue() public {
+        bytes memory initcode = type(Deployable).creationCode;
+        bytes32 salt = keccak256("gas.killer.create2.valued");
+        uint256 endowment = 1 ether;
+        vm.deal(address(sdk), endowment);
+
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        types[0] = StateUpdateType.CREATE2;
+
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encode(salt, endowment, initcode);
+
+        address predicted = vm.computeCreate2Address(salt, keccak256(initcode), address(sdk));
+
+        sdk.stateChangeHandlerExternal(abi.encode(types, args));
+
+        assertEq(predicted.balance, endowment, "endowment not forwarded via CREATE2");
+    }
+
+    function test_stateChangeHandlerExternal_Create_RevertsOnFailedDeployment() public {
+        // Initcode whose constructor reverts -> CREATE returns address(0).
+        bytes memory initcode = type(RevertingDeploy).creationCode;
+
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        types[0] = StateUpdateType.CREATE;
+
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encode(uint256(0), initcode);
+
+        vm.expectRevert(StateChangeHandlerLib.DeploymentFailed.selector);
+        sdk.stateChangeHandlerExternal(abi.encode(types, args));
+    }
+
+    function test_stateChangeHandlerExternal_Create2_RevertsOnFailedDeployment() public {
+        bytes memory initcode = type(RevertingDeploy).creationCode;
+
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        types[0] = StateUpdateType.CREATE2;
+
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encode(keccak256("revert.salt"), uint256(0), initcode);
+
+        vm.expectRevert(StateChangeHandlerLib.DeploymentFailed.selector);
+        sdk.stateChangeHandlerExternal(abi.encode(types, args));
+    }
+
     function test_ERC165_supportsInterface() public {
         /// Test that the contract supports IERC165
         assertTrue(sdk.supportsInterface(type(IERC165).interfaceId));
@@ -121,5 +222,24 @@ contract SimpleTarget {
             mstore(0, _msg)
             revert(0, 8)
         }
+    }
+}
+
+/// @dev Minimal contract deployed by the CREATE/CREATE2 tests. The constructor
+/// is payable so it can receive an endowment, and sets state so tests can
+/// confirm the constructor actually ran at the deployed address.
+contract Deployable {
+    uint256 public x;
+
+    constructor() payable {
+        x = 42;
+    }
+}
+
+/// @dev Initcode whose constructor always reverts, so CREATE/CREATE2 return
+/// address(0) and the handler raises DeploymentFailed.
+contract RevertingDeploy {
+    constructor() {
+        revert("no deploy");
     }
 }
