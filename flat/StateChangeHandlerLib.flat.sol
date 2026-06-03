@@ -100,17 +100,17 @@ library StateChangeHandlerLib {
                     log4(add(data, 0x20), mload(data), topic1, topic2, topic3, topic4)
                 }
             } else if (stateUpdateType == StateUpdateType.CREATE) {
-                (bytes memory initcode) = abi.decode(arg, (bytes));
+                (uint256 value, bytes memory initcode) = abi.decode(arg, (uint256, bytes));
                 address deployed;
                 assembly {
-                    deployed := create(0, add(initcode, 0x20), mload(initcode))
+                    deployed := create(value, add(initcode, 0x20), mload(initcode))
                 }
                 require(deployed != address(0), DeploymentFailed());
             } else if (stateUpdateType == StateUpdateType.CREATE2) {
-                (bytes32 salt, bytes memory initcode) = abi.decode(arg, (bytes32, bytes));
+                (bytes32 salt, uint256 value, bytes memory initcode) = abi.decode(arg, (bytes32, uint256, bytes));
                 address deployed;
                 assembly {
-                    deployed := create2(0, add(initcode, 0x20), mload(initcode), salt)
+                    deployed := create2(value, add(initcode, 0x20), mload(initcode), salt)
                 }
                 require(deployed != address(0), DeploymentFailed());
             }
