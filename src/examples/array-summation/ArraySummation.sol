@@ -61,8 +61,12 @@ contract ArraySummation is GasKillerSDK {
         }
 
         uint256 hashedSeed = uint256(keccak256(abi.encode(_seed)));
-        for (uint256 i = 0; i < arraySize; i++) {
+        for (uint256 i = 0; i < arraySize;) {
             values.push(uint256(keccak256(abi.encode(hashedSeed, i))) % maxValue);
+            // i is bounded by `arraySize`, so it can never overflow
+            unchecked {
+                ++i;
+            }
         }
 
         emit ArrayInitialized(arraySize);
@@ -82,14 +86,25 @@ contract ArraySummation is GasKillerSDK {
 
         if (indexes.length == 0) {
             // If no indexes provided, sum all elements
-            for (uint256 i = 0; i < values.length; i++) {
+            uint256 length = values.length;
+            for (uint256 i = 0; i < length;) {
                 total += values[i];
+                // i is bounded by `length`, so it can never overflow
+                unchecked {
+                    ++i;
+                }
             }
         } else {
             // Sum only specified indexes
-            for (uint256 i = 0; i < indexes.length; i++) {
-                require(indexes[i] < values.length, "Index out of bounds");
+            uint256 valuesLength = values.length;
+            uint256 indexesLength = indexes.length;
+            for (uint256 i = 0; i < indexesLength;) {
+                require(indexes[i] < valuesLength, "Index out of bounds");
                 total += values[indexes[i]];
+                // i is bounded by `indexesLength`, so it can never overflow
+                unchecked {
+                    ++i;
+                }
             }
         }
 

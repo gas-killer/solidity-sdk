@@ -39,8 +39,9 @@ library StateChangeHandlerLib {
     /// @param args Array of ABI-encoded arguments corresponding to each operation type
     /// @dev types and args arrays must be equal length, with args[i] containing the encoded parameters for types[i]
     function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args) internal {
-        require(types.length == args.length, InvalidArguments());
-        for (uint256 i = 0; i < types.length; i++) {
+        uint256 length = types.length;
+        require(length == args.length, InvalidArguments());
+        for (uint256 i = 0; i < length;) {
             StateUpdateType stateUpdateType = types[i];
             bytes memory arg = args[i];
 
@@ -52,10 +53,9 @@ library StateChangeHandlerLib {
             } else if (stateUpdateType == StateUpdateType.CALL) {
                 (address target, uint256 value, bytes memory callargs) = abi.decode(arg, (address, uint256, bytes));
                 bool success;
-                // TOOD: might need better gas handling
-                uint256 callgas = gasleft();
                 assembly {
-                    success := call(callgas, target, value, add(callargs, 0x20), mload(callargs), 0, 0)
+                    // Forward all remaining gas via gas() directly (avoids caching gasleft() in a local)
+                    success := call(gas(), target, value, add(callargs, 0x20), mload(callargs), 0, 0)
                 }
                 // TODO: this section needs heavy testing
                 if (!success) {
@@ -70,32 +70,51 @@ library StateChangeHandlerLib {
                     revert RevertingContext(i, target, revertData, callargs);
                 }
             } else if (stateUpdateType == StateUpdateType.LOG0) {
-                // NOTE: For consistency I decode an abi encoding of bytes from bytes, but technically it's redundant
-                (bytes memory data) = abi.decode(arg, (bytes));
+                // Log directly out of the encoded `arg` buffer instead of abi.decoding it into a fresh
+                // `bytes` (which allocates + copies the payload). `base` is the start of the encoded
+                // tuple; its first head word is the offset to the `data` tail (length word), and each
+                // bytes32 topic lives inline in the head at base + 0x20*k.
                 assembly {
-                    log0(add(data, 0x20), mload(data))
+                    let base := add(arg, 0x20)
+                    let dataPtr := add(base, mload(base))
+                    log0(add(dataPtr, 0x20), mload(dataPtr))
                 }
             } else if (stateUpdateType == StateUpdateType.LOG1) {
-                (bytes memory data, bytes32 topic1) = abi.decode(arg, (bytes, bytes32));
                 assembly {
-                    log1(add(data, 0x20), mload(data), topic1)
+                    let base := add(arg, 0x20)
+                    let dataPtr := add(base, mload(base))
+                    log1(add(dataPtr, 0x20), mload(dataPtr), mload(add(base, 0x20)))
                 }
             } else if (stateUpdateType == StateUpdateType.LOG2) {
-                (bytes memory data, bytes32 topic1, bytes32 topic2) = abi.decode(arg, (bytes, bytes32, bytes32));
                 assembly {
-                    log2(add(data, 0x20), mload(data), topic1, topic2)
+                    let base := add(arg, 0x20)
+                    let dataPtr := add(base, mload(base))
+                    log2(add(dataPtr, 0x20), mload(dataPtr), mload(add(base, 0x20)), mload(add(base, 0x40)))
                 }
             } else if (stateUpdateType == StateUpdateType.LOG3) {
-                (bytes memory data, bytes32 topic1, bytes32 topic2, bytes32 topic3) =
-                    abi.decode(arg, (bytes, bytes32, bytes32, bytes32));
                 assembly {
-                    log3(add(data, 0x20), mload(data), topic1, topic2, topic3)
+                    let base := add(arg, 0x20)
+                    let dataPtr := add(base, mload(base))
+                    log3(
+                        add(dataPtr, 0x20),
+                        mload(dataPtr),
+                        mload(add(base, 0x20)),
+                        mload(add(base, 0x40)),
+                        mload(add(base, 0x60))
+                    )
                 }
             } else if (stateUpdateType == StateUpdateType.LOG4) {
-                (bytes memory data, bytes32 topic1, bytes32 topic2, bytes32 topic3, bytes32 topic4) =
-                    abi.decode(arg, (bytes, bytes32, bytes32, bytes32, bytes32));
                 assembly {
-                    log4(add(data, 0x20), mload(data), topic1, topic2, topic3, topic4)
+                    let base := add(arg, 0x20)
+                    let dataPtr := add(base, mload(base))
+                    log4(
+                        add(dataPtr, 0x20),
+                        mload(dataPtr),
+                        mload(add(base, 0x20)),
+                        mload(add(base, 0x40)),
+                        mload(add(base, 0x60)),
+                        mload(add(base, 0x80))
+                    )
                 }
             } else if (stateUpdateType == StateUpdateType.CREATE) {
                 (uint256 value, bytes memory initcode) = abi.decode(arg, (uint256, bytes));
@@ -111,6 +130,11 @@ library StateChangeHandlerLib {
                     deployed := create2(value, add(initcode, 0x20), mload(initcode), salt)
                 }
                 require(deployed != address(0), DeploymentFailed());
+            }
+
+            // i is bounded by `length`, so it can never overflow
+            unchecked {
+                ++i;
             }
         }
     }
