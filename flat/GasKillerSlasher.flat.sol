@@ -769,11 +769,7 @@ interface ISP1Verifier {
      * @param publicValues The public values from the proof
      * @param proofBytes The PLONK proof bytes
      */
-    function verifyProof(
-        bytes32 programVKey,
-        bytes calldata publicValues,
-        bytes calldata proofBytes
-    ) external view;
+    function verifyProof(bytes32 programVKey, bytes calldata publicValues, bytes calldata proofBytes) external view;
 }
 
 // lib/eigenlayer-middleware/lib/eigenlayer-contracts/src/contracts/interfaces/ISemVerMixin.sol
@@ -5846,9 +5842,7 @@ contract GasKillerSlasher is IGasKillerSlasher, Ownable {
         _verifyAnchorHash(proven.anchorHash);
 
         // Fraud iff the proven storage updates differ from the signed ones.
-        require(
-            keccak256(proven.storageUpdates) != keccak256(commitment.storageUpdates), NoFraudDetected()
-        );
+        require(keccak256(proven.storageUpdates) != keccak256(commitment.storageUpdates), NoFraudDetected());
 
         _slashed[commitmentHash] = true;
 
@@ -5874,11 +5868,7 @@ contract GasKillerSlasher is IGasKillerSlasher, Ownable {
     }
 
     /// @inheritdoc IGasKillerSlasher
-    function getCommitmentTimestamp(address targetContract, bytes32 commitmentHash)
-        external
-        view
-        returns (uint256)
-    {
+    function getCommitmentTimestamp(address targetContract, bytes32 commitmentHash) external view returns (uint256) {
         return _commitmentTimestamp[targetContract][commitmentHash];
     }
 
@@ -5927,9 +5917,7 @@ contract GasKillerSlasher is IGasKillerSlasher, Ownable {
         require(proven.anchorHash == commitment.anchorHash, InputMismatch());
         require(proven.callerAddress == commitment.callerAddress, InputMismatch());
         require(proven.contractAddress == commitment.contractAddress, InputMismatch());
-        require(
-            keccak256(proven.contractCalldata) == keccak256(commitment.contractCalldata), InputMismatch()
-        );
+        require(keccak256(proven.contractCalldata) == keccak256(commitment.contractCalldata), InputMismatch());
     }
 
     /// @notice Verify an anchor block hash using the Helios light client
@@ -5964,8 +5952,8 @@ contract GasKillerSlasher is IGasKillerSlasher, Ownable {
         // Collect operator ids over all quorums, skipping non-signers and duplicates.
         uint256 totalOperators = 0;
         for (uint256 q = 0; q < quorumNumbers.length; q++) {
-            totalOperators +=
-                INDEX_REGISTRY.getOperatorListAtBlockNumber(uint8(quorumNumbers[q]), referenceBlockNumber).length;
+            totalOperators += INDEX_REGISTRY.getOperatorListAtBlockNumber(uint8(quorumNumbers[q]), referenceBlockNumber)
+            .length;
         }
 
         bytes32[] memory signerIds = new bytes32[](totalOperators);
