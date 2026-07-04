@@ -12,4 +12,8 @@ contract GasKillerSDKExposed is GasKillerSDK {
     function stateChangeHandlerExternal(bytes calldata storageUpdates) external {
         super._stateChangeHandler(storageUpdates);
     }
+
+    function setTrustedForwarderExternal(address forwarder, bool trusted) external {
+        _setTrustedForwarder(forwarder, trusted);
+    }
 }
