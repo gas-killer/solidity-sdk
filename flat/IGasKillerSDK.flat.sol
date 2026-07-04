@@ -5325,6 +5325,9 @@ interface IGasKillerSDK is IERC165 {
     /// @notice Thrown when signatories hold less than `QUORUM_THRESHOLD`% of stake for any quorum
     error InsufficientQuorumThreshold();
 
+    /// @notice Thrown when `quorumNumbers` is empty, which would skip the stake-threshold check
+    error EmptyQuorumNumbers();
+
     /// @notice Thrown when `referenceBlockNumber` is older than `blockStaleMeasure` blocks ago
     error StaleBlockNumber();
 

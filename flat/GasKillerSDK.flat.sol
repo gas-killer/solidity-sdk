@@ -507,6 +507,54 @@ interface IERC20 {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
 }
 
+// src/interface/IGasKillerForwardee.sol
+
+/// @title IGasKillerForwardee
+/// @notice Interface for GasKiller contracts that accept storage updates forwarded by a
+///         trusted peer as part of a multi-call bundle
+/// @dev In multi-call mode, a forwarder embeds the callee's sub-payload as an ordinary
+///      CALL update inside its own quorum-signed `storageUpdates` blob. The bundle root's
+///      BLS signature therefore transitively commits to every forwarded byte, including
+///      the callee's expected transition index. The callee authorizes the delivery via a
+///      per-contract trusted-forwarder allowlist.
+///
+///      This is intentionally a separate interface from `IGasKillerSDK` so that
+///      multi-call-capable contracts remain distinguishable on-chain from older
+///      deployments via ERC-165.
+interface IGasKillerForwardee {
+    /// @notice Thrown when `applyForwardedUpdates` is called by an address that is not an
+    ///         allowlisted forwarder
+    /// @param caller The unauthorized caller
+    error UntrustedForwarder(address caller);
+
+    /// @notice Thrown when a forwarded STORE operation targets a reserved slot
+    ///         (the state-transition counter or the SDK configuration slots)
+    /// @param index The zero-based position of the offending operation in the batch
+    /// @param slot The reserved storage slot that was targeted
+    error ReservedSlot(uint256 index, bytes32 slot);
+
+    /// @notice Emitted after a forwarded update batch has been applied
+    /// @param forwarder The trusted forwarder that delivered the updates
+    /// @param transitionIndex The transition index the batch was applied at
+    event ForwardedUpdatesApplied(address indexed forwarder, uint256 indexed transitionIndex);
+
+    /// @notice Apply storage updates forwarded by a trusted GasKiller peer
+    /// @dev Payable so a forwarding CALL update can carry the ETH the original call
+    ///      transferred. Reverts unless `msg.sender` is an allowlisted forwarder and
+    ///      `expectedTransitionIndex` matches this contract's pre-call transition count.
+    /// @param storageUpdates ABI-encoded `(StateUpdateType[], bytes[])` pair
+    /// @param expectedTransitionIndex The transition count this contract must have had
+    ///        immediately before this call
+    function applyForwardedUpdates(bytes calldata storageUpdates, uint256 expectedTransitionIndex)
+        external
+        payable;
+
+    /// @notice Query whether an address is an allowlisted forwarder
+    /// @param forwarder The address to query
+    /// @return `true` if `forwarder` may call `applyForwardedUpdates`
+    function isTrustedForwarder(address forwarder) external view returns (bool);
+}
+
 // lib/eigenlayer-middleware/src/interfaces/IIndexRegistry.sol
 
 interface IIndexRegistryErrors {
@@ -5489,6 +5537,9 @@ interface IGasKillerSDK is IERC165 {
     /// @notice Thrown when signatories hold less than `QUORUM_THRESHOLD`% of stake for any quorum
     error InsufficientQuorumThreshold();
 
+    /// @notice Thrown when `quorumNumbers` is empty, which would skip the stake-threshold check
+    error EmptyQuorumNumbers();
+
     /// @notice Thrown when `referenceBlockNumber` is older than `blockStaleMeasure` blocks ago
     error StaleBlockNumber();
 
@@ -5519,7 +5570,7 @@ interface IGasKillerSDK is IERC165 {
 /// @title GasKillerSDK
 /// @notice Base SDK for implementing Gas Killer functionality in contracts
 /// @dev Inherit from this contract to add Gas Killer capabilities to your contract
-abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
+abstract contract GasKillerSDK is StateTracker, IGasKillerSDK, IGasKillerForwardee {
     /// @custom:storage-location erc7201:gaskiller.GasKillerSDK.storage
     struct GasKillerSDKStorage {
         /// @notice Namespace derived from the AVS address; used to scope this contract within the AVS
@@ -5530,11 +5581,18 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         IBLSSignatureChecker blsSignatureChecker;
         /// @notice Maximum number of blocks a reference block may lag behind the current block
         uint256 blockStaleMeasure;
+        /// @notice Peers allowed to deliver forwarded updates via `applyForwardedUpdates`
+        /// @dev Append-only struct: new fields must be added after this one, never reordered
+        mapping(address => bool) trustedForwarders;
     }
 
     // keccak256(abi.encode(uint256(keccak256("gaskiller.GasKillerSDK.storage")) - 1)) & ~bytes32(uint256(0xff));
     bytes32 private constant GAS_KILLER_SDK_STORAGE_LOCATION =
         0x321ebf629ed2e1e368f0890e8fdd95cf9a2ae5961b66a1805f0b2ec84e21d000;
+
+    /// @notice Number of fixed storage slots occupied by `GasKillerSDKStorage`; these are
+    ///         reserved and may not be written by forwarded STORE operations
+    uint256 private constant GAS_KILLER_SDK_STORAGE_SLOT_COUNT = 5;
 
     /// @notice Denominator used when evaluating stake percentage thresholds (representing 100%)
     uint8 public constant THRESHOLD_DENOMINATOR = 100;
@@ -5568,6 +5626,9 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         require(referenceBlockNumber < block.number, FutureBlockNumber());
         require((uint256(referenceBlockNumber) + _getBlockStaleMeasure()) >= block.number, StaleBlockNumber());
 
+        // An empty quorum list would skip the stake-threshold loop entirely
+        require(quorumNumbers.length > 0, EmptyQuorumNumbers());
+
         // Verify transition index and message hash
         require(transitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
         bytes32 expectedHash = sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
@@ -5590,12 +5651,54 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         _stateChangeHandler(storageUpdates);
     }
 
+    /// @notice Apply storage updates forwarded by a trusted GasKiller peer
+    /// @dev Multi-call mode: the forwarder embeds this call as an ordinary CALL update
+    ///      inside its own quorum-signed `storageUpdates`, so the bundle root's BLS
+    ///      signature transitively commits to both `storageUpdates` and
+    ///      `expectedTransitionIndex`. Freshness is gated once at the bundle root's
+    ///      `verifyAndUpdate`; this entrypoint enforces caller trust, transition
+    ///      sequencing, and the reserved-slot policy. Payable so the forwarding CALL can
+    ///      carry the ETH the original call transferred. Sub-payloads may themselves
+    ///      contain forwarding CALLs, so bundles recurse across the call graph.
+    /// @param storageUpdates ABI-encoded `(StateUpdateType[], bytes[])` pair
+    /// @param expectedTransitionIndex The transition count this contract must have had
+    ///        immediately before this call
+    function applyForwardedUpdates(bytes calldata storageUpdates, uint256 expectedTransitionIndex)
+        external
+        payable
+        trackState
+    {
+        require(_getGasKillerSDKStorage().trustedForwarders[msg.sender], UntrustedForwarder(msg.sender));
+        require(expectedTransitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
+
+        (StateUpdateType[] memory types, bytes[] memory args) =
+            abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
+        require(types.length == args.length, StateChangeHandlerLib.InvalidArguments());
+        for (uint256 i = 0; i < types.length; i++) {
+            if (types[i] == StateUpdateType.STORE) {
+                (bytes32 slot,) = abi.decode(args[i], (bytes32, bytes32));
+                require(!_isReservedSlot(slot), ReservedSlot(i, slot));
+            }
+        }
+        StateChangeHandlerLib._runStateUpdates(types, args);
+
+        emit ForwardedUpdatesApplied(msg.sender, expectedTransitionIndex);
+    }
+
+    /// @notice Query whether an address is an allowlisted forwarder
+    /// @param forwarder The address to query
+    /// @return `true` if `forwarder` may call `applyForwardedUpdates`
+    function isTrustedForwarder(address forwarder) external view returns (bool) {
+        return _getGasKillerSDKStorage().trustedForwarders[forwarder];
+    }
+
     /// @notice Query if a contract implements an interface
-    /// @dev Supports ERC-165 and IGasKillerSDK interface detection
+    /// @dev Supports ERC-165, IGasKillerSDK, and IGasKillerForwardee interface detection
     /// @param interfaceId The interface identifier, as specified in ERC-165
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
     function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
-        return interfaceId == type(IERC165).interfaceId || interfaceId == type(IGasKillerSDK).interfaceId;
+        return interfaceId == type(IERC165).interfaceId || interfaceId == type(IGasKillerSDK).interfaceId
+            || interfaceId == type(IGasKillerForwardee).interfaceId;
     }
 
     /// @notice Compute the expected message hash for a given transition, function, and storage updates
@@ -5656,6 +5759,31 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     function _setBlsSignatureChecker(address _blsSignatureChecker) internal {
         GasKillerSDKStorage storage $ = _getGasKillerSDKStorage();
         $.blsSignatureChecker = IBLSSignatureChecker(_blsSignatureChecker);
+    }
+
+    /// @notice Allow or revoke a peer for `applyForwardedUpdates`
+    /// @dev An allowlisted forwarder can write any non-reserved storage slot of this
+    ///      contract, so only allowlist immutable, unmodified-SDK contracts. Post-deploy
+    ///      changes need no extra admin root: the quorum can toggle an entry with a signed
+    ///      STORE to `keccak256(abi.encode(forwarder, uint256(GAS_KILLER_SDK_STORAGE_LOCATION) + 4))`
+    ///      through this contract's own `verifyAndUpdate`.
+    /// @param forwarder The forwarder address
+    /// @param trusted Whether the forwarder should be trusted
+    function _setTrustedForwarder(address forwarder, bool trusted) internal {
+        _getGasKillerSDKStorage().trustedForwarders[forwarder] = trusted;
+    }
+
+    /// @notice Check whether a slot may not be written by a forwarded STORE
+    /// @dev Covers the state-transition counter and the fixed `GasKillerSDKStorage` slots.
+    ///      Mapping entries (e.g. individual `trustedForwarders` keys) live at
+    ///      keccak-derived slots and cannot be enumerated here; the allowlist itself
+    ///      remains the trust boundary.
+    /// @param slot The storage slot to check
+    /// @return `true` if the slot is reserved
+    function _isReservedSlot(bytes32 slot) internal pure returns (bool) {
+        if (slot == STATE_TRACKER_STORAGE_LOCATION) return true;
+        uint256 base = uint256(GAS_KILLER_SDK_STORAGE_LOCATION);
+        return uint256(slot) >= base && uint256(slot) < base + GAS_KILLER_SDK_STORAGE_SLOT_COUNT;
     }
 
     /// @notice Set the maximum number of blocks a reference block may lag behind the current block
