@@ -69,6 +69,11 @@ interface IGasKillerSlasher {
     /// @param commitmentHash Hash of the commitment
     event CommitmentRecorded(address indexed targetContract, bytes32 indexed commitmentHash);
 
+    /// @notice Emitted when a chain config hash is accepted or revoked
+    /// @param chainConfigHash The chain config hash (chain id + active hardfork)
+    /// @param accepted Whether proofs carrying this hash are accepted
+    event ChainConfigHashSet(bytes32 indexed chainConfigHash, bool accepted);
+
     // ============ Errors ============
 
     /// @notice Thrown when the SP1 proof is invalid
@@ -117,6 +122,19 @@ interface IGasKillerSlasher {
         bytes calldata sp1Proof,
         bytes calldata sp1PublicValues
     ) external;
+
+    /// @notice Accept or revoke a chain config hash for challenger proofs
+    /// @dev Owner-only. The challenger program commits `keccak256(chainId ++ activeForkName)`,
+    ///      which changes at every network hardfork; the owner accepts the new fork's hash so
+    ///      post-fork commitments stay challengeable.
+    /// @param chainConfigHash The chain config hash to accept or revoke
+    /// @param accepted Whether proofs carrying this hash should be accepted
+    function setChainConfigHashAccepted(bytes32 chainConfigHash, bool accepted) external;
+
+    /// @notice Whether proofs carrying `chainConfigHash` are accepted
+    /// @param chainConfigHash The chain config hash (chain id + active hardfork)
+    /// @return True if accepted
+    function acceptedChainConfigHash(bytes32 chainConfigHash) external view returns (bool);
 
     /// @notice Record a commitment application for challenge-window tracking
     /// @dev Called by the Gas Killer contract itself during `verifyAndUpdate`; records are
