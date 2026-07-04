@@ -5776,8 +5776,24 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK, IGasKillerForward
     /// @notice Check whether a slot may not be written by a forwarded STORE
     /// @dev Covers the state-transition counter and the fixed `GasKillerSDKStorage` slots.
     ///      Mapping entries (e.g. individual `trustedForwarders` keys) live at
-    ///      keccak-derived slots and cannot be enumerated here; the allowlist itself
-    ///      remains the trust boundary.
+    ///      keccak-derived slots that cannot be enumerated from a slot value alone, so this
+    ///      range check cannot block them. Consequently a forwarded STORE can, in principle,
+    ///      write `trustedForwarders[x] = true` for an arbitrary `x` (even an EOA), which
+    ///      would let `x` call `applyForwardedUpdates` directly without a fresh BLS
+    ///      verification — i.e. mint a new non-quorum writer. This is the sharpest form of
+    ///      the accepted risk that "an allowlisted forwarder is root over this contract"
+    ///      (see design/multicall-mode.md, risk R1). It is bounded, not eliminated, by two
+    ///      facts: (1) emitting such a STORE still requires a quorum-signed forwarded
+    ///      bundle, so it is no more powerful than the quorum writing the same slot through
+    ///      this contract's own `verifyAndUpdate`; and (2) the honest analyzer only forwards
+    ///      a peer's *observed* state diff, which never touches the peer's allowlist — so the
+    ///      vector requires a malicious/buggy analyzer AND a colluding quorum. The
+    ///      compensating control is policy: allowlist only immutable, unmodified-SDK peers,
+    ///      whose code provably never forwards a STORE into another contract's allowlist.
+    ///      Fully closing it (so a forwarded STORE can never grant a forwarder even under
+    ///      quorum collusion) requires a tamper-evident, enumerable allowlist whose
+    ///      membership is anchored in a reserved (range-checkable) length slot; that is a
+    ///      storage-layout change tracked as a follow-up rather than part of this change.
     /// @param slot The storage slot to check
     /// @return `true` if the slot is reserved
     function _isReservedSlot(bytes32 slot) internal pure returns (bool) {
