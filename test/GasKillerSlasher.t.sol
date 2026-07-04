@@ -72,8 +72,7 @@ contract MockBLSSignatureChecker {
         require(expectedMsgHash == bytes32(0) || msgHash == expectedMsgHash, "MockBLSSignatureChecker: wrong msgHash");
         return (
             IBLSSignatureCheckerTypes.QuorumStakeTotals({
-                signedStakeForQuorum: _signedStake,
-                totalStakeForQuorum: _totalStake
+                signedStakeForQuorum: _signedStake, totalStakeForQuorum: _totalStake
             }),
             bytes32(0)
         );
