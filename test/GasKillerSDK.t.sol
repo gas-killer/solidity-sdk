@@ -207,6 +207,31 @@ contract GasKillerSDKTest is Test {
         /// Test that the contract does not support 0xffffffff (invalid interface ID)
         assertFalse(sdk.supportsInterface(0xffffffff));
     }
+
+    /// @dev Hand-encode `(StateUpdateType[], bytes[])` with an arbitrary raw type value,
+    /// bypassing the compile-time enum check so we can feed out-of-range discriminants.
+    function _rawTypePayload(uint256 typeVal) internal pure returns (bytes memory) {
+        uint256[] memory rawTypes = new uint256[](1);
+        rawTypes[0] = typeVal;
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encode(bytes32(uint256(7)), bytes32(uint256(42)));
+        return abi.encode(rawTypes, args);
+    }
+
+    /// A valid discriminant with this exact hand-encoding applies normally — proving the
+    /// out-of-range revert below is caused by the value, not the encoding shape.
+    function test_stateChangeHandler_rawEncodedValidType_applies() public {
+        sdk.stateChangeHandlerExternal(_rawTypePayload(uint256(StateUpdateType.STORE)));
+        assertEq(vm.load(address(sdk), bytes32(uint256(7))), bytes32(uint256(42)));
+    }
+
+    /// An out-of-range `StateUpdateType` discriminant is rejected atomically by the ABI
+    /// enum-range check inside `abi.decode` — the whole batch reverts before any op runs,
+    /// so a malformed payload can never be "accepted but partially executed".
+    function test_stateChangeHandler_outOfRangeType_revertsWholeBatch() public {
+        vm.expectRevert(); // ABI enum-range check reverts (empty data) at decode time
+        sdk.stateChangeHandlerExternal(_rawTypePayload(99)); // 99 > CREATE2 (=8)
+    }
 }
 
 contract SimpleTarget {
