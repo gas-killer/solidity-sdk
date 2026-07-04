@@ -358,7 +358,8 @@ contract GasKillerSlasherTest is Test {
         assertEq(address(slasher.ALLOCATION_MANAGER()), address(allocationManager));
         assertEq(slasher.AVS(), avs);
         assertEq(slasher.PROGRAM_V_KEY(), PROGRAM_VKEY);
-        assertEq(slasher.CHAIN_CONFIG_HASH(), CHAIN_CONFIG_HASH);
+        assertTrue(slasher.acceptedChainConfigHash(CHAIN_CONFIG_HASH));
+        assertEq(slasher.owner(), address(this));
         assertEq(slasher.CHALLENGE_WINDOW(), CHALLENGE_WINDOW);
         assertEq(slasher.OPERATOR_SET_ID(), OPERATOR_SET_ID);
         assertEq(slasher.challengeWindow(), CHALLENGE_WINDOW);
@@ -586,6 +587,45 @@ contract GasKillerSlasherTest is Test {
 
         vm.expectRevert(IGasKillerSlasher.InvalidChainConfig.selector);
         _slash(_commitment(), hex"00", _emptyNsas(), abi.encode(proven));
+    }
+
+    /// @notice After a hardfork, the owner accepts the new fork's config hash and
+    ///         post-fork commitments become challengeable again.
+    function test_setChainConfigHashAccepted_enablesNewFork() public {
+        bytes32 newForkConfig = keccak256("post-hardfork-config");
+
+        // A proof carrying the new fork's config is rejected until accepted.
+        IGasKillerSlasher.GasKillerPublicValues memory proven = _publicValues();
+        proven.chainConfigHash = newForkConfig;
+        vm.expectRevert(IGasKillerSlasher.InvalidChainConfig.selector);
+        _slash(_commitment(), hex"00", _emptyNsas(), abi.encode(proven));
+
+        // Owner accepts the new fork's config.
+        vm.expectEmit(true, false, false, true, address(slasher));
+        emit IGasKillerSlasher.ChainConfigHashSet(newForkConfig, true);
+        slasher.setChainConfigHashAccepted(newForkConfig, true);
+        assertTrue(slasher.acceptedChainConfigHash(newForkConfig));
+
+        // Now a fraudulent post-fork commitment can be slashed.
+        _slash(_commitment(), hex"00", _emptyNsas(), abi.encode(proven));
+        assertTrue(slasher.isSlashed(slasher.computeCommitmentHash(_commitment())));
+    }
+
+    /// @notice Only the owner may change accepted chain config hashes.
+    function test_setChainConfigHashAccepted_onlyOwner() public {
+        vm.prank(makeAddr("notOwner"));
+        vm.expectRevert("Ownable: caller is not the owner");
+        slasher.setChainConfigHashAccepted(keccak256("x"), true);
+    }
+
+    /// @notice The owner can revoke a previously accepted config hash.
+    function test_setChainConfigHashAccepted_revoke() public {
+        assertTrue(slasher.acceptedChainConfigHash(CHAIN_CONFIG_HASH));
+        slasher.setChainConfigHashAccepted(CHAIN_CONFIG_HASH, false);
+        assertFalse(slasher.acceptedChainConfigHash(CHAIN_CONFIG_HASH));
+
+        vm.expectRevert(IGasKillerSlasher.InvalidChainConfig.selector);
+        _slash(_commitment(), hex"00", _emptyNsas(), abi.encode(_publicValues()));
     }
 
     function test_slash_revertsInputMismatch_anchorType() public {

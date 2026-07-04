@@ -18,6 +18,7 @@ import {
 } from "eigenlayer-contracts/src/contracts/interfaces/IAllocationManager.sol";
 import {IStrategy} from "eigenlayer-contracts/src/contracts/interfaces/IStrategy.sol";
 import {OperatorSet} from "eigenlayer-contracts/src/contracts/libraries/OperatorSetLib.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 /// @title GasKillerSlasher
 /// @notice Detects fraudulent Gas Killer commitments and slashes the operators who signed them
@@ -38,7 +39,7 @@ import {OperatorSet} from "eigenlayer-contracts/src/contracts/libraries/Operator
 ///      5. Every operator that signed is slashed through `InstantSlasher.fulfillSlashingRequest`
 ///
 ///      Note: this contract must be set as the authorized `slasher` in the InstantSlasher contract.
-contract GasKillerSlasher is IGasKillerSlasher {
+contract GasKillerSlasher is IGasKillerSlasher, Ownable {
     using BN254 for BN254.G1Point;
 
     // ============ Constants ============
@@ -86,11 +87,6 @@ contract GasKillerSlasher is IGasKillerSlasher {
     /// @notice The SP1 verification key of the Gas Killer challenger program
     bytes32 public immutable PROGRAM_V_KEY;
 
-    /// @notice The chain config hash (chain id + active hardfork) proofs must be generated against
-    /// @dev Prevents a challenger from "proving" a divergent execution by running the guest with
-    ///      a wrong chain configuration against the same state
-    bytes32 public immutable CHAIN_CONFIG_HASH;
-
     /// @notice The challenge window duration in seconds
     uint256 public immutable CHALLENGE_WINDOW;
 
@@ -107,6 +103,14 @@ contract GasKillerSlasher is IGasKillerSlasher {
     ///      window for commitments they did not apply
     mapping(address => mapping(bytes32 => uint256)) private _commitmentTimestamp;
 
+    /// @notice Chain config hashes (chain id + active hardfork) accepted for proofs
+    /// @dev The challenger program commits `keccak256(chainId ++ activeForkName)` where
+    ///      `activeForkName` is the hardfork active at the anchor block; that value changes
+    ///      the moment a network hardfork activates. The owner must accept the new fork's
+    ///      hash so commitments anchored to post-fork blocks stay challengeable. Requiring an
+    ///      explicit allowlist still blocks proofs generated against a wrong chain/fork.
+    mapping(bytes32 => bool) public acceptedChainConfigHash;
+
     // ============ Constructor ============
 
     /// @notice Initialize the slasher contract
@@ -119,7 +123,8 @@ contract GasKillerSlasher is IGasKillerSlasher {
     /// @param _allocationManager The EigenLayer AllocationManager contract address
     /// @param _avs The AVS (Gas Killer service manager) address
     /// @param _programVKey The SP1 verification key of the challenger program
-    /// @param _chainConfigHash The expected chain config hash of challenger proofs
+    /// @param _chainConfigHash The initial accepted chain config hash of challenger proofs
+    ///        (the owner accepts additional hashes as the network hardforks)
     /// @param _challengeWindow The challenge window duration in seconds
     /// @param _operatorSetId The operator set ID for Gas Killer
     constructor(
@@ -145,9 +150,16 @@ contract GasKillerSlasher is IGasKillerSlasher {
         ALLOCATION_MANAGER = IAllocationManager(_allocationManager);
         AVS = _avs;
         PROGRAM_V_KEY = _programVKey;
-        CHAIN_CONFIG_HASH = _chainConfigHash;
+        acceptedChainConfigHash[_chainConfigHash] = true;
         CHALLENGE_WINDOW = _challengeWindow;
         OPERATOR_SET_ID = _operatorSetId;
+        emit ChainConfigHashSet(_chainConfigHash, true);
+    }
+
+    /// @inheritdoc IGasKillerSlasher
+    function setChainConfigHashAccepted(bytes32 chainConfigHash, bool accepted) external onlyOwner {
+        acceptedChainConfigHash[chainConfigHash] = accepted;
+        emit ChainConfigHashSet(chainConfigHash, accepted);
     }
 
     // ============ External Functions ============
@@ -272,7 +284,7 @@ contract GasKillerSlasher is IGasKillerSlasher {
     /// @param commitment The signed commitment
     /// @param proven The proof's public values
     function _checkInputs(SignedCommitment calldata commitment, GasKillerPublicValues memory proven) internal view {
-        require(proven.chainConfigHash == CHAIN_CONFIG_HASH, InvalidChainConfig());
+        require(acceptedChainConfigHash[proven.chainConfigHash], InvalidChainConfig());
         require(proven.anchorType == ANCHOR_TYPE_BLOCK_HASH, InputMismatch());
         require(proven.anchorHash == commitment.anchorHash, InputMismatch());
         require(proven.callerAddress == commitment.callerAddress, InputMismatch());
