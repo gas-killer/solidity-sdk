@@ -124,8 +124,7 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK, IGasKillerForward
         require(_getGasKillerSDKStorage().trustedForwarders[msg.sender], UntrustedForwarder(msg.sender));
         require(expectedTransitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
 
-        (StateUpdateType[] memory types, bytes[] memory args) =
-            abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
+        (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
         require(types.length == args.length, StateChangeHandlerLib.InvalidArguments());
         for (uint256 i = 0; i < types.length; i++) {
             if (types[i] == StateUpdateType.STORE) {

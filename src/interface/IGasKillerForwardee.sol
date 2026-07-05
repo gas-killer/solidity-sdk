@@ -37,9 +37,7 @@ interface IGasKillerForwardee {
     /// @param storageUpdates ABI-encoded `(StateUpdateType[], bytes[])` pair
     /// @param expectedTransitionIndex The transition count this contract must have had
     ///        immediately before this call
-    function applyForwardedUpdates(bytes calldata storageUpdates, uint256 expectedTransitionIndex)
-        external
-        payable;
+    function applyForwardedUpdates(bytes calldata storageUpdates, uint256 expectedTransitionIndex) external payable;
 
     /// @notice Query whether an address is an allowlisted forwarder
     /// @param forwarder The address to query
