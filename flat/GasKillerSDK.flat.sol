@@ -70,9 +70,7 @@ interface IGasKillerForwardee {
     /// @param storageUpdates ABI-encoded `(StateUpdateType[], bytes[])` pair
     /// @param expectedTransitionIndex The transition count this contract must have had
     ///        immediately before this call
-    function applyForwardedUpdates(bytes calldata storageUpdates, uint256 expectedTransitionIndex)
-        external
-        payable;
+    function applyForwardedUpdates(bytes calldata storageUpdates, uint256 expectedTransitionIndex) external payable;
 
     /// @notice Query whether an address is an allowlisted forwarder
     /// @param forwarder The address to query
@@ -415,8 +413,7 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK, IGasKillerForward
         require(_getGasKillerSDKStorage().trustedForwarders[msg.sender], UntrustedForwarder(msg.sender));
         require(expectedTransitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
 
-        (StateUpdateType[] memory types, bytes[] memory args) =
-            abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
+        (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
         require(types.length == args.length, StateChangeHandlerLib.InvalidArguments());
         for (uint256 i = 0; i < types.length; i++) {
             if (types[i] == StateUpdateType.STORE) {
