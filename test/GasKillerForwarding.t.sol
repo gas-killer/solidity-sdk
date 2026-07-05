@@ -153,6 +153,18 @@ contract GasKillerForwardingTest is Test {
         assertFalse(b.isTrustedForwarder(address(a)), "revocation must take effect");
     }
 
+    function test_setTrustedForwarder_rejectsEOA() public {
+        // Allowlisting a codeless address (EOA/undeployed) must fail fast: such an address
+        // could otherwise call applyForwardedUpdates directly with no quorum verification.
+        address eoa = makeAddr("eoa");
+        vm.expectRevert(abi.encodeWithSelector(IGasKillerForwardee.InvalidForwarder.selector, eoa));
+        b.setTrustedForwarderExternal(eoa, true);
+
+        // Revoking a codeless address is still allowed (no-op that clears any stale entry).
+        b.setTrustedForwarderExternal(eoa, false);
+        assertFalse(b.isTrustedForwarder(eoa));
+    }
+
     // ============ Forwarding through a bundle (A's handler executes the CALL op) ============
 
     function test_forward_throughBundle() public {

@@ -19,6 +19,11 @@ interface IGasKillerForwardee {
     /// @param caller The unauthorized caller
     error UntrustedForwarder(address caller);
 
+    /// @notice Thrown when attempting to allowlist a forwarder that has no code (an EOA or
+    ///         an undeployed address); only deployed contracts may be trusted forwarders
+    /// @param forwarder The address that was rejected
+    error InvalidForwarder(address forwarder);
+
     /// @notice Thrown when a forwarded STORE operation targets a reserved slot
     ///         (the state-transition counter or the SDK configuration slots)
     /// @param index The zero-based position of the offending operation in the batch

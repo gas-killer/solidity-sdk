@@ -214,13 +214,21 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK, IGasKillerForward
 
     /// @notice Allow or revoke a peer for `applyForwardedUpdates`
     /// @dev An allowlisted forwarder can write any non-reserved storage slot of this
-    ///      contract, so only allowlist immutable, unmodified-SDK contracts. Post-deploy
+    ///      contract, so only allowlist immutable, unmodified-SDK contracts. An EOA (or any
+    ///      address with no code) can never be a valid forwarder — it would be able to call
+    ///      `applyForwardedUpdates` directly and write arbitrary non-reserved state with no
+    ///      quorum verification — so granting trust to a codeless address is rejected as a
+    ///      misconfiguration. This also means a forwarder must already be deployed before it
+    ///      is allowlisted (allowlisting a CREATE2-precomputed-but-undeployed address is not
+    ///      supported, and is unsafe anyway since its code cannot yet be inspected). Post-deploy
     ///      changes need no extra admin root: the quorum can toggle an entry with a signed
     ///      STORE to `keccak256(abi.encode(forwarder, uint256(GAS_KILLER_SDK_STORAGE_LOCATION) + 4))`
-    ///      through this contract's own `verifyAndUpdate`.
+    ///      through this contract's own `verifyAndUpdate` (that path bypasses this guard, so
+    ///      the operator-side signing policy must apply the same code-presence check).
     /// @param forwarder The forwarder address
     /// @param trusted Whether the forwarder should be trusted
     function _setTrustedForwarder(address forwarder, bool trusted) internal {
+        require(!trusted || forwarder.code.length > 0, InvalidForwarder(forwarder));
         _getGasKillerSDKStorage().trustedForwarders[forwarder] = trusted;
     }
 
