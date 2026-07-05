@@ -11,7 +11,7 @@ contract ArraySummationFactory {
     /// @notice Emitted when a new ArraySummation contract is deployed via this factory
     /// @param contractAddress Address of the newly deployed ArraySummation contract
     /// @param avsAddress The AVS service manager address passed to the contract
-    /// @param blsSigChecker The BLS signature checker address passed to the contract
+    /// @param ecdsaStakeRegistry The ECDSA stake registry address passed to the contract
     /// @param arraySize Number of elements in the initialised array
     /// @param maxValue Upper bound used for element generation
     /// @param seed Entropy seed used for array initialisation
@@ -19,7 +19,7 @@ contract ArraySummationFactory {
     event ArraySummationDeployed(
         address indexed contractAddress,
         address indexed avsAddress,
-        address indexed blsSigChecker,
+        address indexed ecdsaStakeRegistry,
         uint256 arraySize,
         uint256 maxValue,
         uint256 seed,
@@ -39,8 +39,8 @@ contract ArraySummationFactory {
     struct ContractInfo {
         /// @notice The AVS service manager address the contract was configured with
         address avsAddress;
-        /// @notice The BLS signature checker address the contract was configured with
-        address blsSigChecker;
+        /// @notice The ECDSA stake registry address the contract was configured with
+        address ecdsaStakeRegistry;
         /// @notice Number of elements in the contract's array
         uint256 arraySize;
         /// @notice Upper bound used for element generation
@@ -55,14 +55,14 @@ contract ArraySummationFactory {
 
     /// @notice Deploy a new ArraySummation contract
     /// @param _avsAddress The AVS service manager address for the new contract
-    /// @param _blsSigChecker The BLS signature checker address for the new contract
+    /// @param _ecdsaStakeRegistry The ECDSA stake registry address for the new contract
     /// @param _arraySize The size of the array to initialize
     /// @param _maxValue The maximum value for array elements
     /// @param _seed The seed for array initialization
     /// @return contractAddress The address of the deployed contract
     function deployArraySummation(
         address _avsAddress,
-        address _blsSigChecker,
+        address _ecdsaStakeRegistry,
         uint256 _arraySize,
         uint256 _maxValue,
         uint256 _seed
@@ -70,7 +70,7 @@ contract ArraySummationFactory {
         require(_avsAddress != address(0), "Invalid AVS address");
 
         // Deploy the new contract
-        ArraySummation newContract = new ArraySummation(_avsAddress, _blsSigChecker, _arraySize, _maxValue, _seed);
+        ArraySummation newContract = new ArraySummation(_avsAddress, _ecdsaStakeRegistry, _arraySize, _maxValue, _seed);
         contractAddress = address(newContract);
 
         // Track the deployment
@@ -80,7 +80,7 @@ contract ArraySummationFactory {
 
         contractInfo[contractAddress] = ContractInfo({
             avsAddress: _avsAddress,
-            blsSigChecker: _blsSigChecker,
+            ecdsaStakeRegistry: _ecdsaStakeRegistry,
             arraySize: _arraySize,
             maxValue: _maxValue,
             seed: _seed,
@@ -89,7 +89,7 @@ contract ArraySummationFactory {
         });
 
         emit ArraySummationDeployed(
-            contractAddress, _avsAddress, _blsSigChecker, _arraySize, _maxValue, _seed, deploymentIndex
+            contractAddress, _avsAddress, _ecdsaStakeRegistry, _arraySize, _maxValue, _seed, deploymentIndex
         );
     }
 

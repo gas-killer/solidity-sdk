@@ -34,14 +34,14 @@ contract ArraySummation is GasKillerSDK {
     uint256[] public values;
 
     /// @notice Deploy a new ArraySummation contract and initialise the array
-    /// @param _avsAddress The AVS service manager address used for BLS quorum validation
-    /// @param _blsSigChecker The BLS signature checker contract address
+    /// @param _avsAddress The AVS service manager address used for ECDSA quorum validation
+    /// @param _ecdsaStakeRegistry The EigenLayer ECDSA stake registry address
     /// @param _arraySize Number of elements to generate; must be > 0
     /// @param _maxValue Exclusive upper bound for element values; must be > 0
     /// @param _seed Seed for pseudorandom generation; 0 falls back to `block.timestamp`
-    constructor(address _avsAddress, address _blsSigChecker, uint256 _arraySize, uint256 _maxValue, uint256 _seed) {
+    constructor(address _avsAddress, address _ecdsaStakeRegistry, uint256 _arraySize, uint256 _maxValue, uint256 _seed) {
         _setAvsAddress(_avsAddress);
-        _setBlsSignatureChecker(_blsSigChecker);
+        _setECDSAStakeRegistry(_ecdsaStakeRegistry);
 
         if (_arraySize == 0 || _maxValue == 0) {
             revert InvalidConfiguration();

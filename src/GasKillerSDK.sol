@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.27;
 
-import {
-    IBLSSignatureChecker,
-    IBLSSignatureCheckerTypes
-} from "@eigenlayer-middleware/interfaces/IBLSSignatureChecker.sol";
+import {IERC1271Upgradeable} from "@openzeppelin-upgrades/contracts/interfaces/IERC1271Upgradeable.sol";
 import {IERC165} from "forge-std/interfaces/IERC165.sol";
 
 import {IGasKillerSDK} from "./interface/IGasKillerSDK.sol";
@@ -13,52 +10,55 @@ import {StateChangeHandlerLib, StateUpdateType} from "./StateChangeHandlerLib.so
 
 /// @title GasKillerSDK
 /// @notice Base SDK for implementing Gas Killer functionality in contracts
-/// @dev Inherit from this contract to add Gas Killer capabilities to your contract
+/// @dev Inherit from this contract to add Gas Killer capabilities to your contract.
+///
+///      State updates are authorised by an ECDSA operator quorum verified by
+///      EigenLayer's `ECDSAStakeRegistry` (eigenlayer-middleware). The registry is
+///      the source of truth for the operator set, per-operator signing keys, and
+///      stake weights: `verifyAndUpdate` forwards the operators' 65-byte
+///      `r || s || v` signatures to the registry's ERC-1271 `isValidSignature`,
+///      which validates each signature against the operator's registered signing
+///      key at `referenceBlockNumber` and enforces the configured stake-weight
+///      threshold at that block.
 abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
-    /// @custom:storage-location erc7201:gaskiller.GasKillerSDK.storage
+    /// @custom:storage-location erc7201:gaskiller.GasKillerSDKECDSA.storage
     struct GasKillerSDKStorage {
         /// @notice Namespace derived from the AVS address; used to scope this contract within the AVS
         bytes namespace;
         /// @notice The AVS service manager address
         address avsAddress;
-        /// @notice The BLS signature checker contract used to verify operator signatures
-        IBLSSignatureChecker blsSignatureChecker;
+        /// @notice The EigenLayer ECDSA stake registry used to verify operator quorum signatures
+        IERC1271Upgradeable ecdsaStakeRegistry;
         /// @notice Maximum number of blocks a reference block may lag behind the current block
         uint256 blockStaleMeasure;
     }
 
-    // keccak256(abi.encode(uint256(keccak256("gaskiller.GasKillerSDK.storage")) - 1)) & ~bytes32(uint256(0xff));
+    // keccak256(abi.encode(uint256(keccak256("gaskiller.GasKillerSDKECDSA.storage")) - 1)) & ~bytes32(uint256(0xff));
     bytes32 private constant GAS_KILLER_SDK_STORAGE_LOCATION =
-        0x321ebf629ed2e1e368f0890e8fdd95cf9a2ae5961b66a1805f0b2ec84e21d000;
-
-    /// @notice Denominator used when evaluating stake percentage thresholds (representing 100%)
-    uint8 public constant THRESHOLD_DENOMINATOR = 100;
-
-    /// @notice Minimum percentage of quorum stake that must have signed to approve a state update (QUORUM_THRESHOLD/THRESHOLD_DENOMINATOR)
-    uint8 public constant QUORUM_THRESHOLD = 66;
+        0x6056deb87cab365bf76a6725b8b096dec334581845ea9d3c2627f8b0efdde700;
 
     /// @notice Default maximum age (in blocks) a reference block is considered valid when none is configured
     uint256 private constant DEFAULT_BLOCK_STALE_MEASURE = 300;
 
-    /// @notice Verify BLS quorum signatures and apply the encoded state updates
+    /// @notice Verify the operators' ECDSA quorum signatures and apply the encoded state updates
     /// @param msgHash The hash of the message to verify
-    /// @param quorumNumbers The quorum numbers to check signatures for
-    /// @param referenceBlockNumber The block number to use as reference for operator set
-    /// @param storageUpdates The storage updates to verify
+    /// @param referenceBlockNumber The block number at which operator signing keys and
+    ///        stake weights are evaluated by the stake registry
+    /// @param storageUpdates The storage updates to verify and apply
     /// @param transitionIndex The transition index
     /// @param targetFunction The target function selector
-    /// @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
+    /// @param operators Operator addresses that signed, in strictly ascending order
+    /// @param signatures 65-byte `r || s || v` ECDSA signatures over `msgHash`,
+    ///        index-aligned with `operators`
     function verifyAndUpdate(
         bytes32 msgHash,
-        bytes calldata quorumNumbers,
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
         bytes4 targetFunction,
-        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
+        address[] calldata operators,
+        bytes[] calldata signatures
     ) external trackState {
-        GasKillerSDKStorage storage $ = _getGasKillerSDKStorage();
-
         // Check block number validity
         require(referenceBlockNumber < block.number, FutureBlockNumber());
         require((uint256(referenceBlockNumber) + _getBlockStaleMeasure()) >= block.number, StaleBlockNumber());
@@ -68,21 +68,29 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         bytes32 expectedHash = sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
         require(expectedHash == msgHash, InvalidSignature());
 
-        // Verify the signatures using checkSignatures
-        (IBLSSignatureCheckerTypes.QuorumStakeTotals memory stakeTotals,) = $.blsSignatureChecker
-            .checkSignatures(msgHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
-
-        // Check that signatories own at least 66% of each quorum
-        for (uint256 i = 0; i < quorumNumbers.length; i++) {
-            require(
-                stakeTotals.signedStakeForQuorum[i] * THRESHOLD_DENOMINATOR
-                    >= stakeTotals.totalStakeForQuorum[i] * QUORUM_THRESHOLD,
-                InsufficientQuorumThreshold()
-            );
-        }
+        // Verify the quorum signatures via EigenLayer's ECDSAStakeRegistry
+        _verifyQuorum(msgHash, referenceBlockNumber, operators, signatures);
 
         // Apply the state changes
         _stateChangeHandler(storageUpdates);
+    }
+
+    /// @notice Verify an operator quorum via the stake registry's ERC-1271 endpoint
+    /// @dev The registry checks: operators strictly ascending, every signature valid
+    ///      against the operator's signing key at the reference block, and signed
+    ///      stake weight >= the configured threshold at that block. It reverts on
+    ///      any failure; the magic-value check guards against a misconfigured
+    ///      registry address.
+    function _verifyQuorum(
+        bytes32 msgHash,
+        uint32 referenceBlockNumber,
+        address[] calldata operators,
+        bytes[] calldata signatures
+    ) private view {
+        bytes4 magicValue = _getGasKillerSDKStorage().ecdsaStakeRegistry.isValidSignature(
+            msgHash, abi.encode(operators, signatures, referenceBlockNumber)
+        );
+        require(magicValue == IERC1271Upgradeable.isValidSignature.selector, InvalidQuorumSignature());
     }
 
     /// @notice Query if a contract implements an interface
@@ -112,10 +120,10 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         return _getGasKillerSDKStorage().avsAddress;
     }
 
-    /// @notice Return the configured BLS signature checker address
-    /// @return The BLS signature checker address
-    function blsSignatureChecker() external view returns (address) {
-        return address(_getGasKillerSDKStorage().blsSignatureChecker);
+    /// @notice Return the configured EigenLayer ECDSA stake registry address
+    /// @return The stake registry address
+    function ecdsaStakeRegistry() external view returns (address) {
+        return address(_getGasKillerSDKStorage().ecdsaStakeRegistry);
     }
 
     /// @notice Return the namespace bytes derived from the AVS address
@@ -146,11 +154,10 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         $.namespace = abi.encodePacked($.avsAddress, "gaskiller");
     }
 
-    /// @notice Set the BLS signature checker contract
-    /// @param _blsSignatureChecker The new BLS signature checker address
-    function _setBlsSignatureChecker(address _blsSignatureChecker) internal {
-        GasKillerSDKStorage storage $ = _getGasKillerSDKStorage();
-        $.blsSignatureChecker = IBLSSignatureChecker(_blsSignatureChecker);
+    /// @notice Set the EigenLayer ECDSA stake registry contract
+    /// @param _ecdsaStakeRegistry The new stake registry address
+    function _setECDSAStakeRegistry(address _ecdsaStakeRegistry) internal {
+        _getGasKillerSDKStorage().ecdsaStakeRegistry = IERC1271Upgradeable(_ecdsaStakeRegistry);
     }
 
     /// @notice Set the maximum number of blocks a reference block may lag behind the current block

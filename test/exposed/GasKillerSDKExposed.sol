@@ -4,9 +4,9 @@ pragma solidity ^0.8.0;
 import {GasKillerSDK} from "../../src/GasKillerSDK.sol";
 
 contract GasKillerSDKExposed is GasKillerSDK {
-    constructor(address _avsAddress, address _blsSignatureChecker) {
+    constructor(address _avsAddress, address _ecdsaStakeRegistry) {
         _setAvsAddress(_avsAddress);
-        _setBlsSignatureChecker(_blsSignatureChecker);
+        _setECDSAStakeRegistry(_ecdsaStakeRegistry);
     }
 
     function stateChangeHandlerExternal(bytes calldata storageUpdates) external {

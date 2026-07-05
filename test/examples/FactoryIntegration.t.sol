@@ -15,7 +15,7 @@ contract FactoryIntegrationTest is Test {
     address public avsService1 = address(0x1111);
     address public avsService2 = address(0x2222);
     address public avsService3 = address(0x3333);
-    address public blsSignatureChecker = address(0x4444);
+    address public ecdsaStakeRegistry = address(0x4444);
 
     /// Different array sizes and max values
     uint256 public arraySize1 = 1000;
@@ -35,13 +35,13 @@ contract FactoryIntegrationTest is Test {
     /// @notice Test scenario: Multiple services deploying their own summation contracts
     function testMultipleServicesDeployment() public {
         /// Service 1 deploys a contract
-        address contract1 = factory.deployArraySummation(avsService1, blsSignatureChecker, arraySize1, maxValue1, seed1);
+        address contract1 = factory.deployArraySummation(avsService1, ecdsaStakeRegistry, arraySize1, maxValue1, seed1);
 
         /// Service 2 deploys a contract
-        address contract2 = factory.deployArraySummation(avsService2, blsSignatureChecker, arraySize2, maxValue2, seed2);
+        address contract2 = factory.deployArraySummation(avsService2, ecdsaStakeRegistry, arraySize2, maxValue2, seed2);
 
         /// Service 3 deploys a contract
-        address contract3 = factory.deployArraySummation(avsService3, blsSignatureChecker, arraySize1, maxValue1, seed3);
+        address contract3 = factory.deployArraySummation(avsService3, ecdsaStakeRegistry, arraySize1, maxValue1, seed3);
 
         /// Verify all contracts are tracked
         assertEq(factory.getDeployedContractCount(), 3);
@@ -65,9 +65,9 @@ contract FactoryIntegrationTest is Test {
     /// @notice Test scenario: Contract discovery and management
     function testContractDiscoveryAndManagement() public {
         /// Deploy some contracts
-        factory.deployArraySummation(avsService1, blsSignatureChecker, arraySize1, maxValue1, seed1);
-        factory.deployArraySummation(avsService2, blsSignatureChecker, arraySize2, maxValue2, seed2);
-        factory.deployArraySummation(avsService1, blsSignatureChecker, arraySize1, maxValue1, seed3); // Another contract for service 1
+        factory.deployArraySummation(avsService1, ecdsaStakeRegistry, arraySize1, maxValue1, seed1);
+        factory.deployArraySummation(avsService2, ecdsaStakeRegistry, arraySize2, maxValue2, seed2);
+        factory.deployArraySummation(avsService1, ecdsaStakeRegistry, arraySize1, maxValue1, seed3); // Another contract for service 1
 
         /// Get all deployed contracts
         address[] memory allContracts = factory.getAllDeployedContracts();
@@ -93,11 +93,11 @@ contract FactoryIntegrationTest is Test {
     function testContractVerification() public {
         /// Deploy a contract through the factory
         address factoryDeployed =
-            factory.deployArraySummation(avsService1, blsSignatureChecker, arraySize1, maxValue1, seed1);
+            factory.deployArraySummation(avsService1, ecdsaStakeRegistry, arraySize1, maxValue1, seed1);
 
         /// Deploy a contract directly (not through factory)
         ArraySummation directDeployed =
-            new ArraySummation(avsService1, blsSignatureChecker, arraySize1, maxValue1, seed1);
+            new ArraySummation(avsService1, ecdsaStakeRegistry, arraySize1, maxValue1, seed1);
 
         /// Verify factory deployment
         assertTrue(factory.isContractDeployedByFactory(factoryDeployed));
@@ -114,9 +114,9 @@ contract FactoryIntegrationTest is Test {
 
         /// Step 1: Deploy contracts for different data sets
         address productionContract =
-            factory.deployArraySummation(avsService1, blsSignatureChecker, arraySize1, maxValue1, seed1);
+            factory.deployArraySummation(avsService1, ecdsaStakeRegistry, arraySize1, maxValue1, seed1);
         address testingContract =
-            factory.deployArraySummation(avsService1, blsSignatureChecker, arraySize2, maxValue2, seed2);
+            factory.deployArraySummation(avsService1, ecdsaStakeRegistry, arraySize2, maxValue2, seed2);
 
         /// Step 2: Interact with the contracts
         ArraySummation production = ArraySummation(productionContract);

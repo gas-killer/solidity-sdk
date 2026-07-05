@@ -20,7 +20,7 @@ contract ArraySummationFactoryTest is Test {
     event ArraySummationDeployed(
         address indexed contractAddress,
         address indexed avsAddress,
-        address indexed blsSigChecker,
+        address indexed ecdsaStakeRegistry,
         uint256 arraySize,
         uint256 maxValue,
         uint256 seed,
@@ -170,7 +170,7 @@ contract ArraySummationFactoryTest is Test {
         assertEq(info1.deploymentIndex, 0);
         assertEq(info2.deploymentIndex, 1);
         assertEq(info1.avsAddress, info2.avsAddress);
-        assertEq(info1.blsSigChecker, info2.blsSigChecker);
+        assertEq(info1.ecdsaStakeRegistry, info2.ecdsaStakeRegistry);
         assertEq(info1.arraySize, info2.arraySize);
         assertEq(info1.maxValue, info2.maxValue);
         assertEq(info1.seed, info2.seed);

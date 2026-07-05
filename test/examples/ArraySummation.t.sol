@@ -7,7 +7,7 @@ import {ArraySummation} from "../../src/examples/array-summation/ArraySummation.
 contract ArraySummationTest is Test {
     ArraySummation public arraySummation;
     address public avsAddress = address(0x1234);
-    address public blsSignatureChecker = address(0x5678);
+    address public ecdsaStakeRegistry = address(0x5678);
     uint256 public arraySize = 1000;
     uint256 public maxValue = 10000;
     uint256 public seed = 0;
@@ -16,7 +16,7 @@ contract ArraySummationTest is Test {
     event ArrayInitialized(uint256 size);
 
     function setUp() public {
-        arraySummation = new ArraySummation(avsAddress, blsSignatureChecker, arraySize, maxValue, seed);
+        arraySummation = new ArraySummation(avsAddress, ecdsaStakeRegistry, arraySize, maxValue, seed);
     }
 
     function testInitialization() public view {
@@ -149,10 +149,8 @@ contract ArraySummationTest is Test {
     }
 
     function testGasKillerInheritance() public view {
-        assertEq(arraySummation.QUORUM_THRESHOLD(), 66);
         assertEq(arraySummation.blockStaleMeasure(), 300);
-        assertEq(arraySummation.THRESHOLD_DENOMINATOR(), 100);
-        assertTrue(address(arraySummation.blsSignatureChecker()) != address(0));
+        assertTrue(address(arraySummation.ecdsaStakeRegistry()) != address(0));
         assertEq(arraySummation.avsAddress(), avsAddress);
 
         /// Test that the verifyAndUpdate function is properly inherited from GasKillerSDK
@@ -181,8 +179,8 @@ contract ArraySummationTest is Test {
     }
 
     function testDeterministicInitialization() public {
-        ArraySummation array1 = new ArraySummation(avsAddress, blsSignatureChecker, arraySize, maxValue, 42);
-        ArraySummation array2 = new ArraySummation(avsAddress, blsSignatureChecker, arraySize, maxValue, 42);
+        ArraySummation array1 = new ArraySummation(avsAddress, ecdsaStakeRegistry, arraySize, maxValue, 42);
+        ArraySummation array2 = new ArraySummation(avsAddress, ecdsaStakeRegistry, arraySize, maxValue, 42);
 
         uint256[] memory arr1 = array1.getFullArray();
         uint256[] memory arr2 = array2.getFullArray();
@@ -194,12 +192,12 @@ contract ArraySummationTest is Test {
 
     function testInvalidConfigurationArraySize() public {
         vm.expectRevert(abi.encodeWithSignature("InvalidConfiguration()"));
-        new ArraySummation(avsAddress, blsSignatureChecker, 0, maxValue, seed);
+        new ArraySummation(avsAddress, ecdsaStakeRegistry, 0, maxValue, seed);
     }
 
     function testInvalidConfigurationMaxValue() public {
         vm.expectRevert(abi.encodeWithSignature("InvalidConfiguration()"));
-        new ArraySummation(avsAddress, blsSignatureChecker, arraySize, 0, seed);
+        new ArraySummation(avsAddress, ecdsaStakeRegistry, arraySize, 0, seed);
     }
 
     function testSumSubset() public {
