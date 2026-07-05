@@ -467,7 +467,13 @@ contract ArraySummation is GasKillerSDK {
     /// @param _arraySize Number of elements to generate; must be > 0
     /// @param _maxValue Exclusive upper bound for element values; must be > 0
     /// @param _seed Seed for pseudorandom generation; 0 falls back to `block.timestamp`
-    constructor(address _avsAddress, address _ecdsaStakeRegistry, uint256 _arraySize, uint256 _maxValue, uint256 _seed) {
+    constructor(
+        address _avsAddress,
+        address _ecdsaStakeRegistry,
+        uint256 _arraySize,
+        uint256 _maxValue,
+        uint256 _seed
+    ) {
         _setAvsAddress(_avsAddress);
         _setECDSAStakeRegistry(_ecdsaStakeRegistry);
 
