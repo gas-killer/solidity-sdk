@@ -87,9 +87,12 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         address[] calldata operators,
         bytes[] calldata signatures
     ) private view {
-        bytes4 magicValue = _getGasKillerSDKStorage().ecdsaStakeRegistry.isValidSignature(
-            msgHash, abi.encode(operators, signatures, referenceBlockNumber)
-        );
+        IERC1271Upgradeable registry = _getGasKillerSDKStorage().ecdsaStakeRegistry;
+        // A registry accidentally set to an EOA or address(0) would make the high-level
+        // call below revert opaquely during return-data decoding. Guard so misconfiguration
+        // surfaces the intended error deterministically instead of an empty revert.
+        require(address(registry).code.length > 0, InvalidQuorumSignature());
+        bytes4 magicValue = registry.isValidSignature(msgHash, abi.encode(operators, signatures, referenceBlockNumber));
         require(magicValue == IERC1271Upgradeable.isValidSignature.selector, InvalidQuorumSignature());
     }
 
