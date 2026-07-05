@@ -85,6 +85,92 @@ contract GasKillerSDKTest is Test {
         assertEq(logs[0].data, "log data");
     }
 
+    function test_stateChangeHandlerExternal_Log0() public {
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        types[0] = StateUpdateType.LOG0;
+
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encode(bytes("hello log0"));
+
+        vm.recordLogs();
+        sdk.stateChangeHandlerExternal(abi.encode(types, args));
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 1);
+        assertEq(logs[0].topics.length, 0);
+        assertEq(logs[0].data, "hello log0");
+    }
+
+    function test_stateChangeHandlerExternal_Log4() public {
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        types[0] = StateUpdateType.LOG4;
+
+        bytes32 t1 = keccak256("t1");
+        bytes32 t2 = keccak256("t2");
+        bytes32 t3 = keccak256("t3");
+        bytes32 t4 = keccak256("t4");
+
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encode(bytes("log4 data"), t1, t2, t3, t4);
+
+        vm.recordLogs();
+        sdk.stateChangeHandlerExternal(abi.encode(types, args));
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 1);
+        assertEq(logs[0].topics.length, 4);
+        assertEq(logs[0].topics[0], t1);
+        assertEq(logs[0].topics[1], t2);
+        assertEq(logs[0].topics[2], t3);
+        assertEq(logs[0].topics[3], t4);
+        assertEq(logs[0].data, "log4 data");
+    }
+
+    function test_stateChangeHandlerExternal_Log_MalformedLengthReverts() public {
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        types[0] = StateUpdateType.LOG1;
+
+        // Canonical offset (0x40) + topic + a data-length word claiming far more bytes than exist.
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encodePacked(uint256(0x40), keccak256("t"), type(uint256).max);
+
+        vm.expectRevert(StateChangeHandlerLib.MalformedLogPayload.selector);
+        sdk.stateChangeHandlerExternal(abi.encode(types, args));
+    }
+
+    function test_stateChangeHandlerExternal_Log_NonCanonicalOffsetReverts() public {
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        types[0] = StateUpdateType.LOG1;
+
+        // LOG1 requires a 0x40 head offset; a 0x20 offset is non-canonical and must revert.
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encodePacked(uint256(0x20), keccak256("t"), uint256(0));
+
+        vm.expectRevert(StateChangeHandlerLib.MalformedLogPayload.selector);
+        sdk.stateChangeHandlerExternal(abi.encode(types, args));
+    }
+
+    function test_stateChangeHandlerExternal_Log_TruncatedHeadReverts() public {
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        types[0] = StateUpdateType.LOG2;
+
+        // LOG2 needs at least 0x80 bytes (offset + 2 topics + length word); supply only 0x40.
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encodePacked(uint256(0x60), keccak256("t"));
+
+        vm.expectRevert(StateChangeHandlerLib.MalformedLogPayload.selector);
+        sdk.stateChangeHandlerExternal(abi.encode(types, args));
+    }
+
+    function test_namespace_configured() public {
+        assertEq(sdk.namespace(), abi.encodePacked(makeAddr("AVS"), "gaskiller"));
+    }
+
+    function test_namespace_unconfiguredIsEmpty() public {
+        GasKillerSDKExposed fresh = new GasKillerSDKExposed(address(0), makeAddr("BLS_SIG_CHECKER"));
+        assertEq(fresh.namespace(), "");
+    }
+
     function test_stateChangeHandlerExternal_InvalidArguments() public {
         StateUpdateType[] memory types = new StateUpdateType[](2);
         bytes[] memory args = new bytes[](1);

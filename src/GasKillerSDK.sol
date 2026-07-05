@@ -124,9 +124,15 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     /// @notice Return the namespace bytes derived from the AVS address
     /// @dev Derived on read as `abi.encodePacked(avsAddress, "gaskiller")` rather than stored, since it is a
     ///      deterministic function of `avsAddress`; this avoids a dynamic-bytes SSTORE at configuration time.
+    ///      Returns empty bytes when the AVS address is unset (matching the prior stored-default behavior),
+    ///      so `namespace()` still reads as empty for an unconfigured contract.
     /// @return The namespace
     function namespace() external view returns (bytes memory) {
-        return abi.encodePacked(_getGasKillerSDKStorage().avsAddress, "gaskiller");
+        address _avsAddress = _getGasKillerSDKStorage().avsAddress;
+        if (_avsAddress == address(0)) {
+            return "";
+        }
+        return abi.encodePacked(_avsAddress, "gaskiller");
     }
 
     /// @notice Return the configured block stale measure (or the default if unset)
