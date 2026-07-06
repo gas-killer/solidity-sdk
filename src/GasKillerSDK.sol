@@ -17,6 +17,11 @@ import {StateChangeHandlerLib, StateUpdateType} from "./StateChangeHandlerLib.so
 abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     /// @custom:storage-location erc7201:gaskiller.GasKillerSDK.storage
     struct GasKillerSDKStorage {
+        /// @notice Deprecated. Formerly the stored namespace bytes; now derived on read by `namespace()`.
+        /// @dev Retained as a placeholder so the storage layout of the following slots is unchanged
+        ///      (important for upgradeable/proxy consumers). It is never written, so the config-time
+        ///      dynamic-bytes SSTORE it used to incur is still avoided.
+        bytes __deprecated_namespace;
         /// @notice The AVS service manager address
         address avsAddress;
         /// @notice The BLS signature checker contract used to verify operator signatures
@@ -72,16 +77,12 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
 
         // Check that signatories own at least 66% of each quorum
         uint256 quorumCount = quorumNumbers.length;
-        for (uint256 i = 0; i < quorumCount;) {
+        for (uint256 i = 0; i < quorumCount; ++i) {
             require(
                 stakeTotals.signedStakeForQuorum[i] * THRESHOLD_DENOMINATOR
                     >= stakeTotals.totalStakeForQuorum[i] * QUORUM_THRESHOLD,
                 InsufficientQuorumThreshold()
             );
-            // i is bounded by `quorumCount`, so it can never overflow
-            unchecked {
-                ++i;
-            }
         }
 
         // Apply the state changes

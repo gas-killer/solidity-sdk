@@ -41,7 +41,8 @@ library StateChangeHandlerLib {
     function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args) internal {
         uint256 length = types.length;
         require(length == args.length, InvalidArguments());
-        for (uint256 i = 0; i < length;) {
+        // solc >= 0.8.22 makes the `++i` loop-counter increment unchecked automatically.
+        for (uint256 i = 0; i < length; ++i) {
             StateUpdateType stateUpdateType = types[i];
             bytes memory arg = args[i];
 
@@ -135,11 +136,6 @@ library StateChangeHandlerLib {
                     deployed := create2(value, add(initcode, 0x20), mload(initcode), salt)
                 }
                 require(deployed != address(0), DeploymentFailed());
-            }
-
-            // i is bounded by `length`, so it can never overflow
-            unchecked {
-                ++i;
             }
         }
     }

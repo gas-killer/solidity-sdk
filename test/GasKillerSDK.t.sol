@@ -101,6 +101,50 @@ contract GasKillerSDKTest is Test {
         assertEq(logs[0].data, "hello log0");
     }
 
+    function test_stateChangeHandlerExternal_Log2() public {
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        types[0] = StateUpdateType.LOG2;
+
+        bytes32 t1 = keccak256("t1");
+        bytes32 t2 = keccak256("t2");
+
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encode(bytes("log2 data"), t1, t2);
+
+        vm.recordLogs();
+        sdk.stateChangeHandlerExternal(abi.encode(types, args));
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 1);
+        assertEq(logs[0].topics.length, 2);
+        assertEq(logs[0].topics[0], t1);
+        assertEq(logs[0].topics[1], t2);
+        assertEq(logs[0].data, "log2 data");
+    }
+
+    function test_stateChangeHandlerExternal_Log3() public {
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        types[0] = StateUpdateType.LOG3;
+
+        bytes32 t1 = keccak256("t1");
+        bytes32 t2 = keccak256("t2");
+        bytes32 t3 = keccak256("t3");
+
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encode(bytes("log3 data"), t1, t2, t3);
+
+        vm.recordLogs();
+        sdk.stateChangeHandlerExternal(abi.encode(types, args));
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 1);
+        assertEq(logs[0].topics.length, 3);
+        assertEq(logs[0].topics[0], t1);
+        assertEq(logs[0].topics[1], t2);
+        assertEq(logs[0].topics[2], t3);
+        assertEq(logs[0].data, "log3 data");
+    }
+
     function test_stateChangeHandlerExternal_Log4() public {
         StateUpdateType[] memory types = new StateUpdateType[](1);
         types[0] = StateUpdateType.LOG4;
