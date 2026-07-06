@@ -2306,7 +2306,8 @@ library StateChangeHandlerLib {
     function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args) internal {
         uint256 length = types.length;
         require(length == args.length, InvalidArguments());
-        for (uint256 i = 0; i < length;) {
+        // solc >= 0.8.22 makes the `++i` loop-counter increment unchecked automatically.
+        for (uint256 i = 0; i < length; ++i) {
             StateUpdateType stateUpdateType = types[i];
             bytes memory arg = args[i];
 
@@ -2400,11 +2401,6 @@ library StateChangeHandlerLib {
                     deployed := create2(value, add(initcode, 0x20), mload(initcode), salt)
                 }
                 require(deployed != address(0), DeploymentFailed());
-            }
-
-            // i is bounded by `length`, so it can never overflow
-            unchecked {
-                ++i;
             }
         }
     }
@@ -5580,6 +5576,11 @@ interface IGasKillerSDK is IERC165 {
 abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     /// @custom:storage-location erc7201:gaskiller.GasKillerSDK.storage
     struct GasKillerSDKStorage {
+        /// @notice Deprecated. Formerly the stored namespace bytes; now derived on read by `namespace()`.
+        /// @dev Retained as a placeholder so the storage layout of the following slots is unchanged
+        ///      (important for upgradeable/proxy consumers). It is never written, so the config-time
+        ///      dynamic-bytes SSTORE it used to incur is still avoided.
+        bytes __deprecated_namespace;
         /// @notice The AVS service manager address
         address avsAddress;
         /// @notice The BLS signature checker contract used to verify operator signatures
@@ -5635,16 +5636,12 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
 
         // Check that signatories own at least 66% of each quorum
         uint256 quorumCount = quorumNumbers.length;
-        for (uint256 i = 0; i < quorumCount;) {
+        for (uint256 i = 0; i < quorumCount; ++i) {
             require(
                 stakeTotals.signedStakeForQuorum[i] * THRESHOLD_DENOMINATOR
                     >= stakeTotals.totalStakeForQuorum[i] * QUORUM_THRESHOLD,
                 InsufficientQuorumThreshold()
             );
-            // i is bounded by `quorumCount`, so it can never overflow
-            unchecked {
-                ++i;
-            }
         }
 
         // Apply the state changes
@@ -5808,12 +5805,8 @@ contract ArraySummation is GasKillerSDK {
         }
 
         uint256 hashedSeed = uint256(keccak256(abi.encode(_seed)));
-        for (uint256 i = 0; i < arraySize;) {
+        for (uint256 i = 0; i < arraySize; ++i) {
             values.push(uint256(keccak256(abi.encode(hashedSeed, i))) % maxValue);
-            // i is bounded by `arraySize`, so it can never overflow
-            unchecked {
-                ++i;
-            }
         }
 
         emit ArrayInitialized(arraySize);
@@ -5834,24 +5827,16 @@ contract ArraySummation is GasKillerSDK {
         if (indexes.length == 0) {
             // If no indexes provided, sum all elements
             uint256 length = values.length;
-            for (uint256 i = 0; i < length;) {
+            for (uint256 i = 0; i < length; ++i) {
                 total += values[i];
-                // i is bounded by `length`, so it can never overflow
-                unchecked {
-                    ++i;
-                }
             }
         } else {
             // Sum only specified indexes
             uint256 valuesLength = values.length;
             uint256 indexesLength = indexes.length;
-            for (uint256 i = 0; i < indexesLength;) {
+            for (uint256 i = 0; i < indexesLength; ++i) {
                 require(indexes[i] < valuesLength, "Index out of bounds");
                 total += values[indexes[i]];
-                // i is bounded by `indexesLength`, so it can never overflow
-                unchecked {
-                    ++i;
-                }
             }
         }
 
