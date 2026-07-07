@@ -2,5 +2,10 @@
 src = "src"
 out = "out"
 libs = ["lib"]
+# GasKillerVertex's cross-margin/perp math has many locals; the IR pipeline avoids stack-too-deep
+# and produces equivalent (better-optimized) bytecode for the other examples.
+via_ir = true
+optimizer = true
+optimizer_runs = 200
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
