@@ -7,5 +7,7 @@ libs = ["lib"]
 via_ir = true
 optimizer = true
 optimizer_runs = 200
+# Allow the demo deploy script to write frontend/src/deployments.json
+fs_permissions = [{ access = "read-write", path = "./frontend" }]
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
