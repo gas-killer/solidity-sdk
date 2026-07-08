@@ -1,0 +1,22 @@
+@import "tailwindcss";
+@import "@breadcoop/ui/theme";
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  background: #f6f4ef;
+  font-family: "Bread Body", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Thin scrollbars for the order-book / positions panes */
+.gk-scroll::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+.gk-scroll::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 8px;
+}

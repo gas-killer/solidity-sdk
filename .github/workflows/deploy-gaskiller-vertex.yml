@@ -1,0 +1,46 @@
+name: Deploy GasKillerVertex (etherform)
+
+# Deploys the GasKillerVertex demo stack to a testnet using BreadchainCoop/etherform's reusable
+# deployment workflow, then prints the addresses to feed into the Latch frontend.
+#
+# The frontend (RonTuretzky/latch) resolves contract addresses at runtime from an addresses.json
+# manifest on its `addresses` branch (the crowdstake.fun convention). After this deploy, run the
+# frontend repo's "Publish addresses manifest" workflow with the printed chainId + addresses (or a
+# public RPC URL) — no frontend rebuild is needed; the live site picks the new address up on reload.
+#
+# Requires repo secrets: PRIVATE_KEY (funded on the target testnet) and RPC_URL (the target network).
+# Manual only — a contract deploy spends real testnet gas.
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy-script:
+        description: "Foundry deploy script"
+        default: "script/DeployVertex.s.sol:DeployVertex"
+        type: string
+
+jobs:
+  deploy:
+    uses: BreadchainCoop/etherform/.github/workflows/_deploy-testnet.yml@main
+    with:
+      deploy-script: ${{ inputs.deploy-script }}
+      network-config-path: .github/deploy-networks.json
+      # No Blockscout API key wired here; flip on once a verifier URL/key is configured.
+      verify-contracts: false
+    secrets:
+      PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+      RPC_URL: ${{ secrets.RPC_URL }}
+
+  report:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Next step
+        run: |
+          echo "GasKillerVertex deployed via etherform. See the deploy job's" >> "$GITHUB_STEP_SUMMARY"
+          echo "deployments/<network>/deployment.json for the addresses (GasKillerVertex, DemoUSDC," >> "$GITHUB_STEP_SUMMARY"
+          echo "DemoBLSChecker)." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Then run RonTuretzky/latch → 'Publish addresses manifest' with the chainId, a public" >> "$GITHUB_STEP_SUMMARY"
+          echo "RPC URL, and those addresses. The live site picks them up on next load — no rebuild." >> "$GITHUB_STEP_SUMMARY"
