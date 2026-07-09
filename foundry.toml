@@ -5,5 +5,6 @@ libs = ["lib"]
 # on-chain LLM example: tests read model fixtures and run multi-hundred-Mgas inference
 fs_permissions = [{ access = "read", path = "./test/fixtures" }]
 gas_limit = "18446744073709551615"
+memory_limit = 134217728
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

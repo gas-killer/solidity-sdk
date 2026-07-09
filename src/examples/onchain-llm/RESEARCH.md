@@ -94,7 +94,38 @@ one-STORE application (~0.5M gas with a real quorum check). That is the pitch of
 example in one line: **a four-order-of-magnitude gas kill on a workload that no amount
 of on-chain optimization could ever make deliverable.**
 
-## 4. What "most meaningful" meant here
+## 4. Scaling to Qwen3-0.6B (engine v2)
+
+Porting a real 596M-parameter instruct model surfaced constraints invisible at 260K:
+
+- **The memory-expansion wall is the true scale limit, not gas.** EVM memory costs
+  `3w + w²/512`; loading 597MB at once costs ~2.7T gas — more than the whole 2^40
+  budget. Answer: stream tensors through a reused scratch buffer (memory high-water =
+  largest tensor ≈ 3.2MB) and pack the KV cache (int32 Q16, 8/word). Copy overhead is
+  ~0.1 gas/byte/token — noise against ~28 gas/MAC compute.
+- **Q24, not Q32.** Qwen3's residual stream peaks ~8,200 (outlier dims); Q24 keeps
+  every int64 accumulation in the numpy-accelerated reference provably in range while
+  still exceeding float32's relative precision. The EVM side is indifferent (int256).
+- **Per-row int8 is enough.** Measured: first 28/40 greedy tokens identical to float,
+  divergence lands on an equally coherent continuation. Per-tensor scales (v1) would
+  not survive Qwen3's outliers; per-row does.
+- **Prefill must skip the classifier.** The tied classifier over 151,936 tokens costs
+  ~4.5B gas per position; teacher-forced positions don't need it. Splitting
+  forward/argmax cut prompt processing cost ~25%.
+- **Tokenization moves off-chain, decoding stays on.** Byte-level BPE encode over a
+  151,936 vocab is feasible but heavy; prompt ids as calldata preserve operator
+  determinism (calldata is part of the signed task), and the answer text is still
+  produced trustlessly on-chain from the raw-bytes token table.
+- **Budget arithmetic at 0.6B** (measured on anvil, word-batched int8 kernel):
+  ~21.5B gas per prompt position and ~28.6B per generated token. The scalar kernel
+  measured 2.43× worse (838B vs 345B for prefill+1 token) — batching 32 int8 weights
+  per MLOAD is what makes real answers fit: a 16-id chat prompt + 8-token answer =
+  545.1B gas ≈ 50% of one 2^40 round (~26-token answers per round; longer via
+  multi-round re-prefill or further kernel/executor work). Wall-clock ≈ 1.0B gas/s
+  through anvil+callTracer (~9 min for the 8-token answer). The 128KB transport cap
+  is untouched (prompt ids + answer ≈ 2KB).
+
+## 5. What "most meaningful" meant here
 
 - **Real model, real weights, real text** — not a toy MLP: the canonical smallest
   coherent LLM, producing the same stories as its C reference, verifiable token-by-token.

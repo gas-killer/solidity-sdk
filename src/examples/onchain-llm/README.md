@@ -91,6 +91,67 @@ vectors that pin the Solidity implementation to it exactly.
 Meta's Llama tokenizer): greedy highest-score merges, dummy-prefix space, byte-fallback
 tokens, all on-chain over a compact blob.
 
+## Engine v2: Qwen3-0.6B — a real chat model on-chain
+
+`Qwen3.sol` + `Qwen3Engine.sol` + `GasKillerChat.sol` scale the same idea three
+orders of magnitude: **Qwen3-0.6B** (596M params, Apache 2.0), the smallest genuinely
+capable instruct model, running its full forward pass in Solidity. Asked
+"What is Ethereum?" on-chain, the integer-exact model answers:
+
+```
+Ethereum is a decentralized blockchain platform that allows users to create and
+run smart contracts. It was launched in 2015 by a team of developers led by
+Vitalik Buterin. ...
+```
+
+Measured on anvil (word-batched int8 kernel, `--gas-limit 2^40`): prompt prefill +
+1 token = **344.8B gas**; prompt + 8-token answer = **545.1B gas** (~9 min, ~1B gas/s)
+— half of one UnboundedV1 round, applied on-chain as one SSTORE + logs. And in
+**overlay mode** (see [UNBOUNDED_V2_OVERLAYS.md](./UNBOUNDED_V2_OVERLAYS.md)) the
+597MB of weights never touch the chain at all: the consumer commits to a 32-byte
+manifest hash, operators mount hash-verified bytes at derived phantom addresses, and
+the identical engine bytecode reads them via EXTCODECOPY.
+
+What 0.6B forces beyond v1:
+
+- **Streaming.** 597MB of int8 weights can't sit in EVM memory (quadratic expansion
+  would exceed 2^40 gas alone). The engine streams each tensor from its data
+  contracts through one reused scratch buffer (~3MB high-water) — 24,299 weight
+  chunks behind a two-level directory (root → pages → chunks).
+- **Qwen3 architecture.** Per-head QK-RMSNorm, decoupled head_dim (128 ≠ 1024/16),
+  RoPE theta 10^6 (HF half-dim convention folded into the weights by permutation at
+  conversion), eps 10^-6, SwiGLU, GQA 16/8.
+- **v2 numerics.** Q24 activations (Qwen3's residual stream peaks ~2^13; Q24 keeps
+  every accumulation provably in range), int8 weights with per-row power-of-two
+  scales, KV cache packed as int32 Q16 (8 per word), streaming argmax over the
+  151,936-token tied classifier. Teacher-forced prefill skips the classifier
+  entirely (~4.5B gas saved per prompt token).
+- **Tokenizer split.** Prompts are pre-tokenized off-chain (byte-level BPE + chat
+  template — deterministic, part of calldata, so operator consensus is unaffected);
+  the answer is decoded fully on-chain from a raw-bytes token table.
+- **Quantization quality**: the integer model matches float greedy decoding for the
+  first 28/40 tokens on the test prompt, then diverges to an equally coherent
+  phrasing — int8 per-row is effectively lossless in quality terms for this model.
+
+The bit-exactness chain is the same as v1: `tools/qwen3_int.py` is the integer spec
+(validated against the float model in `tools/qwen3_float.py`, itself a from-scratch
+numpy Qwen3 implementation), and the Foundry suite pins the Solidity to it — in CI
+via a tiny synthetic Qwen-architecture model (`test/fixtures/onchain-llm-v2/`),
+locally against the real 597MB artifacts.
+
+```bash
+# real-model artifacts (1.5GB download, ~5 min conversion; artifacts land outside git)
+python3 -m venv venv && venv/bin/pip install numpy tokenizers
+venv/bin/python src/examples/onchain-llm/tools/qwen3_convert.py \
+    --model model.safetensors --config config.json --tokenizer tokenizer.json \
+    --out artifacts/ --sol-out src/examples/onchain-llm
+
+# install on anvil (anvil_setCode, seconds) and deploy the consumer
+anvil --gas-limit 1099511627776 &
+python3 src/examples/onchain-llm/tools/deploy_anvil.py --artifacts artifacts/
+forge create ... Qwen3Engine && forge create ... GasKillerChat
+```
+
 ## Regenerating the artifacts
 
 ```bash
