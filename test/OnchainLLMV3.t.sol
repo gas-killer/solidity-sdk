@@ -2,9 +2,17 @@
 pragma solidity ^0.8.13;
 
 import {Test} from "forge-std/Test.sol";
+import {stdJson} from "forge-std/StdJson.sol";
 
+import {DataContractLib} from "../src/examples/onchain-llm/DataContractLib.sol";
+import {GasKillerChat35} from "../src/examples/onchain-llm/GasKillerChat35.sol";
 import {LlamaMath} from "../src/examples/onchain-llm/LlamaMath.sol";
 import {Qwen35} from "../src/examples/onchain-llm/Qwen35.sol";
+import {Qwen35Engine} from "../src/examples/onchain-llm/Qwen35Engine.sol";
+import {Qwen35Forward} from "../src/examples/onchain-llm/Qwen35Forward.sol";
+import {SyntheticQwen35} from "../src/examples/onchain-llm/SyntheticQwen35.sol";
+
+import {MockBLSSignatureChecker} from "./examples/OnchainLLM.t.sol";
 
 /// @notice Engine-v3 numerics unit tests: every expected integer below is derived
 ///         from the .context/qwen35/SPEC.md formulas evaluated with exact EVM
@@ -628,6 +636,122 @@ contract OnchainLLMV3PrimitivesTest is Test {
         uint256 word = arr[e / 8];
         assembly ("memory-safe") {
             v := signextend(3, shr(sub(224, mul(32, mod(e, 8))), word))
+        }
+    }
+}
+
+/// @notice Full-model engine-v3 fixture test: a tiny same-shape synthetic
+///         Qwen3.5-MoE model (2 DeltaNet layers + 1 full-attention layer,
+///         4-expert top-2 MoE with a shared expert; see
+///         .context/qwen35/synth35.py / synth35_run.py) run bit-exactly
+///         through `Qwen35`/`Qwen35Engine`/`Qwen35Forward` and checked
+///         against `tools/qwen35_int.py`-derived vectors
+///         (test/fixtures/onchain-llm-v3/vectors.json). Mirrors the engine-v2
+///         fixture test (test/examples/OnchainChat.t.sol) one-for-one.
+contract OnchainLLMV3FixtureTest is Test {
+    using stdJson for string;
+
+    address internal avsAddress = address(0x1234);
+
+    GasKillerChat35 internal chat;
+    Qwen35Engine internal engine;
+    MockBLSSignatureChecker internal blsChecker;
+
+    address[] internal weightChunks;
+    address[] internal tokChunks;
+    string internal vectors;
+    uint32[] internal promptIds;
+
+    function setUp() public {
+        string memory root = vm.projectRoot();
+        bytes memory weightsBlob = vm.readFileBinary(string.concat(root, "/test/fixtures/onchain-llm-v3/weights.bin"));
+        bytes memory tokBlob = vm.readFileBinary(string.concat(root, "/test/fixtures/onchain-llm-v3/tokenizer.bin"));
+        vectors = vm.readFile(string.concat(root, "/test/fixtures/onchain-llm-v3/vectors.json"));
+
+        uint256[] memory p = vectors.readUintArray(".promptIds");
+        for (uint256 i = 0; i < p.length; ++i) {
+            promptIds.push(uint32(p[i]));
+        }
+
+        // chunk both blobs, build the two-level directory: root -> page -> chunks
+        bytes memory pageBytes;
+        for (uint256 at = 0; at < weightsBlob.length; at += Qwen35.CHUNK) {
+            uint256 len = weightsBlob.length - at;
+            if (len > Qwen35.CHUNK) len = Qwen35.CHUNK;
+            address c = DataContractLib.write(_slice(weightsBlob, at, len));
+            weightChunks.push(c);
+            pageBytes = abi.encodePacked(pageBytes, c);
+        }
+        for (uint256 at = 0; at < tokBlob.length; at += Qwen35.CHUNK) {
+            uint256 len = tokBlob.length - at;
+            if (len > Qwen35.CHUNK) len = Qwen35.CHUNK;
+            address c = DataContractLib.write(_slice(tokBlob, at, len));
+            tokChunks.push(c);
+            pageBytes = abi.encodePacked(pageBytes, c);
+        }
+        address page = DataContractLib.write(pageBytes);
+        address dirRoot = DataContractLib.write(abi.encodePacked(page));
+
+        blsChecker = new MockBLSSignatureChecker();
+        engine = new Qwen35Engine(new Qwen35Forward());
+        chat = new GasKillerChat35(
+            avsAddress, address(blsChecker), engine, dirRoot, bytes32(0), SyntheticQwen35.packedConfig()
+        );
+    }
+
+    // ------------------------------------------------------------- forward
+
+    /// @notice Position-0 logits (teacher-forced prefill) match the integer
+    ///         reference bit-for-bit, across all three token-mixer kernels
+    ///         (DeltaNet x2, full attention x1) and the MoE tail.
+    function test_LogitsPos0MatchesReference() public view {
+        Qwen35.Config memory cfg = Qwen35.unpack(SyntheticQwen35.packedConfig());
+        Qwen35.Layout memory o = Qwen35.layout(cfg);
+        Qwen35.Store memory s = Qwen35.newStore(cfg, weightChunks);
+        Qwen35.Buffers memory b = Qwen35.newBuffers(cfg, 1);
+        int256[] memory got = Qwen35.logits(cfg, o, s, b, promptIds[0], 0);
+
+        int256[] memory expected = abi.decode(vm.parseBytes(vectors.readString(".logitsPos0")), (int256[]));
+        assertEq(got.length, expected.length, "logit count mismatch");
+        for (uint256 i = 0; i < expected.length; ++i) {
+            assertEq(got[i], expected[i], "logit mismatch");
+        }
+    }
+
+    /// @notice Greedy decode (short horizon, exercises stop-id / KV-cache /
+    ///         DeltaNet-state persistence across positions) matches exactly.
+    function test_ChatShortMatchesReference() public view {
+        _assertGeneration(".genShort");
+    }
+
+    /// @notice Greedy decode over a longer horizon.
+    function test_ChatLongMatchesReference() public view {
+        _assertGeneration(".genLong");
+    }
+
+    function _assertGeneration(string memory key) internal view {
+        uint256 maxNew = vectors.readUint(string.concat(key, ".maxNew"));
+        (string memory answer, uint32[] memory ids) = chat.dryRun(promptIds, maxNew);
+        uint256[] memory expected = vectors.readUintArray(string.concat(key, ".ids"));
+        assertEq(ids.length, expected.length, "id count mismatch");
+        for (uint256 i = 0; i < ids.length; ++i) {
+            assertEq(uint256(ids[i]), expected[i], "token id mismatch");
+        }
+        assertEq(
+            keccak256(bytes(answer)),
+            keccak256(vm.parseBytes(vectors.readString(string.concat(key, ".textHex")))),
+            "decoded text mismatch"
+        );
+    }
+
+    // ------------------------------------------------------------- helpers
+
+    function _slice(bytes memory data, uint256 start, uint256 len) internal pure returns (bytes memory out) {
+        out = new bytes(len);
+        assembly ("memory-safe") {
+            let src := add(add(data, 0x20), start)
+            let dst := add(out, 0x20)
+            for { let i := 0 } lt(i, len) { i := add(i, 0x20) } { mstore(add(dst, i), mload(add(src, i))) }
         }
     }
 }
