@@ -20,8 +20,10 @@ import {Qwen3} from "./Qwen3.sol";
 ///          of an int32 Q16 packed recurrent state, gated output norm.
 ///        - Full attention: 16/2 heads at head_dim 256, partial RoPE over the
 ///          first 64 dims, sigmoid output gate from the fused q/gate projection.
-///        - MoE: softmax-then-top-8 router (ties to the lowest index), 8 routed
-///          experts + 1 gated shared expert, all streamed through one scratch.
+///        - MoE: int16 hi-precision router rows; top-8 SELECTED over raw logits
+///          (ties to the lowest index), softmax weights computed only for the
+///          selected experts afterward (SPEC §7 rev 2); 8 routed experts + 1 gated
+///          shared expert, all streamed through one scratch.
 ///        - Untied classifier (lmHead) streamed in 512-row slices.
 library Qwen35 {
     /// @notice Activation fraction bits
@@ -329,7 +331,7 @@ library Qwen35 {
         // MoE tail (ln2 at relative 0)
         at = nd;
         o.tRouter = at;
-        at += c.nExperts * rowLen;
+        at += c.nExperts * (1 + 2 * c.dim); // router: ALWAYS int16 hi-precision rows (§1/§3)
         o.tSharedGate = at;
         at += rowLen;
         o.tSharedGateUp = at;
@@ -373,7 +375,7 @@ library Qwen35 {
         big = _max(big, 2 * c.qd * rowLen); // wqg
         big = _max(big, c.kvd * rowLen); // wk/wv
         big = _max(big, c.dim * (1 + c.qd * wB)); // wo
-        big = _max(big, c.nExperts * rowLen); // router
+        big = _max(big, c.nExperts * (1 + 2 * c.dim)); // router: int16 hi-precision rows
         big = _max(big, 2 * c.sharedDim * rowLen); // sharedGateUp
         big = _max(big, c.dim * (1 + c.sharedDim * wB)); // sharedDown
         big = _max(big, 2 * c.moeDim * rowLen); // expert gateUp
@@ -603,10 +605,9 @@ library Qwen35 {
     }
 
     /// @notice DeltaNet token mixer for one layer (§5.1-§5.5); adds into b.x
-    function _deltaBlock(Config memory c, Layout memory o, Store memory s, Buffers memory b, uint256 lb, uint256 linIdx)
-        private
-        view
-    {
+    function _deltaBlock(Config memory c, Layout memory o, Store memory s, Buffers memory b, uint256 l) private view {
+        uint256 lb = layerOffset(c, o, l);
+        uint256 linIdx = l - (l / c.fullInterval); // index among linear layers
         uint256 wB = c.wBits;
         uint256 rowLen = 1 + c.dim * wB;
         // §5.1 projections
@@ -629,9 +630,7 @@ library Qwen35 {
         }
         // §5.5 gated output norm, then gate with silu(z)
         loadRange(s, lb + o.oGnorm, 1 + 2 * c.dV, s.small, 0);
-        for (uint256 h = 0; h < c.nVH; ++h) {
-            Qwen3.rmsnormSlice(s.small, b.att, h * c.dV, b.att, h * c.dV, c.dV, c.epsQ48);
-        }
+        _headNorm(c, s, b.att, c.nVH, c.dV);
         for (uint256 j = 0; j < c.valueDim; ++j) {
             int256 zv = b.z[j];
             int256 sz = (zv * int256(sigQ32(zv))) >> 32; // silu(z), Q24
@@ -818,15 +817,12 @@ library Qwen35 {
     }
 
     /// @notice Full-attention token mixer for one layer (§6); adds into b.x
-    function _attnBlock(
-        Config memory c,
-        Layout memory o,
-        Store memory s,
-        Buffers memory b,
-        uint256 lb,
-        uint256 fullIdx,
-        uint256 pos
-    ) private view {
+    function _attnBlock(Config memory c, Layout memory o, Store memory s, Buffers memory b, uint256 l, uint256 pos)
+        private
+        view
+    {
+        uint256 lb = layerOffset(c, o, l);
+        uint256 fullIdx = (l + 1) / c.fullInterval - 1; // index among full layers
         uint256 wB = c.wBits;
         uint256 rowLen = 1 + c.dim * wB;
         loadRange(s, lb + o.oWqg, 2 * c.qd * rowLen, s.big, 0);
@@ -836,13 +832,9 @@ library Qwen35 {
         loadRange(s, lb + o.oWv, c.kvd * rowLen, s.big, 0);
         Qwen3.matmulRows(s.big, c.kvd, c.dim, wB, b.xb, b.v, 0);
         loadRange(s, lb + o.oQn, 1 + 2 * c.headDim, s.small, 0);
-        for (uint256 h = 0; h < c.nHeads; ++h) {
-            Qwen3.rmsnormSlice(s.small, b.qkv, h * c.headDim, b.qkv, h * c.headDim, c.headDim, c.epsQ48);
-        }
+        _headNorm(c, s, b.qkv, c.nHeads, c.headDim);
         loadRange(s, lb + o.oKn, 1 + 2 * c.headDim, s.small, 0);
-        for (uint256 h = 0; h < c.nKv; ++h) {
-            Qwen3.rmsnormSlice(s.small, b.k, h * c.headDim, b.k, h * c.headDim, c.headDim, c.epsQ48);
-        }
+        _headNorm(c, s, b.k, c.nKv, c.headDim);
         ropePartial(s.rope, b.qkv, c.nHeads, c.headDim, c.rot);
         ropePartial(s.rope, b.k, c.nKv, c.headDim, c.rot);
         cacheStore(c, b, fullIdx, pos);
@@ -893,8 +885,35 @@ library Qwen35 {
         }
     }
 
-    /// @notice MoE block (§7): shared expert + softmax-top-k routed experts;
-    ///         adds into b.x. Input is b.xb (post-ln2).
+    /// @notice Top-k SELECTION over raw (possibly negative) router logits (§7 rev 2)
+    /// @dev k passes of strict `>` argmax directly on `rl` (first maximum wins, ties
+    ///      to the lowest index); selected entries are excluded from later passes via
+    ///      an explicit `taken` flag (rl may be negative, so -1/sentinel-in-place is
+    ///      not usable here as it is in `selectTopK`). Does NOT touch `rl` or compute
+    ///      softmax — see SPEC §7: selection is over raw logits, weights are computed
+    ///      afterward only for the selected k.
+    /// @param rl Router logits, Q24 (untouched)
+    /// @param k Number of experts to select
+    /// @param idx Output: selected expert ids, in selection order (highest first)
+    function selectTopKIndices(int256[] memory rl, uint256 k, uint256[] memory idx) internal pure {
+        uint256 n = rl.length;
+        bool[] memory taken = new bool[](n);
+        for (uint256 t = 0; t < k; ++t) {
+            int256 bestVal = type(int256).min;
+            uint256 best = 0;
+            for (uint256 i = 0; i < n; ++i) {
+                if (!taken[i] && rl[i] > bestVal) {
+                    bestVal = rl[i];
+                    best = i;
+                }
+            }
+            idx[t] = best;
+            taken[best] = true;
+        }
+    }
+
+    /// @notice MoE block (§7 rev 2): shared expert + top-k-by-raw-logit routed
+    ///         experts; adds into b.x. Input is b.xb (post-ln2).
     function _moeBlock(Config memory c, Layout memory o, Store memory s, Buffers memory b, uint256 tailBase)
         private
         view
@@ -929,22 +948,32 @@ library Qwen35 {
         Qwen3.matmulRows(s.big, c.dim, c.sharedDim, wB, b.gu, b.shared, 0);
     }
 
-    /// @dev Router: softmax numerators over ALL experts, then top-k into b.selIdx/selW
+    /// @dev Router (§7 rev 2): int16 hi-precision rows (ALWAYS wBits=2, regardless of
+    ///      the model's general wBits — SPEC §1/§3 "hi-precision rows"), top-k
+    ///      SELECTION over the raw logits (not softmax numerators — selection-order
+    ///      tie-breaks differ), softmax weights computed only for the selected k with
+    ///      mx = rl[sel[0]] (the value at the globally-selected max, not a re-scan).
     function _routerSelect(Config memory c, Layout memory o, Store memory s, Buffers memory b, uint256 tailBase)
         private
         view
     {
-        loadRange(s, tailBase + o.tRouter, c.nExperts * (1 + c.dim * c.wBits), s.big, 0);
-        Qwen3.matmulRows(s.big, c.nExperts, c.dim, c.wBits, b.xb, b.rl, 0);
+        loadRange(s, tailBase + o.tRouter, c.nExperts * (1 + 2 * c.dim), s.big, 0);
+        Qwen3.matmulRows(s.big, c.nExperts, c.dim, 2, b.xb, b.rl, 0);
         int256[] memory rl = b.rl;
-        int256 mx = type(int256).min;
-        for (uint256 i = 0; i < c.nExperts; ++i) {
-            if (rl[i] > mx) mx = rl[i];
+        uint256[] memory selIdx = b.selIdx;
+        uint256 k = c.topK;
+        selectTopKIndices(rl, k, selIdx);
+        int256 mx = rl[selIdx[0]]; // == global max (first-selected is the argmax)
+        uint256[] memory selW = b.selW;
+        uint256 tot;
+        for (uint256 t = 0; t < k; ++t) {
+            uint256 ei = LlamaMath.expQ32((rl[selIdx[t]] - mx) << 8) >> 8; // expQ24
+            selW[t] = ei;
+            tot += ei;
         }
-        for (uint256 i = 0; i < c.nExperts; ++i) {
-            rl[i] = int256(LlamaMath.expQ32((rl[i] - mx) << 8) >> 8); // expQ24
+        for (uint256 t = 0; t < k; ++t) {
+            selW[t] = (selW[t] << 32) / tot;
         }
-        selectTopK(rl, c.topK, b.selIdx, b.selW);
     }
 
     /// @dev Routed experts in selection order: acc_j += sar(down(swiglu) * w, 32)
@@ -997,23 +1026,37 @@ library Qwen35 {
 
         for (uint256 l = 0; l < c.nLayers; ++l) {
             uint256 lb = layerOffset(c, o, l);
-            loadRange(s, lb, 1 + 2 * c.dim, s.small, 0); // ln1
-            Qwen3.rmsnormSlice(s.small, b.x, 0, b.xb, 0, c.dim, c.epsQ48);
+            _normInto(c, s, b, lb); // ln1
             uint256 tailBase;
             if ((l + 1) % c.fullInterval == 0) {
-                _attnBlock(c, o, s, b, lb, (l + 1) / c.fullInterval - 1, pos);
+                _attnBlock(c, o, s, b, l, pos);
                 tailBase = lb + o.fullTail;
             } else {
-                _deltaBlock(c, o, s, b, lb, l - (l / c.fullInterval));
+                _deltaBlock(c, o, s, b, l);
                 tailBase = lb + o.linTail;
             }
-            loadRange(s, tailBase, 1 + 2 * c.dim, s.small, 0); // ln2 at tail start
-            Qwen3.rmsnormSlice(s.small, b.x, 0, b.xb, 0, c.dim, c.epsQ48);
+            _normInto(c, s, b, tailBase); // ln2 at tail start
             _moeBlock(c, o, s, b, tailBase);
         }
 
-        loadRange(s, o.normOff, 1 + 2 * c.dim, s.small, 0);
+        _normInto(c, s, b, o.normOff); // finalNorm
+    }
+
+    /// @dev Stream the norm tensor at blob offset `off` and rmsnorm b.x into b.xb
+    function _normInto(Config memory c, Store memory s, Buffers memory b, uint256 off) private view {
+        loadRange(s, off, 1 + 2 * c.dim, s.small, 0);
         Qwen3.rmsnormSlice(s.small, b.x, 0, b.xb, 0, c.dim, c.epsQ48);
+    }
+
+    /// @dev Per-head RMSNorm in place over `stride`-sized heads with the streamed
+    ///      norm weights in s.small
+    function _headNorm(Config memory c, Store memory s, int256[] memory arr, uint256 heads, uint256 stride)
+        private
+        pure
+    {
+        for (uint256 h = 0; h < heads; ++h) {
+            Qwen3.rmsnormSlice(s.small, arr, h * stride, arr, h * stride, stride, c.epsQ48);
+        }
     }
 
     /// @notice Streaming untied-classifier argmax: CLS_SLICE lmHead rows at a time

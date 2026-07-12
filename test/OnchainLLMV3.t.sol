@@ -3,6 +3,7 @@ pragma solidity ^0.8.13;
 
 import {Test} from "forge-std/Test.sol";
 
+import {LlamaMath} from "../src/examples/onchain-llm/LlamaMath.sol";
 import {Qwen35} from "../src/examples/onchain-llm/Qwen35.sol";
 
 /// @notice Engine-v3 numerics unit tests: every expected integer below is derived
@@ -518,6 +519,96 @@ contract OnchainLLMV3PrimitivesTest is Test {
         assertEq(w[0], uint256(1) << 32);
         assertEq(w[1], 0);
         assertEq(w[2], 0);
+    }
+
+    // ------------------------------------------------ rev-2 raw-logit top-k
+
+    /// @notice SPEC §7 rev 2: selection is over RAW router logits (any sign), not
+    ///         softmax numerators. Negative and zero logits must be selectable and
+    ///         correctly ordered against positive ones; ties break to lowest index.
+    function test_SelectTopKIndices_SignedTieBreak() public pure {
+        int256[] memory rl = new int256[](8);
+        rl[0] = int256(5) << 24;
+        rl[1] = -(int256(3) << 24);
+        rl[2] = int256(9) << 24;
+        rl[3] = int256(9) << 24;
+        rl[4] = -100;
+        rl[5] = 0;
+        rl[6] = int256(9) << 24;
+        rl[7] = int256(2) << 24;
+        uint256[] memory idx = new uint256[](4);
+        Qwen35.selectTopKIndices(rl, 4, idx);
+
+        // three-way tie at 9<<24 (indices 2,3,6) resolves lowest-index-first, then
+        // the next highest (index 0, value 5<<24); rl is left untouched.
+        assertEq(idx[0], 2);
+        assertEq(idx[1], 3);
+        assertEq(idx[2], 6);
+        assertEq(idx[3], 0);
+        assertEq(rl[2], int256(9) << 24, "rl untouched");
+        assertEq(rl[3], int256(9) << 24, "rl untouched");
+    }
+
+    /// @notice All-negative logits: strict `>` still selects the least-negative first
+    ///         and a full k-of-n pass visits every index exactly once.
+    function test_SelectTopKIndices_AllNegative() public pure {
+        int256[] memory rl = new int256[](4);
+        rl[0] = -10;
+        rl[1] = -1;
+        rl[2] = -1000;
+        rl[3] = -5;
+        uint256[] memory idx = new uint256[](4);
+        Qwen35.selectTopKIndices(rl, 4, idx);
+        assertEq(idx[0], 1); // -1
+        assertEq(idx[1], 3); // -5
+        assertEq(idx[2], 0); // -10
+        assertEq(idx[3], 2); // -1000
+    }
+
+    /// @notice End-to-end SPEC §7 rev 2 weight pipeline on raw logits: select top-k
+    ///         by raw value, THEN mx = rl[sel[0]] (the global max), THEN
+    ///         e_i = expQ32((rl_i - mx) << 8) >> 8 for selected only, THEN
+    ///         w_i = (e_i << 32) / tot. Selection order must differ from selecting
+    ///         over softmax numerators only in edge cases (monotonicity makes the
+    ///         orderings equal here), so this pins the full pipeline is bit-exact
+    ///         against the primitives directly, independent of _routerSelect.
+    function test_RouterRevTwo_EndToEnd() public pure {
+        int256[] memory rl = new int256[](5);
+        rl[0] = int256(2) << 24; // selected 3rd
+        rl[1] = -(int256(4) << 24); // not selected
+        rl[2] = int256(6) << 24; // selected 1st (global max)
+        rl[3] = int256(6) << 24; // selected 2nd (tie, next index)
+        rl[4] = int256(1) << 24; // not selected (k=3)
+
+        uint256[] memory idx = new uint256[](3);
+        Qwen35.selectTopKIndices(rl, 3, idx);
+        assertEq(idx[0], 2);
+        assertEq(idx[1], 3);
+        assertEq(idx[2], 0);
+
+        int256 mx = rl[idx[0]];
+        assertEq(mx, int256(6) << 24);
+
+        uint256[] memory e = new uint256[](3);
+        uint256 tot;
+        for (uint256 t = 0; t < 3; ++t) {
+            e[t] = LlamaMath.expQ32((rl[idx[t]] - mx) << 8) >> 8;
+            tot += e[t];
+        }
+        // idx[0]/idx[1] are both at the max -> e = expQ32(0)>>8 = (1<<32)>>8
+        uint256 eMax = uint256(1 << 32) >> 8;
+        assertEq(e[0], eMax);
+        assertEq(e[1], eMax);
+        assertEq(e[2], LlamaMath.expQ32((int256(2) << 24) - (int256(6) << 24) << 8) >> 8);
+
+        uint256[] memory w = new uint256[](3);
+        for (uint256 t = 0; t < 3; ++t) {
+            w[t] = (e[t] << 32) / tot;
+        }
+        assertEq(w[0], w[1], "tied max experts get equal weight");
+        assertGt(w[0], w[2], "max experts outweigh the lower-logit one");
+        uint256 sumW = w[0] + w[1] + w[2];
+        assertApproxEqAbs(sumW, uint256(1) << 32, 4, "weights sum to ~1.0 in Q32");
     }
 
     // ------------------------------------------------------------- helpers
