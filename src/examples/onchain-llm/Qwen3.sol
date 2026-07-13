@@ -542,8 +542,9 @@ library Qwen3 {
     }
 
     /// @notice Attention block for one layer: norm, qkv, qk-norm, rope, attend, project
+    /// @dev internal (not private) so Qwen3Seg can replay layer ranges segment-wise
     function _attnBlock(Config memory c, Layout memory o, Store memory s, Buffers memory b, uint256 l, uint256 pos)
-        private
+        internal
         view
     {
         uint256 lb = o.layerBase + l * o.layerLen;
@@ -581,7 +582,8 @@ library Qwen3 {
     }
 
     /// @notice FFN block for one layer: norm, gate/up, swiglu, down, residual
-    function _ffnBlock(Config memory c, Layout memory o, Store memory s, Buffers memory b, uint256 l) private view {
+    /// @dev internal (not private) so Qwen3Seg can replay layer ranges segment-wise
+    function _ffnBlock(Config memory c, Layout memory o, Store memory s, Buffers memory b, uint256 l) internal view {
         uint256 lb = o.layerBase + l * o.layerLen;
         loadRange(s, lb + o.oLn2, 1 + c.dim * 2, s.small);
         rmsnormSlice(s.small, b.x, 0, b.xb, 0, c.dim, c.epsQ48);
@@ -678,8 +680,9 @@ library Qwen3 {
     }
 
     /// @notice x[i] = embedding row value scaled to Q24 (row shift <= 24)
+    /// @dev internal (not private) so layer-0 segments in Qwen3Seg can load embeddings
     function _loadEmbedding(Config memory c, Layout memory o, Store memory s, uint256 token, int256[] memory x)
-        private
+        internal
         view
     {
         loadRange(s, token * o.embRowStride, o.embRowStride, s.big);
@@ -708,7 +711,8 @@ library Qwen3 {
     }
 
     /// @notice loadRange variant writing at a destination byte offset
-    function _loadRangeAt(Store memory s, uint256 off, uint256 len, bytes memory dest, uint256 destOff) private view {
+    /// @dev internal (not private) so segments in Qwen3Seg can load per-position RoPE rows
+    function _loadRangeAt(Store memory s, uint256 off, uint256 len, bytes memory dest, uint256 destOff) internal view {
         require(destOff + len <= dest.length, "range>dest");
         address[] memory chunks = s.chunks;
         while (len > 0) {
