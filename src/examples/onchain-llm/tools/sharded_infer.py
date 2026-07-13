@@ -44,6 +44,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import deploy_anvil as da  # noqa: E402  (rpc_batch, chunk/page/root addresses, keccak256)
+import weight_shard as ws  # noqa: E402  (layout mirror + per-worker chunk sets + self-check)
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '..'))
 
@@ -220,17 +221,30 @@ def engine_runtime(contract_file, name):
     return out
 
 
-def install_worker(w, weights, tok, engine_code, seg_code, batch=10):
-    """Directory-mode model install (mirrors deploy_anvil.py main) + engine mounts."""
+def install_worker(w, weights, tok, engine_code, seg_code, batch=10, keep=None):
+    """Directory-mode model install (mirrors deploy_anvil.py main) + engine mounts.
+
+    keep=None installs the WHOLE model (every chunk) — unchanged behavior. When
+    `keep` is a set of global chunk indices (weight-sharding), only those CHUNK
+    contracts are set; the two-level page directory + root are ALWAYS installed
+    in full (pages are tiny) so Qwen3SegEngine._resolveWeights still resolves the
+    complete nWeightChunks+nTokChunks address list. Address resolution reads the
+    directory; only unheld CHUNK payloads are omitted, and the self-check proves
+    a worker never reads a chunk it doesn't hold.
+
+    Returns (n_all_chunks, installed_bytes, n_installed_chunks)."""
     chunks = []
     for blob in (weights, tok):
         for at in range(0, len(blob), da.CHUNK):
             chunks.append(blob[at:at + da.CHUNK])
-    calls = [('anvil_setCode', [da.chunk_addr(i), '0x00' + c.hex()]) for i, c in enumerate(chunks)]
+    n_all = len(chunks)
+    keep_idx = set(range(n_all)) if keep is None else {i for i in keep if 0 <= i < n_all}
+    calls = [('anvil_setCode', [da.chunk_addr(i), '0x00' + chunks[i].hex()])
+             for i in sorted(keep_idx)]
     pages = []
-    for p in range(0, len(chunks), da.PAGE_CAP):
+    for p in range(0, n_all, da.PAGE_CAP):
         payload = b''.join(bytes.fromhex(da.chunk_addr(i)[2:])
-                           for i in range(p, min(p + da.PAGE_CAP, len(chunks))))
+                           for i in range(p, min(p + da.PAGE_CAP, n_all)))
         pages.append(da.page_addr(len(pages)))
         calls.append(('anvil_setCode', [pages[-1], '0x00' + payload.hex()]))
     root_payload = b''.join(bytes.fromhex(a[2:]) for a in pages)
@@ -239,9 +253,11 @@ def install_worker(w, weights, tok, engine_code, seg_code, batch=10):
     calls.append(('anvil_setCode', [SEG_ADDR, seg_code]))
     for at in range(0, len(calls), batch):
         da.rpc_batch(w.url, calls[at:at + batch])
-    got = rpc(w.url, 'eth_getCode', [da.chunk_addr(0), 'latest'])
-    assert len(got) == 2 * (1 + len(chunks[0])) + 2, f'worker {w.index}: chunk 0 mismatch'
-    return len(chunks)
+    probe = min(keep_idx)
+    got = rpc(w.url, 'eth_getCode', [da.chunk_addr(probe), 'latest'])
+    assert len(got) == 2 * (1 + len(chunks[probe])) + 2, f'worker {w.index}: chunk {probe} mismatch'
+    installed_bytes = sum(len(chunks[i]) for i in keep_idx)
+    return n_all, installed_bytes, len(keep_idx)
 
 
 # ------------------------------------------------------------------ scheduler
@@ -275,18 +291,20 @@ class ShardedRunner:
         self.m = argmax_shards
         self.max_pos = max_pos
         n_layers = c['nLayers']
-        self.s = min(stages, n_layers)
+        # single source of truth for the DAG assignment — shared verbatim with
+        # weight_shard.plan_worker_chunks so installed chunk sets can never drift
+        # from the calls actually dispatched (see weight_shard.dag_plan).
+        self.plan = ws.dag_plan(n_layers, c['vocab'], stages, committee, argmax_shards, len(workers))
+        self.s = self.plan.stages
         if self.s != stages:
             print(f'  note: requested S={stages} clamped to {self.s} (model has {n_layers} layers)')
-        self.bounds = [(i * n_layers // self.s, (i + 1) * n_layers // self.s) for i in range(self.s)]
-        n = len(workers)
-        self.stage_committee = [[workers[(i * committee + j) % n] for j in range(committee)]
-                                for i in range(self.s)]
+        self.bounds = self.plan.bounds
+        self.stage_committee = [[workers[idx] for idx in stage] for stage in self.plan.stage_workers]
         self.k_acc = [b''] * n_layers  # accumulated wire-format K per absolute layer
         self.v_acc = [b''] * n_layers
         self.chk_chain = []
         self.tally = Tally()
-        self.pool = ThreadPoolExecutor(max_workers=max(8, n * committee))
+        self.pool = ThreadPoolExecutor(max_workers=max(8, len(workers) * committee))
 
     def _kv_in(self, stage):
         lo, hi = self.bounds[stage]
@@ -360,14 +378,11 @@ class ShardedRunner:
     def argmax(self, xb_final):
         """M parallel vocab shards (each on a k-committee), merged (score desc, id asc)."""
         t0 = time.monotonic()
-        vocab, n = self.c['vocab'], len(self.workers)
-        step = vocab // self.m
-        shards = [(j * step, vocab if j + 1 == self.m else (j + 1) * step) for j in range(self.m)]
         data = [enc_argmax_range(da.ROOT_ADDR, b'\x00' * 32, self.cfg, xb_final, lo, hi)
-                for lo, hi in shards]
+                for _, lo, hi in self.plan.argmax]
         futs = []
-        for j in range(self.m):
-            members = [self.workers[(j * self.k + i) % n] for i in range(self.k)]
+        for j, (members_idx, _lo, _hi) in enumerate(self.plan.argmax):
+            members = [self.workers[i] for i in members_idx]
             futs.append([self.pool.submit(w.call, SEG_ADDR, data[j]) for w in members])
         best = None
         for j, group in enumerate(futs):
@@ -445,6 +460,54 @@ def print_table(args, mono, sharded, runner):
         print(line)
 
 
+def print_footprint(lay, plan, keep_sets, stats, weights, tok):
+    """Per-worker installed footprint — the headline: each worker holds only the
+    chunks its assigned layers/roles read, not the whole model."""
+    full = len(weights) + len(tok)
+    roles = {w: {'layers': [], 'emb': False, 'cls': []} for w in range(plan.n_workers)}
+    for i, wids in enumerate(plan.stage_workers):
+        lo, hi = plan.bounds[i]
+        for w in wids:
+            roles[w]['layers'].append((lo, hi))
+            if lo == 0:
+                roles[w]['emb'] = True
+    for members, v_lo, v_hi in plan.argmax:
+        for w in members:
+            roles[w]['cls'].append((v_lo, v_hi))
+    line = '-' * 92
+    print(f'\n{line}\n WEIGHT-SHARD FOOTPRINT  (full model {full:,} B = {full / 1e6:.1f}MB '
+          f'weights+tok; {lay.nWeightChunks:,} weight + {lay.nTokChunks} tok chunks)\n{line}')
+    print(f'  {"worker":>6}  {"layers held":>12}  {"emb":>3}  {"argmax vocab rows":>19}  '
+          f'{"chunks":>6}  {"installed":>11}  {"%full":>6}')
+    tot = 0
+    for w in range(plan.n_workers):
+        _, ib, n_inst = stats[w]
+        tot += ib
+        lr = roles[w]['layers']
+        layer_str = ','.join(f'[{lo},{hi})' for lo, hi in lr) if lr else '-'
+        cls = roles[w]['cls']
+        cls_str = ','.join(f'[{a},{b})' for a, b in cls) if cls else '-'
+        print(f'  {w:>6}  {layer_str:>12}  {"Y" if roles[w]["emb"] else "-":>3}  '
+              f'{cls_str:>19}  {n_inst:>6}  {ib / 1e6:>8.1f}MB  {100 * ib / full:>5.1f}%')
+    print(f'{line}')
+    print(f'  monolithic install = {full / 1e6:.1f}MB on EVERY worker '
+          f'({plan.n_workers} workers x full = {plan.n_workers * full / 1e6:,.1f}MB); '
+          f'weight-sharded total = {tot / 1e6:,.1f}MB '
+          f'({100 * tot / (plan.n_workers * full):.1f}% of the replicated footprint)')
+    print(line)
+
+
+def print_weight_shard_result(args, ids, expect_ids):
+    line = '-' * 92
+    print(f'\n  token ids  weight-shard: {ids}')
+    print(f'  token ids  full-model:  {expect_ids}   (--expect-ids)')
+    ok = ids == expect_ids
+    print(f'\n  BIT-EXACT (weight-shard == full model): {"PASS" if ok else "FAIL"}')
+    print(line)
+    if not ok:
+        raise SystemExit('FAIL: weight-shard token ids diverge from the full-model ids')
+
+
 # ------------------------------------------------------------------------ main
 
 
@@ -461,12 +524,27 @@ def main():
     ap.add_argument('--prompt-ids', default='', help='comma-separated token ids (default: vectors.json)')
     ap.add_argument('--max-new', type=int, default=3)
     ap.add_argument('--base-port', type=int, default=9600, help='workers use base-port+1..+N')
+    ap.add_argument('--weight-shard', action='store_true',
+                    help='partial per-worker install: each worker holds ONLY the chunks '
+                         'its assigned layers/roles read (union over its DAG segments). '
+                         'Prints the per-worker footprint. Implies --mode sharded; the '
+                         'partial workers cannot run the monolithic chat baseline, so pass '
+                         '--expect-ids for the bit-exactness gate.')
+    ap.add_argument('--expect-ids', default='',
+                    help='comma-separated token ids the run must reproduce exactly '
+                         '(bit-exactness gate; required by --weight-shard).')
     args = ap.parse_args()
 
     if args.real:
         args.artifacts = os.path.join(REPO_ROOT, '.context/qwen3/artifacts')
     if shutil.which('anvil') is None or shutil.which('forge') is None:
         raise SystemExit('foundry (anvil/forge) is required on PATH')
+    if args.weight_shard:
+        args.mode = 'sharded'  # partial installs only make sense for the sharded DAG
+    expect_ids = [int(x) for x in args.expect_ids.split(',') if x.strip()] if args.expect_ids else None
+    if args.weight_shard and expect_ids is None:
+        raise SystemExit('--weight-shard needs --expect-ids (partial workers cannot run '
+                         'the monolithic baseline; supply the ids a full run produces)')
 
     weights, tok, vectors, cfg = load_artifacts(args.artifacts)
     c = unpack_config(cfg)
@@ -475,6 +553,18 @@ def main():
     max_pos = min(len(prompt_ids) + args.max_new, c['seqCap'])
     stages_eff = min(args.stages, c['nLayers'])
     n_workers = 1 if args.mode == 'mono' else (args.workers or stages_eff * args.committee)
+
+    # ---- weight-sharding plan: per-worker chunk sets + no-gap/no-leak self-check
+    keep_sets = None
+    if args.weight_shard:
+        lay = ws.Layout(ws.parse_config(cfg))
+        assert len(weights) == lay.weightLen, (len(weights), lay.weightLen)
+        plan = ws.dag_plan(c['nLayers'], c['vocab'], args.stages, args.committee,
+                           args.argmax_shards, n_workers)
+        keep_sets = ws.plan_worker_chunks(lay, plan, max_pos)
+        union, ref = ws.selfcheck(lay, keep_sets, max_pos)  # raises on gap/leak
+        print(f'weight-shard self-check: union of {n_workers} worker chunk sets == '
+              f'{len(ref)} chunks the monolithic run reads (no gap, no leak) OK')
 
     print(f'model: {args.artifacts} ({len(weights):,} weight B, dim {c["dim"]}, '
           f'{c["nLayers"]} layers, vocab {c["vocab"]})')
@@ -490,25 +580,35 @@ def main():
             w.start()
         t0 = time.monotonic()
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
-            n_chunks = list(pool.map(
-                lambda w: install_worker(w, weights, tok, engine_code, seg_code), workers))[0]
-        print(f'installed model ({n_chunks} chunks) + engines on every worker '
-              f'in {time.monotonic() - t0:.1f}s')
+            stats = list(pool.map(
+                lambda w: install_worker(w, weights, tok, engine_code, seg_code,
+                                         keep=(keep_sets[w.index] if keep_sets else None)),
+                workers))
+        n_chunks = stats[0][0]
+        if args.weight_shard:
+            print(f'weight-shard install ({n_chunks} chunks total) + engines in '
+                  f'{time.monotonic() - t0:.1f}s (per-worker footprint below)')
+        else:
+            print(f'installed model ({n_chunks} chunks) + engines on every worker '
+                  f'in {time.monotonic() - t0:.1f}s')
 
-        # ---- mono baseline (always: sharded mode asserts bit-exactness against it)
-        print(f'\n== mono baseline: Qwen3Engine.chat on worker 0 ==')
-        t0 = time.monotonic()
-        out, gas = workers[0].call(
-            ENGINE_ADDR, enc_chat(da.ROOT_ADDR, b'\x00' * 32, cfg, prompt_ids, args.max_new))
-        mono_wall = time.monotonic() - t0
-        answer, mono_ids = dec_chat(out)
-        mono = {'wall': mono_wall, 'gas': gas, 'ids': mono_ids, 'prompt': prompt_ids}
-        print(f'   {len(mono_ids)} tokens in {mono_wall:.3f}s, gas {fmt(gas)}: {mono_ids}')
+        # ---- mono baseline: full-model chat; skipped when workers are partial
+        mono = None
+        if not args.weight_shard:
+            print(f'\n== mono baseline: Qwen3Engine.chat on worker 0 ==')
+            t0 = time.monotonic()
+            out, gas = workers[0].call(
+                ENGINE_ADDR, enc_chat(da.ROOT_ADDR, b'\x00' * 32, cfg, prompt_ids, args.max_new))
+            mono_wall = time.monotonic() - t0
+            answer, mono_ids = dec_chat(out)
+            mono = {'wall': mono_wall, 'gas': gas, 'ids': mono_ids, 'prompt': prompt_ids}
+            print(f'   {len(mono_ids)} tokens in {mono_wall:.3f}s, gas {fmt(gas)}: {mono_ids}')
 
         sharded = None
         runner = None
         if args.mode == 'sharded':
-            print(f'\n== sharded: S={args.stages} stages, committee k={args.committee}, '
+            tag = 'weight-shard' if args.weight_shard else 'full-shard'
+            print(f'\n== {tag} sharded: S={args.stages} stages, committee k={args.committee}, '
                   f'M={args.argmax_shards} argmax shards, {n_workers} workers ==')
             runner = ShardedRunner(workers, cfg, c, args.stages, args.committee,
                                    args.argmax_shards, max_pos)
@@ -521,7 +621,15 @@ def main():
             sharded = {'wall': time.monotonic() - t0, 'ids': ids}
             runner.pool.shutdown()
 
-        print_table(args, mono, sharded, runner)
+        final_ids = sharded['ids'] if sharded else (mono['ids'] if mono else [])
+        if args.weight_shard:
+            print_footprint(lay, plan, keep_sets, stats, weights, tok)
+            print_weight_shard_result(args, sharded['ids'], expect_ids)
+        else:
+            print_table(args, mono, sharded, runner)
+            if expect_ids is not None and final_ids != expect_ids:
+                raise SystemExit(f'FAIL: ids {final_ids} != --expect-ids {expect_ids}')
+        print(f'\nRESULT_IDS={",".join(str(i) for i in final_ids)}')
     finally:
         for w in workers:
             w.stop()
