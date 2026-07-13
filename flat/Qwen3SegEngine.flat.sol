@@ -936,93 +936,427 @@ library Qwen3 {
     }
 }
 
-// src/examples/onchain-llm/Qwen3Engine.sol
+// src/examples/onchain-llm/Qwen3Seg.sol
 
-/// @title Qwen3Engine
-/// @notice Stateless engine-v2 inference: streams a chunked Qwen3-architecture model
-///         (hundreds of MB of int8 weights across tens of thousands of data contracts)
-///         and runs integer-only generation from pre-tokenized prompt ids, decoding
-///         the answer to UTF-8 on-chain. Reached via STATICCALL, so nothing here ever
-///         enters a Gas Killer state-update payload.
-/// @dev Directory is TWO-LEVEL because 24k+ chunk addresses exceed one data contract:
-///        root payload  = page data-contract addresses (20 bytes each)
-///        page payloads = chunk addresses, concatenated globally as
-///                        [weightChunk 0..W-1][tokenizerChunk 0..T-1]
-///      with W = ceil(weightLen / 24575), T = ceil(tokLen / 24575) from the config.
-///      Prompt tokenization happens off-chain (byte-level BPE with the chat template);
-///      the prompt ids are calldata, so operators still simulate identical inputs.
-///      Decoding is fully on-chain from the raw-bytes token table.
-contract Qwen3Engine {
-    /// @notice Domain separator for deriving overlay chunk addresses
-    /// @dev In overlay mode (rootDirectory == address(0)) chunk i lives at
-    ///      address(keccak256(abi.encodePacked(OVERLAY_DOMAIN, manifestHash, uint64(i)))),
-    ///      indices spanning weight chunks then tokenizer chunks. The bytes are
-    ///      mounted by the simulation environment (SimProfile code overlays pinned
-    ///      into chainConfigHash) instead of being deployed — see
-    ///      UNBOUNDED_V2_OVERLAYS.md. manifestHash =
-    ///      keccak256(abi.encodePacked(keccak256(weightsBlob), keccak256(tokenizerBlob))).
+/// @title Qwen3Seg
+/// @notice Sharded-inference v0 segment logic over the engine-v2 (Qwen3) kernels.
+///         One inference is split into hash-committed segments — a rectangle of
+///         positions [posLo, posHi) x layers [layerLo, layerHi) — that execute
+///         independently (different processes/nodes) and reassemble bit-exactly.
+///         NOTHING numeric is reimplemented here: every segment replays the exact
+///         monolithic code paths (Qwen3._attnBlock / _ffnBlock / rmsnormSlice /
+///         matmulRows / _loadEmbedding), so bit-exactness is inherited, not re-proven.
+/// @dev KV WIRE FORMAT (canonical, layer-major). For a layer range [layerLo, layerHi)
+///      and a position range [posA, posB):
+///
+///        for l in [layerLo, layerHi):
+///            K slice of layer l, positions [posA, posB)   ((posB-posA) * kvd * 4 bytes)
+///            V slice of layer l, positions [posA, posB)   ((posB-posA) * kvd * 4 bytes)
+///
+///      Each slice is the verbatim run of packed cache words the monolithic engine
+///      holds for that (layer, position range): int32 Q16 values, 8 per 32-byte word,
+///      big-endian lanes (element e occupies bits [224 - 32*(e%8), +32)), element
+///      index (l*maxPos + pos)*kvd + j. Because positions are contiguous within a
+///      layer at stride maxPos, hydration is a straight word copy into the same word
+///      positions the monolithic run would occupy — provided the SAME maxPos is
+///      pinned across every segment of a run (the stride bakes it in).
+///
+///      Total length = (layerHi-layerLo) * 2 * (posB-posA) * kvd * 4 bytes.
+///
+///      Segment checkpoint commitment:
+///        chk = keccak256(abi.encodePacked(
+///            "gaskiller.seg.v1", posLo, posHi, layerLo, layerHi,
+///            keccak256(abi.encodePacked(tokenIds)),
+///            keccak256(xIn), keccak256(kvIn), keccak256(xOut), keccak256(kvAppend)))
+library Qwen3Seg {
+    /// @notice Domain separator for segment checkpoint commitments
+    string internal constant CHK_DOMAIN = "gaskiller.seg.v1";
+
+    /// @notice Thrown when the segment rectangle is empty or out of bounds
+    error BadRange();
+
+    /// @notice Thrown when tokenIds/xIn/kvIn lengths don't match the rectangle
+    error BadSegmentInput();
+
+    /// @notice A segment rectangle: positions [posLo, posHi) x layers [layerLo, layerHi)
+    /// @dev maxPos is the KV-cache stride of the WHOLE run and must be identical
+    ///      across every segment of that run (see the wire-format note above)
+    struct Span {
+        uint256 maxPos;
+        uint256 posLo;
+        uint256 posHi;
+        uint256 layerLo;
+        uint256 layerHi;
+    }
+
+    /// @notice A full segment request (grouped to keep legacy-codegen stack pressure
+    ///         low in external facades — see the unroll/stack hazard note in Qwen3)
+    /// @dev expectXIn / expectKvIn are optional integrity witnesses: when nonzero the
+    ///      facade requires keccak256(xIn) / keccak256(kvIn) to match before running
+    struct Call {
+        Span span;
+        uint32[] tokenIds;
+        bytes xIn;
+        bytes kvIn;
+        bytes32 expectXIn;
+        bytes32 expectKvIn;
+    }
+
+    /// @notice Process positions [posLo, posHi) through layers [layerLo, layerHi) in
+    ///         the exact order the monolithic loop would (position-major)
+    /// @param c The config
+    /// @param s The chunked store
+    /// @param r The segment rectangle (+ pinned maxPos stride)
+    /// @param tokenIds Token ids for the processed positions (required iff layerLo == 0)
+    /// @param xIn If layerLo > 0: concat of (posHi-posLo) residual vectors entering
+    ///        layerLo (int256[dim] raw words, 32*dim bytes each). Must be empty when
+    ///        layerLo == 0 (inputs come from embeddings, keeping chk unambiguous).
+    /// @param kvIn This layer range's KV for positions [0, posLo) in the wire format
+    /// @return xOut Concat of residual vectors leaving layerHi-1 per position; if
+    ///         layerHi == nLayers the final rmsnorm is applied so each vector is the
+    ///         b.xb-equivalent that feeds the classifier directly
+    /// @return kvAppend This layer range's KV for positions [posLo, posHi)
+    /// @return chk The segment checkpoint commitment (see library natspec)
+    function forwardRange(
+        Qwen3.Config memory c,
+        Qwen3.Store memory s,
+        Span memory r,
+        uint32[] memory tokenIds,
+        bytes memory xIn,
+        bytes memory kvIn
+    ) internal view returns (bytes memory xOut, bytes memory kvAppend, bytes32 chk) {
+        _validate(c, r, tokenIds, xIn, kvIn);
+        Ctx memory t;
+        t.c = c;
+        t.o = Qwen3.layout(c);
+        t.s = s;
+        t.b = Qwen3.newBuffers(c, r.maxPos);
+        t.r = r;
+        t.tokenIds = tokenIds;
+        t.xIn = xIn;
+        hydrateKv(c, t.b, r.layerLo, r.layerHi, r.posLo, kvIn);
+        _processPositions(t);
+        xOut = t.xOut;
+        kvAppend = serializeKv(c, t.b, r.layerLo, r.layerHi, r.posLo, r.posHi);
+        chk = segmentChk(r, tokenIds, xIn, kvIn, xOut, kvAppend);
+    }
+
+    /// @notice The tied-classifier argmax restricted to rows [vocabLo, vocabHi)
+    /// @dev Replays argmaxClassifier's slice-streaming loop with its exact first-max-
+    ///      wins semantics (strict `>` over ascending rows). MERGE RULE for shards:
+    ///      compare (score, id) — higher score wins; on equal score the LOWER id wins.
+    ///      Because each shard scans ascending rows with strict `>`, merging ascending
+    ///      disjoint shards under this rule reproduces the monolithic first-max-wins
+    ///      result exactly.
+    /// @param c The config
+    /// @param s The chunked store
+    /// @param xb The final normed hidden state (a last-stage xOut vector)
+    /// @param vocabLo First classifier row (inclusive)
+    /// @param vocabHi Last classifier row (exclusive)
+    /// @return bestScore The maximum logit over the range
+    /// @return bestId The first row attaining it (lowest id on ties)
+    function argmaxRange(
+        Qwen3.Config memory c,
+        Qwen3.Store memory s,
+        int256[] memory xb,
+        uint256 vocabLo,
+        uint256 vocabHi
+    ) internal view returns (int256 bestScore, uint256 bestId) {
+        Qwen3.Layout memory o = Qwen3.layout(c);
+        if (vocabLo >= vocabHi || vocabHi > c.vocab) revert BadRange();
+        if (xb.length != c.dim) revert BadSegmentInput();
+        bestScore = type(int256).min;
+        bestId = vocabLo;
+        uint256 stride = o.embRowStride;
+        int256[] memory sliceOut = new int256[](Qwen3.CLS_SLICE);
+        for (uint256 row = vocabLo; row < vocabHi; row += Qwen3.CLS_SLICE) {
+            uint256 rows = vocabHi - row;
+            if (rows > Qwen3.CLS_SLICE) rows = Qwen3.CLS_SLICE;
+            Qwen3.loadRange(s, row * stride, rows * stride, s.big);
+            Qwen3.matmulRows(s.big, rows, c.dim, c.wBits, xb, sliceOut, 0);
+            for (uint256 i = 0; i < rows; ++i) {
+                if (sliceOut[i] > bestScore) {
+                    bestScore = sliceOut[i];
+                    bestId = row + i;
+                }
+            }
+        }
+    }
+
+    /// @notice Compute the segment checkpoint commitment
+    /// @dev v1 binds `tokenIds` so layer-0 segments commit their claimed token
+    ///      inputs, not only their outputs — an audit/challenge protocol can then
+    ///      falsify a segment from the commitment alone, without carrying the
+    ///      claimed prompt out-of-band.
+    function segmentChk(
+        Span memory r,
+        uint32[] memory tokenIds,
+        bytes memory xIn,
+        bytes memory kvIn,
+        bytes memory xOut,
+        bytes memory kvAppend
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(
+                CHK_DOMAIN,
+                r.posLo,
+                r.posHi,
+                r.layerLo,
+                r.layerHi,
+                keccak256(abi.encodePacked(tokenIds)),
+                keccak256(xIn),
+                keccak256(kvIn),
+                keccak256(xOut),
+                keccak256(kvAppend)
+            )
+        );
+    }
+
+    /// @notice Hydrate wire-format KV for positions [0, posCount) of layers
+    ///         [layerLo, layerHi) into freshly allocated caches at stride b.maxPos
+    /// @dev Writes into the exact word positions the monolithic run would occupy
+    function hydrateKv(
+        Qwen3.Config memory c,
+        Qwen3.Buffers memory b,
+        uint256 layerLo,
+        uint256 layerHi,
+        uint256 posCount,
+        bytes memory kvIn
+    ) internal pure {
+        if (layerLo >= layerHi || layerHi > c.nLayers || posCount > b.maxPos) revert BadRange();
+        uint256 sliceWords = posCount * c.kvd / 8;
+        if (kvIn.length != (layerHi - layerLo) * 2 * sliceWords * 32) revert BadSegmentInput();
+        for (uint256 l = layerLo; l < layerHi; ++l) {
+            uint256 srcOff = (l - layerLo) * 2 * sliceWords * 32;
+            uint256 dstWord = l * b.maxPos * c.kvd / 8;
+            _copyBytesToWords(kvIn, srcOff, b.kCache, dstWord, sliceWords);
+            _copyBytesToWords(kvIn, srcOff + sliceWords * 32, b.vCache, dstWord, sliceWords);
+        }
+    }
+
+    /// @notice Serialize the KV cache for positions [posA, posB) of layers
+    ///         [layerLo, layerHi) into the canonical wire format
+    function serializeKv(
+        Qwen3.Config memory c,
+        Qwen3.Buffers memory b,
+        uint256 layerLo,
+        uint256 layerHi,
+        uint256 posA,
+        uint256 posB
+    ) internal pure returns (bytes memory out) {
+        if (layerLo >= layerHi || layerHi > c.nLayers || posA >= posB || posB > b.maxPos) {
+            revert BadRange();
+        }
+        uint256 sliceWords = (posB - posA) * c.kvd / 8;
+        out = new bytes((layerHi - layerLo) * 2 * sliceWords * 32);
+        for (uint256 l = layerLo; l < layerHi; ++l) {
+            uint256 srcWord = (l * b.maxPos + posA) * c.kvd / 8;
+            uint256 dstOff = (l - layerLo) * 2 * sliceWords * 32;
+            _copyWordsToBytes(b.kCache, srcWord, out, dstOff, sliceWords);
+            _copyWordsToBytes(b.vCache, srcWord, out, dstOff + sliceWords * 32, sliceWords);
+        }
+    }
+
+    /// @notice Decode a raw-words byte blob (32*dim bytes) into an int256[dim] vector
+    function bytesToVec(bytes memory blob, uint256 dim) internal pure returns (int256[] memory xb) {
+        if (blob.length != dim * 32) revert BadSegmentInput();
+        xb = new int256[](dim);
+        _copyBytesToWords(blob, 0, _asWords(xb), 0, dim);
+    }
+
+    /// @dev Bundled segment-execution context (single stack slot under legacy codegen)
+    struct Ctx {
+        Qwen3.Config c;
+        Qwen3.Layout o;
+        Qwen3.Store s;
+        Qwen3.Buffers b;
+        Span r;
+        uint32[] tokenIds;
+        bytes xIn;
+        bytes xOut;
+    }
+
+    /// @dev Position-major replay of the monolithic loop restricted to the rectangle
+    function _processPositions(Ctx memory t) private view {
+        t.xOut = new bytes((t.r.posHi - t.r.posLo) * t.c.dim * 32);
+        for (uint256 pos = t.r.posLo; pos < t.r.posHi; ++pos) {
+            uint256 rel = pos - t.r.posLo;
+            if (t.r.layerLo == 0) {
+                Qwen3._loadEmbedding(t.c, t.o, t.s, t.tokenIds[rel], t.b.x);
+            } else {
+                _copyBytesToWords(t.xIn, rel * t.c.dim * 32, _asWords(t.b.x), 0, t.c.dim);
+            }
+            _loadRope(t.c, t.o, t.s, pos);
+            for (uint256 l = t.r.layerLo; l < t.r.layerHi; ++l) {
+                Qwen3._attnBlock(t.c, t.o, t.s, t.b, l, pos);
+                Qwen3._ffnBlock(t.c, t.o, t.s, t.b, l);
+            }
+            if (t.r.layerHi == t.c.nLayers) {
+                // final stage: apply the model-final rmsnorm so xOut feeds argmax directly
+                Qwen3.loadRange(t.s, t.o.normOff, 1 + t.c.dim * 2, t.s.small);
+                Qwen3.rmsnormSlice(t.s.small, t.b.x, 0, t.b.xb, 0, t.c.dim, t.c.epsQ48);
+                _copyWordsToBytes(_asWords(t.b.xb), 0, t.xOut, rel * t.c.dim * 32, t.c.dim);
+            } else {
+                _copyWordsToBytes(_asWords(t.b.x), 0, t.xOut, rel * t.c.dim * 32, t.c.dim);
+            }
+        }
+    }
+
+    /// @dev Load this position's RoPE cos||sin rows exactly as Qwen3.forward does
+    function _loadRope(Qwen3.Config memory c, Qwen3.Layout memory o, Qwen3.Store memory s, uint256 pos) private view {
+        uint256 half = c.headDim / 2;
+        Qwen3.loadRange(s, o.ropeCosOff + pos * half * 4, half * 4, s.rope);
+        Qwen3._loadRangeAt(s, o.ropeSinOff + pos * half * 4, half * 4, s.rope, half * 4);
+    }
+
+    /// @dev Rectangle + input-length validation
+    function _validate(
+        Qwen3.Config memory c,
+        Span memory r,
+        uint32[] memory tokenIds,
+        bytes memory xIn,
+        bytes memory kvIn
+    ) private pure {
+        if (r.layerLo >= r.layerHi || r.layerHi > c.nLayers) revert BadRange();
+        if (r.posLo >= r.posHi || r.posHi > r.maxPos || r.maxPos > c.seqCap) revert BadRange();
+        uint256 n = r.posHi - r.posLo;
+        if (r.layerLo == 0) {
+            if (tokenIds.length != n || xIn.length != 0) revert BadSegmentInput();
+            for (uint256 i = 0; i < n; ++i) {
+                if (tokenIds[i] >= c.vocab) revert BadSegmentInput();
+            }
+        } else {
+            if (xIn.length != n * c.dim * 32) revert BadSegmentInput();
+        }
+        if (kvIn.length != (r.layerHi - r.layerLo) * 2 * r.posLo * c.kvd * 4) revert BadSegmentInput();
+    }
+
+    /// @dev Reinterpret an int256[] as uint256[] (identical memory layout)
+    function _asWords(int256[] memory a) private pure returns (uint256[] memory w) {
+        assembly ("memory-safe") {
+            w := a
+        }
+    }
+
+    /// @dev Copy `nWords` 32-byte words from a byte blob into a word array
+    function _copyBytesToWords(bytes memory src, uint256 srcOff, uint256[] memory dst, uint256 dstWord, uint256 nWords)
+        private
+        pure
+    {
+        require(srcOff + nWords * 32 <= src.length, "src overrun");
+        require(dstWord + nWords <= dst.length, "dst overrun");
+        assembly ("memory-safe") {
+            let sp := add(add(src, 0x20), srcOff)
+            let dp := add(add(dst, 0x20), shl(5, dstWord))
+            for { let i := 0 } lt(i, nWords) { i := add(i, 1) } {
+                mstore(add(dp, shl(5, i)), mload(add(sp, shl(5, i))))
+            }
+        }
+    }
+
+    /// @dev Copy `nWords` 32-byte words from a word array into a byte blob
+    function _copyWordsToBytes(uint256[] memory src, uint256 srcWord, bytes memory dst, uint256 dstOff, uint256 nWords)
+        private
+        pure
+    {
+        require(srcWord + nWords <= src.length, "src overrun");
+        require(dstOff + nWords * 32 <= dst.length, "dst overrun");
+        assembly ("memory-safe") {
+            let sp := add(add(src, 0x20), shl(5, srcWord))
+            let dp := add(add(dst, 0x20), dstOff)
+            for { let i := 0 } lt(i, nWords) { i := add(i, 1) } {
+                mstore(add(dp, shl(5, i)), mload(add(sp, shl(5, i))))
+            }
+        }
+    }
+}
+
+// src/examples/onchain-llm/Qwen3SegEngine.sol
+
+/// @title Qwen3SegEngine
+/// @notice Stateless external-view facade for sharded-inference-v0 segments: exposes
+///         forwardRange (a positions x layers rectangle of the transformer) and
+///         argmaxRange (a vocab shard of the tied classifier) over the same chunked
+///         weight store / overlay addressing as Qwen3Engine. Zero storage; reached
+///         via STATICCALL, so segments return hash commitments instead of logging.
+/// @dev Directory / overlay resolution mirrors Qwen3Engine exactly (weight chunks
+///      only — segments never touch the tokenizer). See Qwen3Seg for the KV wire
+///      format and the checkpoint-commitment definition.
+contract Qwen3SegEngine {
+    /// @notice Domain separator for deriving overlay chunk addresses (== Qwen3Engine's)
     string public constant OVERLAY_DOMAIN = "gaskiller.llm.overlay.v1";
 
     /// @notice Thrown when the directory shape doesn't match the config
     error MalformedDirectory();
 
-    /// @notice Thrown when deployed artifact lengths don't match the config
-    error WeightLengthMismatch();
+    /// @notice Thrown when a nonzero expected-input hash doesn't match the input
+    error WitnessMismatch();
 
-    /// @notice Thrown when the tokenizer blob is malformed or the wrong type
-    error MalformedTokenTable();
-
-    /// @notice Generate an answer from pre-tokenized prompt ids
+    /// @notice Run one segment: positions [span.posLo, span.posHi) through layers
+    ///         [span.layerLo, span.layerHi), in monolithic (position-major) order
     /// @param rootDirectory Root of the two-level chunk directory, or address(0) for
     ///        overlay mode (chunk addresses derived from `manifestHash`)
     /// @param manifestHash Overlay manifest hash (ignored in directory mode)
     /// @param packedConfig The packed model config from tools/qwen3_convert.py
-    /// @param promptIds The prompt token ids (chat template applied off-chain)
-    /// @param maxNewTokens Upper bound on generated tokens (clamped to context)
-    /// @return answer The generated UTF-8 text (stop tokens omitted)
-    /// @return answerIds The generated token ids (including a trailing stop token)
-    function chat(
+    /// @param q The segment request: span (rectangle + pinned maxPos KV stride),
+    ///        tokenIds (required iff layerLo == 0), xIn (residual vectors entering
+    ///        layerLo; empty iff layerLo == 0), kvIn (this layer range's KV for
+    ///        positions [0, posLo) in the wire format) and the optional
+    ///        expectXIn / expectKvIn integrity witnesses (checked iff nonzero).
+    ///        Grouped as a struct so the facade compiles under legacy codegen
+    ///        without via-IR (flattened, the decode is stack-too-deep).
+    /// @return xOut Residual (or final-normed, when layerHi == nLayers) vectors leaving
+    ///         the segment, one per processed position
+    /// @return kvAppend This layer range's KV for positions [posLo, posHi), wire format
+    /// @return chk The segment checkpoint commitment (see Qwen3Seg natspec)
+    function forwardRange(
         address rootDirectory,
         bytes32 manifestHash,
         bytes32[3] memory packedConfig,
-        uint32[] memory promptIds,
-        uint256 maxNewTokens
-    ) external view returns (string memory answer, uint32[] memory answerIds) {
+        Qwen3Seg.Call memory q
+    ) external view returns (bytes memory xOut, bytes memory kvAppend, bytes32 chk) {
+        if (q.expectXIn != bytes32(0) && keccak256(q.xIn) != q.expectXIn) {
+            revert WitnessMismatch();
+        }
+        if (q.expectKvIn != bytes32(0) && keccak256(q.kvIn) != q.expectKvIn) revert WitnessMismatch();
         Qwen3.Config memory c = Qwen3.unpack(packedConfig);
-        (address[] memory wChunks, address[] memory tChunks) = _resolve(rootDirectory, manifestHash, c);
-        Qwen3.Store memory s = Qwen3.newStore(c, wChunks);
-        answerIds = Qwen3.generate(c, s, promptIds, maxNewTokens);
-        bytes memory table = _readAll(tChunks, c.tokLen);
-        answer = string(_decode(table, answerIds, c.stop0, c.stop1));
+        return Qwen3Seg.forwardRange(
+            c, Qwen3.newStore(c, _resolveWeights(rootDirectory, manifestHash, c)), q.span, q.tokenIds, q.xIn, q.kvIn
+        );
     }
 
-    /// @notice Validate config, directory shape and artifact lengths; reverts on mismatch
-    /// @dev In overlay mode this only succeeds in an environment that has the overlay
-    ///      mounted (an operator's simulation env, or anvil after setCode) — on the
-    ///      bare chain the phantom addresses are empty. Consumers therefore skip this
-    ///      at construction in overlay mode; operators call it before serving.
+    /// @notice Tied-classifier argmax restricted to rows [vocabLo, vocabHi)
+    /// @dev Shard merge rule: higher score wins; on equal score the LOWER id wins.
+    ///      Merging ascending disjoint shards under this rule equals the monolithic
+    ///      first-max-wins argmax exactly (each shard scans ascending rows, strict >).
     /// @param rootDirectory Root of the two-level chunk directory, or address(0)
     /// @param manifestHash Overlay manifest hash (ignored in directory mode)
     /// @param packedConfig The packed model config
-    function checkArtifacts(address rootDirectory, bytes32 manifestHash, bytes32[3] memory packedConfig) external view {
+    /// @param xbFinal The final normed hidden state as raw words (32*dim bytes) —
+    ///        exactly a last-stage forwardRange xOut vector
+    /// @param vocabLo First classifier row (inclusive)
+    /// @param vocabHi Last classifier row (exclusive)
+    /// @return bestScore The maximum logit over the range
+    /// @return bestId The first row attaining it (lowest id on ties)
+    function argmaxRange(
+        address rootDirectory,
+        bytes32 manifestHash,
+        bytes32[3] memory packedConfig,
+        bytes memory xbFinal,
+        uint256 vocabLo,
+        uint256 vocabHi
+    ) external view returns (int256 bestScore, uint256 bestId) {
         Qwen3.Config memory c = Qwen3.unpack(packedConfig);
-        Qwen3.layout(c); // validates weightLen consistency
-        (address[] memory wChunks, address[] memory tChunks) = _resolve(rootDirectory, manifestHash, c);
-        uint256 total = 0;
-        for (uint256 i = 0; i < wChunks.length; ++i) {
-            total += DataContractLib.payloadLength(wChunks[i]);
-        }
-        if (total != c.weightLen) revert WeightLengthMismatch();
-        total = 0;
-        for (uint256 i = 0; i < tChunks.length; ++i) {
-            total += DataContractLib.payloadLength(tChunks[i]);
-        }
-        if (total != c.tokLen) revert WeightLengthMismatch();
-        bytes memory table = _readAll(tChunks, c.tokLen);
-        if (table.length < 9 || uint8(table[0]) != 1) revert MalformedTokenTable();
+        return Qwen3Seg.argmaxRange(
+            c,
+            Qwen3.newStore(c, _resolveWeights(rootDirectory, manifestHash, c)),
+            Qwen3Seg.bytesToVec(xbFinal, c.dim),
+            vocabLo,
+            vocabHi
+        );
     }
 
-    /// @notice Derive the overlay address of chunk `i` for a manifest
+    /// @notice Derive the overlay address of chunk `i` for a manifest (== Qwen3Engine's)
     /// @param manifestHash The overlay manifest hash
     /// @param i The global chunk index (weight chunks first, then tokenizer chunks)
     /// @return The phantom data-contract address
@@ -1030,94 +1364,41 @@ contract Qwen3Engine {
         return address(uint160(uint256(keccak256(abi.encodePacked(OVERLAY_DOMAIN, manifestHash, uint64(i))))));
     }
 
-    /// @notice Resolve chunk lists: two-level directory, or derived overlay addresses
-    function _resolve(address rootDirectory, bytes32 manifestHash, Qwen3.Config memory c)
+    /// @notice Resolve the weight chunk list: two-level directory, or derived overlay
+    ///         addresses. Mirrors Qwen3Engine._resolve but returns only weight chunks
+    ///         (segments never read the tokenizer).
+    function _resolveWeights(address rootDirectory, bytes32 manifestHash, Qwen3.Config memory c)
         private
         view
-        returns (address[] memory wChunks, address[] memory tChunks)
+        returns (address[] memory wChunks)
     {
         uint256 nW = (c.weightLen + Qwen3.CHUNK - 1) / Qwen3.CHUNK;
         uint256 nT = (c.tokLen + Qwen3.CHUNK - 1) / Qwen3.CHUNK;
         if (rootDirectory == address(0)) {
             if (manifestHash == bytes32(0)) revert MalformedDirectory();
             wChunks = new address[](nW);
-            tChunks = new address[](nT);
             for (uint256 i = 0; i < nW; ++i) {
                 wChunks[i] = overlayChunkAddress(manifestHash, i);
             }
-            for (uint256 i = 0; i < nT; ++i) {
-                tChunks[i] = overlayChunkAddress(manifestHash, nW + i);
-            }
-            return (wChunks, tChunks);
+            return wChunks;
         }
         bytes memory root = DataContractLib.read(rootDirectory);
         if (root.length == 0 || root.length % 20 != 0) revert MalformedDirectory();
         uint256 nPages = root.length / 20;
 
         wChunks = new address[](nW);
-        tChunks = new address[](nT);
         uint256 seen = 0;
         for (uint256 p = 0; p < nPages; ++p) {
             bytes memory page = DataContractLib.read(_addrAt(root, p * 20));
             if (page.length % 20 != 0) revert MalformedDirectory();
             uint256 n = page.length / 20;
             for (uint256 i = 0; i < n; ++i) {
-                address a = _addrAt(page, i * 20);
-                if (seen < nW) wChunks[seen] = a;
-                else if (seen < nW + nT) tChunks[seen - nW] = a;
-                else revert MalformedDirectory();
+                if (seen < nW) wChunks[seen] = _addrAt(page, i * 20);
+                else if (seen >= nW + nT) revert MalformedDirectory();
                 ++seen;
             }
         }
         if (seen != nW + nT) revert MalformedDirectory();
-    }
-
-    /// @notice Concatenate a chunk list into one bytes buffer of exactly `totalLen`
-    function _readAll(address[] memory chunks, uint256 totalLen) private view returns (bytes memory out) {
-        out = new bytes(totalLen);
-        uint256 at = 0;
-        for (uint256 i = 0; i < chunks.length; ++i) {
-            at += DataContractLib.readInto(chunks[i], out, at);
-        }
-        if (at != totalLen) revert WeightLengthMismatch();
-    }
-
-    /// @notice Decode token ids to raw bytes via the on-chain token table
-    /// @dev Table: [u8 type=1][u32 vocab][u32 stringsLen][(vocab+1) x u32 offs][strings].
-    ///      Stop tokens are omitted from the output text.
-    function _decode(bytes memory table, uint32[] memory ids, uint256 stop0, uint256 stop1)
-        private
-        pure
-        returns (bytes memory out)
-    {
-        if (table.length < 9 || uint8(table[0]) != 1) revert MalformedTokenTable();
-        uint256 vocab = _u32At(table, 1);
-        uint256 stringsBase = 9 + (vocab + 1) * 4;
-        uint256 total = 0;
-        for (uint256 i = 0; i < ids.length; ++i) {
-            uint256 id = ids[i];
-            if (id >= vocab) revert MalformedTokenTable();
-            if (id == stop0 || id == stop1) continue;
-            total += _u32At(table, 9 + (id + 1) * 4) - _u32At(table, 9 + id * 4);
-        }
-        out = new bytes(total);
-        uint256 w = 0;
-        for (uint256 i = 0; i < ids.length; ++i) {
-            uint256 id = ids[i];
-            if (id == stop0 || id == stop1) continue;
-            uint256 so = _u32At(table, 9 + id * 4);
-            uint256 eo = _u32At(table, 9 + (id + 1) * 4);
-            for (uint256 j = so; j < eo; ++j) {
-                out[w++] = table[stringsBase + j];
-            }
-        }
-    }
-
-    /// @notice Read a big-endian uint32 at byte `off`
-    function _u32At(bytes memory data, uint256 off) private pure returns (uint256 v) {
-        assembly ("memory-safe") {
-            v := shr(224, mload(add(add(data, 0x20), off)))
-        }
     }
 
     /// @notice Read a 20-byte address at byte `off`
