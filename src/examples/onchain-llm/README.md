@@ -152,6 +152,41 @@ python3 src/examples/onchain-llm/tools/deploy_anvil.py --artifacts artifacts/
 forge create ... Qwen3Engine && forge create ... GasKillerChat
 ```
 
+## Sharded inference v0: one inference across parallel workers
+
+`Qwen3Seg.sol` + `Qwen3SegEngine.sol` split one engine-v2 inference into
+hash-committed **segments** — rectangles of positions × layers (`forwardRange`)
+plus vocab shards of the tied classifier (`argmaxRange`) — that execute as
+independent calls on different nodes and reassemble **bit-exactly** (every
+segment replays the monolithic kernels; nothing numeric is reimplemented).
+Each segment returns a keccak checkpoint commitment, takes upstream hashes as
+integrity witnesses, and the KV cache travels in a canonical wire format
+(`test/examples/OnchainChatSharded.t.sol` proves segmented == monolithic).
+
+`tools/sharded_infer.py` is the live driver: it spins up N anvil workers,
+installs the model on each via `anvil_setCode`, pins each layer-range stage to a
+k-worker committee (all members must return identical commitments), pipelines
+the prefill across stages as a wavefront, fans the classifier into M parallel
+vocab shards, and asserts the distributed token ids equal a monolithic
+`Qwen3Engine.chat` baseline:
+
+```bash
+# CI-speed, synthetic fixture model (also: script/e2e_sharded_infer.sh)
+python3 src/examples/onchain-llm/tools/sharded_infer.py --mode sharded \
+    --stages 2 --committee 2 --argmax-shards 2
+
+# real Qwen3-0.6B: installs ~600MB on EVERY worker (a few minutes each) and each
+# segment streams real weights — with the default 8-id prompt and --max-new 2
+# expect the whole run to take on the order of tens of minutes; keep prompts short
+python3 src/examples/onchain-llm/tools/sharded_infer.py --mode sharded --real \
+    --stages 4 --committee 1 --argmax-shards 4 --max-new 2
+```
+
+On the synthetic model, sharded with committee k=2 costs ~2.1x the monolithic
+gas (2 executions per segment + hash checks) versus ~8x for today's production
+replication (router 2 tracers + 3 operators × 2) — the work-factor argument from
+the distributed-inference design, measured live.
+
 ## Regenerating the artifacts
 
 ```bash
