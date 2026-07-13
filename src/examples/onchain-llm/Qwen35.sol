@@ -605,7 +605,9 @@ library Qwen35 {
     }
 
     /// @notice DeltaNet token mixer for one layer (§5.1-§5.5); adds into b.x
-    function _deltaBlock(Config memory c, Layout memory o, Store memory s, Buffers memory b, uint256 l) private view {
+    /// @dev `internal` (not `private`) so the sharded segment engine (Qwen35Seg) can
+    ///      replay the exact monolithic kernel — visibility only, behaviour unchanged.
+    function _deltaBlock(Config memory c, Layout memory o, Store memory s, Buffers memory b, uint256 l) internal view {
         uint256 lb = layerOffset(c, o, l);
         uint256 linIdx = l - (l / c.fullInterval); // index among linear layers
         uint256 wB = c.wBits;
@@ -817,8 +819,9 @@ library Qwen35 {
     }
 
     /// @notice Full-attention token mixer for one layer (§6); adds into b.x
+    /// @dev `internal` for the sharded segment engine (Qwen35Seg); behaviour unchanged.
     function _attnBlock(Config memory c, Layout memory o, Store memory s, Buffers memory b, uint256 l, uint256 pos)
-        private
+        internal
         view
     {
         uint256 lb = layerOffset(c, o, l);
@@ -914,8 +917,9 @@ library Qwen35 {
 
     /// @notice MoE block (§7 rev 2): shared expert + top-k-by-raw-logit routed
     ///         experts; adds into b.x. Input is b.xb (post-ln2).
+    /// @dev `internal` for the sharded segment engine (Qwen35Seg); behaviour unchanged.
     function _moeBlock(Config memory c, Layout memory o, Store memory s, Buffers memory b, uint256 tailBase)
-        private
+        internal
         view
     {
         uint256 sg = _sharedExpert(c, o, s, b, tailBase);
@@ -1043,7 +1047,8 @@ library Qwen35 {
     }
 
     /// @dev Stream the norm tensor at blob offset `off` and rmsnorm b.x into b.xb
-    function _normInto(Config memory c, Store memory s, Buffers memory b, uint256 off) private view {
+    /// @dev `internal` for the sharded segment engine (Qwen35Seg); behaviour unchanged.
+    function _normInto(Config memory c, Store memory s, Buffers memory b, uint256 off) internal view {
         loadRange(s, off, 1 + 2 * c.dim, s.small, 0);
         Qwen3.rmsnormSlice(s.small, b.x, 0, b.xb, 0, c.dim, c.epsQ48);
     }
@@ -1144,8 +1149,9 @@ library Qwen35 {
     // ------------------------------------------------------------- helpers
 
     /// @notice x[i] = embedding row value scaled to Q24 (row shift <= 24)
+    /// @dev `internal` for the sharded segment engine (Qwen35Seg); behaviour unchanged.
     function _loadEmbedding(Config memory c, Layout memory o, Store memory s, uint256 token, int256[] memory x)
-        private
+        internal
         view
     {
         loadRange(s, token * o.embRowStride, o.embRowStride, s.big, 0);
