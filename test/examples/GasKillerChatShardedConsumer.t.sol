@@ -53,11 +53,19 @@ contract GasKillerChatShardedConsumerTest is Test {
         emit ChatAnswered(1, expectedRoot, pipelineRoot, promptIds, answerIds);
         chat.fulfil(promptIds, 3, answerIds, pipelineRoot);
 
+        // settledRoots is the first declared state var (slot 0); fulfil now also records
+        // settledRoots[pipelineRoot] = true so the root can serve as a resume prefix.
+        bytes32 settledSlot = keccak256(abi.encode(pipelineRoot, uint256(0)));
+
         (, bytes32[] memory writes) = vm.accesses(address(chat));
         assertGt(writes.length, 0, "no writes recorded");
         for (uint256 i = 0; i < writes.length; ++i) {
-            assertTrue(writes[i] == chat.CHAT_ROOT_SLOT() || writes[i] == TRACKER_SLOT, "unexpected storage write");
+            assertTrue(
+                writes[i] == chat.CHAT_ROOT_SLOT() || writes[i] == TRACKER_SLOT || writes[i] == settledSlot,
+                "unexpected storage write"
+            );
         }
+        assertTrue(chat.settledRoots(pipelineRoot), "pipeline root not marked settled");
         assertEq(chat.chatRoot(), expectedRoot, "chat root not updated");
         assertEq(chat.stateTransitionCount(), 1, "transition not tracked");
     }

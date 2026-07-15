@@ -28,6 +28,15 @@ contract GasKillerChat35Sharded is GasKillerSDK {
     /// @dev keccak256(abi.encode(uint256(keccak256("gaskiller.GasKillerChat35Sharded.chatRoot")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 public constant CHAT_ROOT_SLOT = 0x50151af92b46f826a4a1ac24284579e5d5e9dcbc1a3c6b0e3bfe192e60694500;
 
+    /// @notice Domain separator for the prefix-RESUME (warm-start) chat root fold.
+    /// @dev Distinct from CHAT_DOMAIN so a resumed exchange can never alias a fresh one.
+    bytes32 public constant RESUME_DOMAIN = keccak256("gaskiller.llm.chat35.sharded.resume.v1");
+
+    /// @notice Full sharded-pipeline roots this consumer has successfully settled — the
+    ///         set a `fulfilResumed` call may warm-start (resume) from. Written by
+    ///         `fulfil` and `fulfilResumed`; a resume from an unsettled root reverts.
+    mapping(bytes32 => bool) public settledRoots;
+
     /// @notice Emitted for every answered prompt in a tracked transition
     /// @param transitionIndex The state transition that produced this answer
     /// @param newRoot The chat root after folding this exchange in
@@ -42,8 +51,33 @@ contract GasKillerChat35Sharded is GasKillerSDK {
         uint32[] answerIds
     );
 
+    /// @notice Emitted when a prefix-RESUMED exchange settles (warm-started from `prefixRoot`)
+    /// @param transitionIndex The state transition that produced this answer
+    /// @param newRoot The chat root after folding this resumed exchange in
+    /// @param pipelineRoot The commitment chain root of the resumed sharded execution
+    /// @param prefixRoot The previously-settled root this exchange resumed from
+    /// @param promptIds The prompt token ids
+    /// @param answerIds The generated token ids (decode off-chain)
+    event ChatResumed(
+        uint256 indexed transitionIndex,
+        bytes32 indexed newRoot,
+        bytes32 indexed pipelineRoot,
+        bytes32 prefixRoot,
+        uint32[] promptIds,
+        uint32[] answerIds
+    );
+
+    /// @notice Emitted when a committee-verified warm prefix root is admitted as a resume anchor
+    /// @param transitionIndex The state transition that admitted this prefix
+    /// @param prefixRoot The warm prefix commitment root now valid to resume from
+    /// @param prefixIds The prefix token ids (the fixed chat-template prefix, decode off-chain)
+    event PrefixSettled(uint256 indexed transitionIndex, bytes32 indexed prefixRoot, uint32[] prefixIds);
+
     /// @notice Thrown when the pipeline root is missing
     error MissingPipelineRoot();
+
+    /// @notice Thrown when `fulfilResumed` is asked to resume from a root that was never settled
+    error PrefixNotSettled();
 
     /// @notice Deploy the settlement consumer
     /// @param _avsAddress The AVS service manager address
@@ -74,7 +108,55 @@ contract GasKillerChat35Sharded is GasKillerSDK {
         assembly ("memory-safe") {
             sstore(CHAT_ROOT_SLOT, newRoot)
         }
+        settledRoots[pipelineRoot] = true;
         emit ChatAnswered(stateTransitionCount(), newRoot, pipelineRoot, promptIds, answerIds);
+    }
+
+    /// @notice Admit a committee-verified WARM prefix root as a valid resume anchor.
+    /// @dev A warm/prefill-only prefix run produces a `prefixRoot` that no `fulfil`/
+    ///      `fulfilResumed` ever records, so `fulfilResumed` could not use it. This cheap
+    ///      pure commit records that the operator quorum has verified the warm prefix
+    ///      segment chain off-chain (the gate does that before signing) and anchors the
+    ///      resumable prefix state to a committee-signed on-chain root — letting
+    ///      `fulfilResumed` trust `prefixRoot` without re-executing the prefix. It performs
+    ///      no inference: ONE storage write plus the log.
+    /// @param prefixIds The fixed chat-template prefix token ids the warm run processed
+    /// @param prefixRoot The warm prefix commitment root to admit as a resume anchor
+    function settlePrefix(uint32[] calldata prefixIds, bytes32 prefixRoot) external trackState {
+        if (prefixRoot == bytes32(0)) revert MissingPipelineRoot();
+        settledRoots[prefixRoot] = true;
+        emit PrefixSettled(stateTransitionCount(), prefixRoot, prefixIds);
+    }
+
+    /// @notice Commit a sharded-inference exchange that RESUMES from a previously-settled
+    ///         warm prefix, and fold it into the chat root.
+    /// @dev Additive latency path: a fixed chat-template prefix is run once through the
+    ///      committee-verified pipeline (a normal `fulfil` whose `pipelineRoot` becomes a
+    ///      resume anchor); real answers then resume from it instead of recomputing the
+    ///      prefix. The tracked function is still a pure commit — no inference. The quorum
+    ///      signs only after verifying the resumed segment commit chain off-chain.
+    /// @param promptIds The pre-tokenized prompt (chat template applied off-chain)
+    /// @param maxNewTokens The generation bound the pipeline ran with
+    /// @param answerIds The generated token ids produced by the resumed pipeline
+    /// @param pipelineRoot The commitment chain root of the resumed sharded execution
+    /// @param prefixRoot The previously-settled root this exchange warm-starts from
+    function fulfilResumed(
+        uint32[] calldata promptIds,
+        uint256 maxNewTokens,
+        uint32[] calldata answerIds,
+        bytes32 pipelineRoot,
+        bytes32 prefixRoot
+    ) external trackState {
+        if (pipelineRoot == bytes32(0)) revert MissingPipelineRoot();
+        if (!settledRoots[prefixRoot]) revert PrefixNotSettled();
+
+        bytes32 newRoot =
+            computeResumedChatRoot(chatRoot(), promptIds, maxNewTokens, answerIds, pipelineRoot, prefixRoot);
+        assembly ("memory-safe") {
+            sstore(CHAT_ROOT_SLOT, newRoot)
+        }
+        settledRoots[pipelineRoot] = true;
+        emit ChatResumed(stateTransitionCount(), newRoot, pipelineRoot, prefixRoot, promptIds, answerIds);
     }
 
     /// @notice The current chat root (the contract's only mutable state)
@@ -108,6 +190,38 @@ contract GasKillerChat35Sharded is GasKillerSDK {
                 maxNewTokens,
                 keccak256(abi.encodePacked(answerIds)),
                 pipelineRoot
+            )
+        );
+    }
+
+    /// @notice Compute the chat root after folding one RESUMED exchange into `previousRoot`
+    /// @dev Public pure spec operators implement off-chain. Folds BOTH `prefixRoot` and
+    ///      `pipelineRoot` under RESUME_DOMAIN so a resumed root can never collide with a
+    ///      fresh `computeChatRoot` output.
+    /// @param previousRoot The chat root being extended
+    /// @param promptIds The prompt token ids
+    /// @param maxNewTokens The generation bound
+    /// @param answerIds The generated token ids
+    /// @param pipelineRoot The resumed sharded execution commitment root
+    /// @param prefixRoot The previously-settled root this exchange warm-started from
+    /// @return The new chat root
+    function computeResumedChatRoot(
+        bytes32 previousRoot,
+        uint32[] memory promptIds,
+        uint256 maxNewTokens,
+        uint32[] memory answerIds,
+        bytes32 pipelineRoot,
+        bytes32 prefixRoot
+    ) public pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                RESUME_DOMAIN,
+                previousRoot,
+                keccak256(abi.encodePacked(promptIds)),
+                maxNewTokens,
+                keccak256(abi.encodePacked(answerIds)),
+                pipelineRoot,
+                prefixRoot
             )
         );
     }
