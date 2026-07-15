@@ -21,6 +21,7 @@ Contracts that inherit GasKillerSDK expose a public `verifyAndUpdate` function, 
   - `interface/IGasKillerSDK.sol` — Public interface
   - `interface/IStateUpdateTypes.sol` — Alloy-compatible struct definitions
 - **`src/examples/array-summation/`** — Demo app: `ArraySummation` and `ArraySummationFactory`
+- **`src/examples/gaskiller-erc20/`** — Demo app: `GasKillerERC20`, an ERC20 whose entire mutable state is rolled up into a single storage slot so every transition is one `SSTORE` (O(1) storage writes). See its [README](src/examples/gaskiller-erc20/README.md).
 - **`script/`** — Deployment scripts
 - **`test/`** — Unit and integration tests
 
