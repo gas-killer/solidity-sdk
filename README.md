@@ -12,15 +12,32 @@ Solidity SDK for integrating Gas Killer functionality into EigenLayer AVS contra
 
 Contracts that inherit GasKillerSDK expose a public `verifyAndUpdate` function, which enables expensive state-changing computations to be performed off-chain. Operators sign a payload describing the resulting state updates, the router aggregates the BLS signatures once a quorum threshold is reached, and the result is submitted on-chain through `verifyAndUpdate`.
 
+## Verification schemes
+
+The SDK offers two interchangeable ways to authorise a state transition. Both sign the same task
+digest and share the same `StateTracker` / `StateChangeHandlerLib` state-update machinery — they
+differ only in how an operator quorum's approval is verified on-chain:
+
+- **BLS** (`GasKillerSDK`) — verifies an aggregated BLS signature against an EigenLayer
+  `IBLSSignatureChecker`, passing per-operator non-signer stakes.
+- **Aggregate Schnorr** (`SchnorrGasKillerSDK`) — verifies a **single** aggregate secp256k1
+  Schnorr signature against a `SchnorrStakeRegistry` in constant gas (one `ecrecover`, non-signer
+  subtraction). Rogue-key-safe via a registration proof of possession.
+
 ## Repository Structure
 
 - **`src/`** — Core SDK contracts
-  - `GasKillerSDK.sol` — Abstract base contract; inherit this in your AVS consumer
-  - `StateTracker.sol` — Tracks state transitions via an ERC-7201 storage slot
-  - `StateChangeHandlerLib.sol` — Executes batched `STORE`, `CALL`, and `LOG` operations
-  - `interface/IGasKillerSDK.sol` — Public interface
+  - `GasKillerSDK.sol` — Abstract base for the BLS scheme; inherit this in your AVS consumer
+  - `StateTracker.sol` — Tracks state transitions via an ERC-7201 storage slot (scheme-agnostic)
+  - `StateChangeHandlerLib.sol` — Executes batched `STORE`, `CALL`, and `LOG` operations (scheme-agnostic)
+  - `interface/IGasKillerSDK.sol` — Public interface for the BLS scheme
   - `interface/IStateUpdateTypes.sol` — Alloy-compatible struct definitions
-- **`src/examples/array-summation/`** — Demo app: `ArraySummation` and `ArraySummationFactory`
+- **`src/schnorr/`** — Aggregate-Schnorr scheme
+  - `SchnorrGasKillerSDK.sol` — Abstract base; inherit this for the Schnorr scheme
+  - `SchnorrStakeRegistry.sol` — Aggregate-key registry with proof-of-possession registration and non-signer subtraction
+  - `interface/` — `ISchnorrGasKillerSDK` and `ISchnorrStakeRegistry`
+  - `libraries/` — `Secp256k1` (affine point math) and `SchnorrVerify` (constant-gas `ecrecover`-trick verify)
+- **`src/examples/array-summation/`** — Demo apps: `ArraySummation`(`Factory`) (BLS) and `SchnorrArraySummation`(`Factory`) (Schnorr)
 - **`script/`** — Deployment scripts
 - **`test/`** — Unit and integration tests
 
