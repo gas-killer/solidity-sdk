@@ -15,3 +15,9 @@ docs/
 
 # macOS
 .DS_Store
+
+# Python
+__pycache__/
+
+# Large model artifacts (regenerate via tools/convert*.py; too big for git)
+/artifacts/

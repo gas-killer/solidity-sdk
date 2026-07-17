@@ -1,0 +1,27 @@
+name: E2E (on-chain LLM operator replay)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  operator-replay:
+    name: Overlay mount + verifyAndUpdate lifecycle on anvil
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Install python deps (keccak for overlay address derivation)
+        run: pip3 install pycryptodome
+
+      - name: Run the full lifecycle against a live anvil
+        run: bash script/e2e_operator_replay.sh

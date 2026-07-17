@@ -21,6 +21,7 @@ Contracts that inherit GasKillerSDK expose a public `verifyAndUpdate` function, 
   - `interface/IGasKillerSDK.sol` — Public interface
   - `interface/IStateUpdateTypes.sol` — Alloy-compatible struct definitions
 - **`src/examples/array-summation/`** — Demo app: `ArraySummation` and `ArraySummationFactory`
+- **`src/examples/onchain-llm/`** — Demo app: `GasKillerLLM`, a full Llama-2 LLM (tokenizer + transformer + decoder) running on-chain under the unbounded simulation profile — see [its README](src/examples/onchain-llm/README.md)
 - **`script/`** — Deployment scripts
 - **`test/`** — Unit and integration tests
 
