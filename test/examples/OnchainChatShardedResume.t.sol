@@ -94,9 +94,11 @@ abstract contract ShardedResumeBase is Test {
 
     // ------------------------------------------------------- existing fulfil unchanged
 
-    /// @notice The original fulfil still folds via computeChatRoot + emits ChatAnswered,
-    ///         and additively records the settled root so it can serve as a resume prefix.
-    ///         A whole answer of `maxNewTokens` settles in this ONE call.
+    /// @notice The original fulfil still folds via computeChatRoot + emits ChatAnswered.
+    ///         A whole answer of `maxNewTokens` settles in this ONE call. It deliberately
+    ///         does NOT record the pipeline root in settledRoots — the unbounded gas
+    ///         profile allows one consumer storage write per settlement (the chat root);
+    ///         resume anchors are admitted only via settlePrefix.
     function test_ExistingFulfilUnchanged() public {
         bytes32 expected = chat.computeChatRoot(chat.chatRoot(), promptIds, 3, answerIds, pipelineRoot);
 
@@ -106,7 +108,41 @@ abstract contract ShardedResumeBase is Test {
 
         assertEq(chat.chatRoot(), expected, "chat root fold changed");
         assertEq(chat.stateTransitionCount(), 1, "transition not tracked");
-        assertTrue(chat.settledRoots(pipelineRoot), "fulfil must record settled root");
+        assertFalse(chat.settledRoots(pipelineRoot), "fulfil must not write settledRoots (single-slot rule)");
+    }
+
+    /// @notice The unbounded gas profile's shape rule: every settlement function writes
+    ///         exactly TWO storage slots — the SDK's state-tracker counter plus ONE
+    ///         consumer slot (chat root, or the settlePrefix anchor). A third write is
+    ///         what made the round die live with "found 2 Store ops".
+    function test_SettlementFunctionsWriteSingleConsumerSlot() public {
+        vm.record();
+        chat.fulfil(promptIds, 3, answerIds, pipelineRoot);
+        (, bytes32[] memory w1) = vm.accesses(address(chat));
+        assertEq(_uniqueCount(w1), 2, "fulfil must write tracker + chat root only");
+
+        vm.record();
+        chat.settlePrefix(promptIds, prefixRoot);
+        (, bytes32[] memory w2) = vm.accesses(address(chat));
+        assertEq(_uniqueCount(w2), 2, "settlePrefix must write tracker + anchor only");
+
+        vm.record();
+        chat.fulfilResumed(promptIds, 8, answerIds, keccak256("resumed pipeline"), prefixRoot);
+        (, bytes32[] memory w3) = vm.accesses(address(chat));
+        assertEq(_uniqueCount(w3), 2, "fulfilResumed must write tracker + chat root only");
+    }
+
+    function _uniqueCount(bytes32[] memory slots) internal pure returns (uint256 n) {
+        for (uint256 i = 0; i < slots.length; i++) {
+            bool seen = false;
+            for (uint256 j = 0; j < i; j++) {
+                if (slots[j] == slots[i]) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) n++;
+        }
     }
 
     // ------------------------------------------------------------- fulfilResumed guards
@@ -120,8 +156,8 @@ abstract contract ShardedResumeBase is Test {
 
     /// @notice A zero pipeline root is rejected before the prefix check.
     function test_FulfilResumedRejectsZeroPipeline() public {
-        // settle the prefix so the only failing condition is the zero pipeline root
-        chat.fulfil(promptIds, 3, answerIds, prefixRoot);
+        // admit the prefix so the only failing condition is the zero pipeline root
+        chat.settlePrefix(promptIds, prefixRoot);
         vm.expectRevert(GasKillerChatSharded.MissingPipelineRoot.selector);
         chat.fulfilResumed(promptIds, 3, answerIds, bytes32(0), prefixRoot);
     }
@@ -169,17 +205,17 @@ abstract contract ShardedResumeBase is Test {
         chat.fulfilResumed(promptIds, 8, answerIds, pipelineRoot, warmPrefix);
 
         assertEq(chat.chatRoot(), expected, "resumed-from-warm-prefix fold mismatch");
-        assertTrue(chat.settledRoots(pipelineRoot), "resumed pipeline root not settled");
+        assertFalse(chat.settledRoots(pipelineRoot), "resume must not write settledRoots (single-slot rule)");
     }
 
     // ------------------------------------------------------------ fulfilResumed success
 
-    /// @notice Once a prefix is settled, resuming from it succeeds, folds under RESUME_DOMAIN,
-    ///         emits ChatResumed, and marks its own pipeline root settled.
+    /// @notice Once a prefix is admitted via settlePrefix, resuming from it succeeds,
+    ///         folds under RESUME_DOMAIN, and emits ChatResumed.
     function test_FulfilResumedSucceedsAfterPrefixSettled() public {
-        // Warm run: settle the fixed chat-template prefix via a normal fulfil.
-        chat.fulfil(promptIds, 3, answerIds, prefixRoot);
-        assertTrue(chat.settledRoots(prefixRoot), "prefix not settled by warm run");
+        // Warm run: admit the fixed chat-template prefix via settlePrefix.
+        chat.settlePrefix(promptIds, prefixRoot);
+        assertTrue(chat.settledRoots(prefixRoot), "prefix not admitted by settlePrefix");
 
         bytes32 prev = chat.chatRoot();
         bytes32 expected = chat.computeResumedChatRoot(prev, promptIds, 8, answerIds, pipelineRoot, prefixRoot);
@@ -190,7 +226,7 @@ abstract contract ShardedResumeBase is Test {
 
         assertEq(chat.chatRoot(), expected, "resumed fold mismatch");
         assertEq(chat.stateTransitionCount(), 2, "transition not tracked");
-        assertTrue(chat.settledRoots(pipelineRoot), "resumed pipeline root not settled");
+        assertFalse(chat.settledRoots(pipelineRoot), "resume must not write settledRoots (single-slot rule)");
     }
 
     /// @notice The resumed fold is unambiguous: same inputs through the resumed vs the
@@ -207,16 +243,21 @@ abstract contract ShardedResumeBase is Test {
         assertTrue(resumedSelf != nonResumed, "domain separation broken");
     }
 
-    /// @notice A settled resume anchor can itself be resumed from (chained warm starts).
-    function test_ResumedRootIsItselfResumable() public {
-        chat.fulfil(promptIds, 3, answerIds, prefixRoot);
+    /// @notice Chained warm starts require an explicit settlePrefix of the completed
+    ///         exchange's root — settlement functions no longer auto-admit anchors.
+    function test_ChainedResumeNeedsExplicitSettlePrefix() public {
+        chat.settlePrefix(promptIds, prefixRoot);
         chat.fulfilResumed(promptIds, 8, answerIds, pipelineRoot, prefixRoot);
-        assertTrue(chat.settledRoots(pipelineRoot), "resumed root should be settled");
 
         bytes32 nextPipeline = keccak256("second resumed pipeline");
-        // must not revert: resume from the previously-resumed pipelineRoot
+        // The resumed pipelineRoot was NOT auto-admitted: chaining off it reverts...
+        vm.expectRevert(GasKillerChatSharded.PrefixNotSettled.selector);
         chat.fulfilResumed(promptIds, 8, answerIds, nextPipeline, pipelineRoot);
-        assertTrue(chat.settledRoots(nextPipeline), "chained resume not settled");
+
+        // ...until it is admitted explicitly (one extra pure-commit round).
+        chat.settlePrefix(promptIds, pipelineRoot);
+        chat.fulfilResumed(promptIds, 8, answerIds, nextPipeline, pipelineRoot);
+        assertFalse(chat.settledRoots(nextPipeline), "chained resume must not write settledRoots");
     }
 }
 
