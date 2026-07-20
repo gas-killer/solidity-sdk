@@ -3,7 +3,9 @@ pragma solidity ^0.8.27;
 
 import {IERC165} from "forge-std/interfaces/IERC165.sol";
 import {ISchnorrGasKillerSDK} from "./interface/ISchnorrGasKillerSDK.sol";
+import {ISchnorrGasKillerSDKBatch, SchnorrTaskSubmission} from "./interface/ISchnorrGasKillerSDKBatch.sol";
 import {StateTracker} from "../StateTracker.sol";
+import {TransitionGuard} from "../TransitionGuard.sol";
 import {StateChangeHandlerLib, StateUpdateType} from "../StateChangeHandlerLib.sol";
 import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
 
@@ -18,7 +20,18 @@ import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
 ///      address(this), targetFunction, storageUpdates))` — so the off-chain digest and the
 ///      slashing/fraud-proof machinery are scheme-agnostic. The calldata swaps
 ///      `(operators[], signatures[])` for `(s, Raddr, nonSigners[])`.
-abstract contract SchnorrGasKillerSDK is StateTracker, ISchnorrGasKillerSDK {
+///
+///      Both entrypoints are `guardTransition`-protected (see `TransitionGuard`): a `CALL`
+///      state update runs arbitrary external code mid-transition, so re-entering
+///      `verifyAndUpdate` with the *next* transition's valid signature would otherwise
+///      interleave two signed transitions. The same transient flag is queryable as
+///      `inTransition()` so external readers can reject mid-transition state.
+abstract contract SchnorrGasKillerSDK is
+    StateTracker,
+    TransitionGuard,
+    ISchnorrGasKillerSDK,
+    ISchnorrGasKillerSDKBatch
+{
     struct SchnorrSDKStorage {
         address avsAddress;
         ISchnorrStakeRegistry registry;
@@ -35,6 +48,7 @@ abstract contract SchnorrGasKillerSDK is StateTracker, ISchnorrGasKillerSDK {
     error InvalidTransitionIndex();
     error InvalidSignature();
     error InvalidQuorumSignature();
+    error EmptyBatch();
 
     /// @notice Verify an aggregate Schnorr quorum signature and apply the state updates.
     /// @param msgHash             the task digest (recomputed and checked below).
@@ -54,7 +68,62 @@ abstract contract SchnorrGasKillerSDK is StateTracker, ISchnorrGasKillerSDK {
         uint256 s,
         address Raddr,
         address[] calldata nonSigners
-    ) external trackState {
+    ) external guardTransition {
+        _verifyAndUpdateOne(
+            msgHash, referenceBlockNumber, storageUpdates, transitionIndex, targetFunction, s, Raddr, nonSigners
+        );
+    }
+
+    /// @notice Verify and apply a sequence of independently signed state transitions in
+    ///         one transaction, amortizing the intrinsic and cold-access costs across the
+    ///         batch (sub-transitions after the first verify at warm-access prices).
+    /// @dev Each applied submission is checked exactly as a standalone `verifyAndUpdate`
+    ///      would check it — same digest, same registry verification — so batching changes
+    ///      nothing for the off-chain signing path. Transitions apply in order; the
+    ///      `guardTransition` latch is held across the whole batch, and any failing
+    ///      sub-transition reverts the entire batch.
+    ///
+    ///      A submission whose `transitionIndex` is already settled is SKIPPED (not
+    ///      validated, not applied) rather than reverting the batch: settlement is
+    ///      permissionless, so a third party who lifts one submission from the mempool
+    ///      and settles it standalone could otherwise nullify the whole batch with one
+    ///      cheap front-run. An index can only ever be consumed by a quorum-signed
+    ///      transition for this contract, so a skipped item's transition has already
+    ///      happened. Reverts (`InvalidTransitionIndex`) only on a genuine gap — an index
+    ///      above the next expected one.
+    /// @param submissions The transitions to apply, in order of ascending transition index.
+    function verifyAndUpdateBatch(SchnorrTaskSubmission[] calldata submissions) external guardTransition {
+        uint256 len = submissions.length;
+        require(len != 0, EmptyBatch());
+        for (uint256 i = 0; i < len; ++i) {
+            SchnorrTaskSubmission calldata sub = submissions[i];
+            // Already settled (e.g. front-run or redelivered) → skip, don't poison the batch.
+            if (sub.transitionIndex + 1 <= stateTransitionCount()) continue;
+            _verifyAndUpdateOne(
+                sub.msgHash,
+                sub.referenceBlockNumber,
+                sub.storageUpdates,
+                sub.transitionIndex,
+                sub.targetFunction,
+                sub.s,
+                sub.Raddr,
+                sub.nonSigners
+            );
+        }
+    }
+
+    /// @dev The single-transition settlement path shared by both entrypoints. Callers must
+    ///      hold the `guardTransition` latch.
+    function _verifyAndUpdateOne(
+        bytes32 msgHash,
+        uint32 referenceBlockNumber,
+        bytes calldata storageUpdates,
+        uint256 transitionIndex,
+        bytes4 targetFunction,
+        uint256 s,
+        address Raddr,
+        address[] calldata nonSigners
+    ) private trackState {
         require(referenceBlockNumber < block.number, FutureBlockNumber());
         require((uint256(referenceBlockNumber) + _getBlockStaleMeasure()) >= block.number, StaleBlockNumber());
 
@@ -84,12 +153,14 @@ abstract contract SchnorrGasKillerSDK is StateTracker, ISchnorrGasKillerSDK {
     }
 
     /// @notice Query if a contract implements an interface
-    /// @dev Supports ERC-165 and ISchnorrGasKillerSDK interface detection (the router's
-    ///      preflight probes the schnorr `verifyAndUpdate` selector before submitting)
+    /// @dev Supports ERC-165, ISchnorrGasKillerSDK detection (the router's preflight
+    ///      probes the schnorr `verifyAndUpdate` selector before submitting), and the
+    ///      ISchnorrGasKillerSDKBatch batching/latch extension
     /// @param interfaceId The interface identifier, as specified in ERC-165
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
     function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
-        return interfaceId == type(IERC165).interfaceId || interfaceId == type(ISchnorrGasKillerSDK).interfaceId;
+        return interfaceId == type(IERC165).interfaceId || interfaceId == type(ISchnorrGasKillerSDK).interfaceId
+            || interfaceId == type(ISchnorrGasKillerSDKBatch).interfaceId;
     }
 
     /// @notice Compute the expected message hash for a given transition, function, and storage updates
@@ -105,6 +176,11 @@ abstract contract SchnorrGasKillerSDK is StateTracker, ISchnorrGasKillerSDK {
         returns (bytes32)
     {
         return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
+    }
+
+    /// @inheritdoc TransitionGuard
+    function inTransition() public view override(TransitionGuard, ISchnorrGasKillerSDKBatch) returns (bool locked) {
+        return TransitionGuard.inTransition();
     }
 
     function schnorrRegistry() external view returns (address) {
