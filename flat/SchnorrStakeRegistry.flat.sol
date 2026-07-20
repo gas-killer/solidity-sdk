@@ -189,7 +189,10 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
     struct Operator {
         uint256 x; // pubkey x
         uint256 y; // pubkey y
-        uint256 weight; // stake weight
+        // `weight` and `registered` share a slot: the verification loop reads a
+        // non-signer's whole record, so packing saves one cold SLOAD per non-signer.
+        // uint96 matches EigenLayer's stake-weight width.
+        uint96 weight; // stake weight
         bool registered;
     }
 
@@ -221,6 +224,7 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
     error FutureReferenceBlock();
     error StaleSnapshot();
     error ZeroWeight();
+    error WeightOverflow();
 
     event OperatorRegistered(address indexed operator, uint256 weight);
 
@@ -252,6 +256,7 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
     function registerOperator(uint256 x, uint256 y, uint256 weight, uint256 popS, address popR) external {
         if (msg.sender != owner) revert NotOwner();
         if (weight == 0) revert ZeroWeight();
+        if (weight > type(uint96).max) revert WeightOverflow();
         if (!Secp256k1.isOnCurve(x, y)) revert NotOnCurve();
 
         address id = pointAddress(x, y);
@@ -264,7 +269,9 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
             revert InvalidProofOfPossession();
         }
 
-        operators[id] = Operator({x: x, y: y, weight: weight, registered: true});
+        // casting to 'uint96' is safe: bounds-checked against type(uint96).max above
+        // forge-lint: disable-next-line(unsafe-typecast)
+        operators[id] = Operator({x: x, y: y, weight: uint96(weight), registered: true});
         (aggX, aggY) = Secp256k1.add(aggX, aggY, x, y);
         totalWeight += weight;
         effectiveBlock = block.number;
