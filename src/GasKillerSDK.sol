@@ -17,6 +17,8 @@ import {StateChangeHandlerLib, StateUpdateType} from "./StateChangeHandlerLib.so
 abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     /// @custom:storage-location erc7201:gaskiller.GasKillerSDK.storage
     struct GasKillerSDKStorage {
+        /// @notice Deprecated. Maintained to preserve storage layout. Now derived on read by `namespace()`
+        bytes __deprecated_namespace;
         /// @notice The AVS service manager address
         address avsAddress;
         /// @notice The BLS signature checker contract used to verify operator signatures
