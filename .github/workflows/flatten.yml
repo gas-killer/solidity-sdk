@@ -12,10 +12,6 @@ on:
 env:
   FOUNDRY_PROFILE: ci
 
-concurrency:
-  group: flatten-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
-
 jobs:
   flatten:
     name: Flatten Solidity Contracts
@@ -60,8 +56,11 @@ jobs:
             solc --optimize "$f" --via-ir --bin > /dev/null
           done
 
-      # Commit & push the fresh flats back to the branch
+      # Commit & push the fresh flats back to the branch.
+      # Skip on pull_request: its merge-commit checkout makes the commit step
+      # fail, and the push run already commits the flats.
       - name: Commit flattened contracts
+        if: github.event_name != 'pull_request'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           file_pattern: flat/*.sol
