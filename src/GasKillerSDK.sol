@@ -17,11 +17,6 @@ import {StateChangeHandlerLib, StateUpdateType} from "./StateChangeHandlerLib.so
 abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     /// @custom:storage-location erc7201:gaskiller.GasKillerSDK.storage
     struct GasKillerSDKStorage {
-        /// @notice Deprecated. Formerly the stored namespace bytes; now derived on read by `namespace()`.
-        /// @dev Retained as a placeholder so the storage layout of the following slots is unchanged
-        ///      (important for upgradeable/proxy consumers). It is never written, so the config-time
-        ///      dynamic-bytes SSTORE it used to incur is still avoided.
-        bytes __deprecated_namespace;
         /// @notice The AVS service manager address
         address avsAddress;
         /// @notice The BLS signature checker contract used to verify operator signatures
@@ -123,10 +118,8 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     }
 
     /// @notice Return the namespace bytes derived from the AVS address
-    /// @dev Derived on read as `abi.encodePacked(avsAddress, "gaskiller")` rather than stored, since it is a
-    ///      deterministic function of `avsAddress`; this avoids a dynamic-bytes SSTORE at configuration time.
-    ///      Returns empty bytes when the AVS address is unset (matching the prior stored-default behavior),
-    ///      so `namespace()` still reads as empty for an unconfigured contract.
+    /// @dev Computed on read as `abi.encodePacked(avsAddress, "gaskiller")`, avoiding a dynamic-bytes SSTORE
+    ///      at configuration time. Returns empty bytes when the AVS address is unset.
     /// @return The namespace
     function namespace() external view returns (bytes memory) {
         address _avsAddress = _getGasKillerSDKStorage().avsAddress;
@@ -150,8 +143,7 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     }
 
     /// @notice Set the AVS address
-    /// @dev The `namespace` getter derives `abi.encodePacked(avsAddress, "gaskiller")` on read, so nothing
-    ///      extra needs to be stored here.
+    /// @dev `namespace()` derives its value from `avsAddress` on read, so no additional storage write happens here.
     /// @param _avsAddress The new AVS service manager address
     function _setAvsAddress(address _avsAddress) internal {
         _getGasKillerSDKStorage().avsAddress = _avsAddress;

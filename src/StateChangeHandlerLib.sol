@@ -41,7 +41,6 @@ library StateChangeHandlerLib {
     function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args) internal {
         uint256 length = types.length;
         require(length == args.length, InvalidArguments());
-        // solc >= 0.8.22 makes the `++i` loop-counter increment unchecked automatically.
         for (uint256 i = 0; i < length; ++i) {
             StateUpdateType stateUpdateType = types[i];
             bytes memory arg = args[i];
@@ -55,7 +54,6 @@ library StateChangeHandlerLib {
                 (address target, uint256 value, bytes memory callargs) = abi.decode(arg, (address, uint256, bytes));
                 bool success;
                 assembly {
-                    // Forward all remaining gas via gas() directly (avoids caching gasleft() in a local)
                     success := call(gas(), target, value, add(callargs, 0x20), mload(callargs), 0, 0)
                 }
                 // TODO: this section needs heavy testing
@@ -71,11 +69,9 @@ library StateChangeHandlerLib {
                     revert RevertingContext(i, target, revertData, callargs);
                 }
             } else if (stateUpdateType == StateUpdateType.LOG0) {
-                // Emit directly out of the encoded `arg` buffer instead of abi.decoding it into a fresh
-                // `bytes` (which allocates + copies the payload). `_validateLogArg` first re-establishes the
-                // bounds/format guarantees abi.decode would provide, so a malformed `arg` reverts rather than
-                // logging out-of-bounds memory. After validation the `data` length word sits at
-                // `base + canonicalOffset` and the topics (if any) inline in the head at `base + 0x20*k`.
+                // `_validateLogArg` checks that `arg` is a canonical, in-bounds encoding before this reads
+                // directly out of its buffer. The `data` length word sits at `base + canonicalOffset`, and
+                // any topics sit inline in the head at `base + 0x20*k`.
                 _validateLogArg(arg, 0x20);
                 assembly {
                     let dataPtr := add(add(arg, 0x20), 0x20)
@@ -141,10 +137,8 @@ library StateChangeHandlerLib {
     }
 
     /// @notice Validate that `arg` is a canonical, in-bounds ABI encoding of a LOG payload
-    /// @dev Restores the bounds/format guarantees `abi.decode` would provide for the direct-buffer LOG
-    ///      emission paths, so a malformed `arg` reverts instead of emitting out-of-bounds memory. Reverts
-    ///      with `MalformedLogPayload` on a truncated head, a non-canonical `data` offset, or a `data`
-    ///      length that runs past the end of `arg`. `canonicalOffset` is the encoding's head size
+    /// @dev Reverts with `MalformedLogPayload` on a truncated head, a non-canonical `data` offset, or a
+    ///      `data` length that runs past the end of `arg`. `canonicalOffset` is the encoding's head size
     ///      `0x20 * (numTopics + 1)` (0x20 for LOG0, 0x40 for LOG1, ... 0xa0 for LOG4); it is also where the
     ///      `data` length word lives, and every fixed `bytes32` topic sits within the head before it.
     /// @param arg The ABI-encoded LOG payload to validate
