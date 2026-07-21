@@ -12,6 +12,10 @@ on:
 env:
   FOUNDRY_PROFILE: ci
 
+concurrency:
+  group: flatten-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   flatten:
     name: Flatten Solidity Contracts
