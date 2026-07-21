@@ -147,7 +147,8 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
         uint256 signedWeight = totalWeight;
 
         address last = address(0);
-        for (uint256 i = 0; i < nonSigners.length; ++i) {
+        uint256 nonSignersLength = nonSigners.length;
+        for (uint256 i = 0; i < nonSignersLength; ++i) {
             address ns = nonSigners[i];
             if (ns <= last) revert NonSignersNotSorted();
             last = ns;
