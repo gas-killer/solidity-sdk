@@ -41,8 +41,9 @@ library StateChangeHandlerLib {
     /// @param args Array of ABI-encoded arguments corresponding to each operation type
     /// @dev types and args arrays must be equal length, with args[i] containing the encoded parameters for types[i]
     function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args) internal {
-        require(types.length == args.length, InvalidArguments());
-        for (uint256 i = 0; i < types.length; i++) {
+        uint256 length = types.length;
+        require(length == args.length, InvalidArguments());
+        for (uint256 i = 0; i < length; ++i) {
             StateUpdateType stateUpdateType = types[i];
             bytes memory arg = args[i];
 
@@ -54,10 +55,8 @@ library StateChangeHandlerLib {
             } else if (stateUpdateType == StateUpdateType.CALL) {
                 (address target, uint256 value, bytes memory callargs) = abi.decode(arg, (address, uint256, bytes));
                 bool success;
-                // TOOD: might need better gas handling
-                uint256 callgas = gasleft();
                 assembly {
-                    success := call(callgas, target, value, add(callargs, 0x20), mload(callargs), 0, 0)
+                    success := call(gas(), target, value, add(callargs, 0x20), mload(callargs), 0, 0)
                 }
                 // TODO: this section needs heavy testing
                 if (!success) {
@@ -72,32 +71,54 @@ library StateChangeHandlerLib {
                     revert RevertingContext(i, target, revertData, callargs);
                 }
             } else if (stateUpdateType == StateUpdateType.LOG0) {
-                // NOTE: For consistency I decode an abi encoding of bytes from bytes, but technically it's redundant
-                (bytes memory data) = abi.decode(arg, (bytes));
+                // `_validateLogArg` checks that `arg` is a canonical, in-bounds encoding before this reads
+                // directly out of its buffer. The `data` length word sits at `base + canonicalOffset`, and
+                // any topics sit inline in the head at `base + 0x20*k`.
+                _validateLogArg(arg, 0x20);
                 assembly {
-                    log0(add(data, 0x20), mload(data))
+                    let dataPtr := add(add(arg, 0x20), 0x20)
+                    log0(add(dataPtr, 0x20), mload(dataPtr))
                 }
             } else if (stateUpdateType == StateUpdateType.LOG1) {
-                (bytes memory data, bytes32 topic1) = abi.decode(arg, (bytes, bytes32));
+                _validateLogArg(arg, 0x40);
                 assembly {
-                    log1(add(data, 0x20), mload(data), topic1)
+                    let base := add(arg, 0x20)
+                    let dataPtr := add(base, 0x40)
+                    log1(add(dataPtr, 0x20), mload(dataPtr), mload(add(base, 0x20)))
                 }
             } else if (stateUpdateType == StateUpdateType.LOG2) {
-                (bytes memory data, bytes32 topic1, bytes32 topic2) = abi.decode(arg, (bytes, bytes32, bytes32));
+                _validateLogArg(arg, 0x60);
                 assembly {
-                    log2(add(data, 0x20), mload(data), topic1, topic2)
+                    let base := add(arg, 0x20)
+                    let dataPtr := add(base, 0x60)
+                    log2(add(dataPtr, 0x20), mload(dataPtr), mload(add(base, 0x20)), mload(add(base, 0x40)))
                 }
             } else if (stateUpdateType == StateUpdateType.LOG3) {
-                (bytes memory data, bytes32 topic1, bytes32 topic2, bytes32 topic3) =
-                    abi.decode(arg, (bytes, bytes32, bytes32, bytes32));
+                _validateLogArg(arg, 0x80);
                 assembly {
-                    log3(add(data, 0x20), mload(data), topic1, topic2, topic3)
+                    let base := add(arg, 0x20)
+                    let dataPtr := add(base, 0x80)
+                    log3(
+                        add(dataPtr, 0x20),
+                        mload(dataPtr),
+                        mload(add(base, 0x20)),
+                        mload(add(base, 0x40)),
+                        mload(add(base, 0x60))
+                    )
                 }
             } else if (stateUpdateType == StateUpdateType.LOG4) {
-                (bytes memory data, bytes32 topic1, bytes32 topic2, bytes32 topic3, bytes32 topic4) =
-                    abi.decode(arg, (bytes, bytes32, bytes32, bytes32, bytes32));
+                _validateLogArg(arg, 0xa0);
                 assembly {
-                    log4(add(data, 0x20), mload(data), topic1, topic2, topic3, topic4)
+                    let base := add(arg, 0x20)
+                    let dataPtr := add(base, 0xa0)
+                    log4(
+                        add(dataPtr, 0x20),
+                        mload(dataPtr),
+                        mload(add(base, 0x20)),
+                        mload(add(base, 0x40)),
+                        mload(add(base, 0x60)),
+                        mload(add(base, 0x80))
+                    )
                 }
             } else if (stateUpdateType == StateUpdateType.CREATE) {
                 (uint256 value, bytes memory initcode) = abi.decode(arg, (uint256, bytes));
@@ -117,8 +138,35 @@ library StateChangeHandlerLib {
         }
     }
 
+    /// @notice Validate that `arg` is a canonical, in-bounds ABI encoding of a LOG payload
+    /// @dev Reverts with `MalformedLogPayload` on a truncated head, a non-canonical `data` offset, or a
+    ///      `data` length that runs past the end of `arg`. `canonicalOffset` is the encoding's head size
+    ///      `0x20 * (numTopics + 1)` (0x20 for LOG0, 0x40 for LOG1, ... 0xa0 for LOG4); it is also where the
+    ///      `data` length word lives, and every fixed `bytes32` topic sits within the head before it.
+    /// @param arg The ABI-encoded LOG payload to validate
+    /// @param canonicalOffset The expected offset of the `data` field (equals the encoding's head size)
+    function _validateLogArg(bytes memory arg, uint256 canonicalOffset) private pure {
+        uint256 len = arg.length;
+        // The head (offset word + topics) and the `data` length word must both be readable.
+        if (len < canonicalOffset + 0x20) revert MalformedLogPayload();
+        uint256 off;
+        uint256 dataLen;
+        assembly {
+            let base := add(arg, 0x20)
+            off := mload(base)
+            dataLen := mload(add(base, canonicalOffset))
+        }
+        // Offset must match what abi.encode produces, and the data bytes must fit inside `arg`.
+        // `len >= canonicalOffset + 0x20` above makes the subtraction below safe.
+        if (off != canonicalOffset) revert MalformedLogPayload();
+        if (dataLen > len - canonicalOffset - 0x20) revert MalformedLogPayload();
+    }
+
     /// @notice Thrown when `types` and `args` arrays have different lengths
     error InvalidArguments();
+
+    /// @notice Thrown when a LOG operation's payload is not a canonical, in-bounds ABI encoding
+    error MalformedLogPayload();
 
     /// @notice Thrown when a CALL operation's external call reverts
     /// @param index The zero-based position of the failing operation in the batch

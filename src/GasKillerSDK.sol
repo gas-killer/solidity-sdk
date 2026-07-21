@@ -17,8 +17,8 @@ import {StateChangeHandlerLib, StateUpdateType} from "./StateChangeHandlerLib.so
 abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     /// @custom:storage-location erc7201:gaskiller.GasKillerSDK.storage
     struct GasKillerSDKStorage {
-        /// @notice Namespace derived from the AVS address; used to scope this contract within the AVS
-        bytes namespace;
+        /// @notice Deprecated. Maintained to preserve storage layout. Now derived on read by `namespace()`
+        bytes __deprecated_namespace;
         /// @notice The AVS service manager address
         address avsAddress;
         /// @notice The BLS signature checker contract used to verify operator signatures
@@ -73,7 +73,8 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
             .checkSignatures(msgHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
 
         // Check that signatories own at least 66% of each quorum
-        for (uint256 i = 0; i < quorumNumbers.length; i++) {
+        uint256 quorumCount = quorumNumbers.length;
+        for (uint256 i = 0; i < quorumCount; ++i) {
             require(
                 stakeTotals.signedStakeForQuorum[i] * THRESHOLD_DENOMINATOR
                     >= stakeTotals.totalStakeForQuorum[i] * QUORUM_THRESHOLD,
@@ -119,9 +120,15 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     }
 
     /// @notice Return the namespace bytes derived from the AVS address
+    /// @dev Computed on read as `abi.encodePacked(avsAddress, "gaskiller")`, avoiding a dynamic-bytes SSTORE
+    ///      at configuration time. Returns empty bytes when the AVS address is unset.
     /// @return The namespace
     function namespace() external view returns (bytes memory) {
-        return _getGasKillerSDKStorage().namespace;
+        address _avsAddress = _getGasKillerSDKStorage().avsAddress;
+        if (_avsAddress == address(0)) {
+            return "";
+        }
+        return abi.encodePacked(_avsAddress, "gaskiller");
     }
 
     /// @notice Return the configured block stale measure (or the default if unset)
@@ -137,13 +144,11 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         StateChangeHandlerLib._runStateUpdates(types, args);
     }
 
-    /// @notice Set the AVS address and derive the namespace from it
-    /// @dev The namespace is `abi.encodePacked(avsAddress, "gaskiller")`
+    /// @notice Set the AVS address
+    /// @dev `namespace()` derives its value from `avsAddress` on read, so no additional storage write happens here.
     /// @param _avsAddress The new AVS service manager address
     function _setAvsAddress(address _avsAddress) internal {
-        GasKillerSDKStorage storage $ = _getGasKillerSDKStorage();
-        $.avsAddress = _avsAddress;
-        $.namespace = abi.encodePacked($.avsAddress, "gaskiller");
+        _getGasKillerSDKStorage().avsAddress = _avsAddress;
     }
 
     /// @notice Set the BLS signature checker contract
