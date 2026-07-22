@@ -151,7 +151,33 @@ contract SchnorrStakeRegistryTest is Test {
         fresh.registerOperator(opX[0], opY[0] ^ 1, WEIGHT, popS[0], popR[0]);
     }
 
+    // A weight that does not fit the packed uint96 field is rejected (rather than
+    // silently truncated into the quorum arithmetic).
+    function test_registration_rejectsWeightOverflow() public {
+        SchnorrStakeRegistry fresh = new SchnorrStakeRegistry(2, 3, address(this));
+        vm.expectRevert(SchnorrStakeRegistry.WeightOverflow.selector);
+        fresh.registerOperator(opX[0], opY[0], uint256(type(uint96).max) + 1, popS[0], popR[0]);
+    }
+
+    // The boundary itself is accepted and stored losslessly (guards against the check
+    // regressing from > to >=, and against a truncating cast reappearing).
+    function test_registration_acceptsMaxUint96Weight() public {
+        SchnorrStakeRegistry fresh = new SchnorrStakeRegistry(2, 3, address(this));
+        fresh.registerOperator(opX[0], opY[0], uint256(type(uint96).max), popS[0], popR[0]);
+        address id = fresh.pointAddress(opX[0], opY[0]);
+        (,, uint96 w, bool registered) = fresh.operators(id);
+        assertEq(uint256(w), uint256(type(uint96).max), "stored weight lossless at the bound");
+        assertTrue(registered, "registered");
+        assertEq(fresh.totalWeight(), uint256(type(uint96).max), "totalWeight credits the full value");
+    }
+
     // ---- gas benchmark (constant in signer count at full participation) ----
+    // NOTE: this measures the WARM access context (the warm-up calls below put the
+    // registry in the EIP-2929 access set). A standalone on-chain transaction pays the
+    // COLD context instead — roughly +2.5k for the account plus +2k per first-touch slot.
+    // Under `forge test --gas-report` calls run ISOLATED (fresh access lists), so this
+    // same test prints the cold-context numbers there. Both contexts, plus non-signer
+    // scaling, are measured explicitly in SchnorrStakeRegistryGas.t.sol.
     function test_gas_benchmark() public view {
         address[] memory none = new address[](0);
         address[] memory ns = new address[](1);

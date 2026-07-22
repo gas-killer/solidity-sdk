@@ -122,7 +122,7 @@ contract SchnorrArraySummationFactory {
         uint256 length = _endIndex - _startIndex;
         addresses = new address[](length);
 
-        for (uint256 i = 0; i < length; i++) {
+        for (uint256 i = 0; i < length; ++i) {
             addresses[i] = deployedContracts[_startIndex + i];
         }
     }
@@ -139,10 +139,11 @@ contract SchnorrArraySummationFactory {
     /// @param _avsAddress The AVS address to filter by
     /// @return addresses Array of contract addresses deployed by the AVS
     function getContractsByAVS(address _avsAddress) external view returns (address[] memory addresses) {
+        uint256 length = deployedContracts.length;
         uint256 count = 0;
 
         // First pass: count matching contracts
-        for (uint256 i = 0; i < deployedContracts.length; i++) {
+        for (uint256 i = 0; i < length; ++i) {
             if (contractInfo[deployedContracts[i]].avsAddress == _avsAddress) {
                 count++;
             }
@@ -151,7 +152,7 @@ contract SchnorrArraySummationFactory {
         // Second pass: collect addresses
         addresses = new address[](count);
         uint256 index = 0;
-        for (uint256 i = 0; i < deployedContracts.length; i++) {
+        for (uint256 i = 0; i < length; ++i) {
             if (contractInfo[deployedContracts[i]].avsAddress == _avsAddress) {
                 addresses[index] = deployedContracts[i];
                 index++;

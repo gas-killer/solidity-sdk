@@ -68,7 +68,7 @@ contract SchnorrArraySummation is SchnorrGasKillerSDK {
         }
 
         uint256 hashedSeed = uint256(keccak256(abi.encode(_seed)));
-        for (uint256 i = 0; i < arraySize; i++) {
+        for (uint256 i = 0; i < arraySize; ++i) {
             values.push(uint256(keccak256(abi.encode(hashedSeed, i))) % maxValue);
         }
 
@@ -89,13 +89,16 @@ contract SchnorrArraySummation is SchnorrGasKillerSDK {
 
         if (indexes.length == 0) {
             // If no indexes provided, sum all elements
-            for (uint256 i = 0; i < values.length; i++) {
+            uint256 length = values.length;
+            for (uint256 i = 0; i < length; ++i) {
                 total += values[i];
             }
         } else {
             // Sum only specified indexes
-            for (uint256 i = 0; i < indexes.length; i++) {
-                require(indexes[i] < values.length, "Index out of bounds");
+            uint256 valuesLength = values.length;
+            uint256 indexesLength = indexes.length;
+            for (uint256 i = 0; i < indexesLength; ++i) {
+                require(indexes[i] < valuesLength, "Index out of bounds");
                 total += values[indexes[i]];
             }
         }
