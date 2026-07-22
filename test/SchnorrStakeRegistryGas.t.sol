@@ -22,12 +22,16 @@ import {SchnorrStakeRegistry} from "../src/schnorr/SchnorrStakeRegistry.sol";
 ///
 ///         Reference measurements (3 ops, 2/3 threshold, solc 0.8.29, prague): warm full
 ///         participation ~6.5k — packing does not touch the full-participation path,
-///         which reads no operator records. The marginal per non-signer is ~4.2k
-///         point-sub compute (one modexp-based inverse) plus, when cold, the non-signer's
-///         record SLOADs: before the Operator packing that was +4,162 warm / +12,162 cold;
-///         with the packed 3-slot record it is +4,197 warm (packed-field extraction) /
-///         +10,194 cold (one fewer cold SLOAD — the win lands in the standalone-tx
-///         context, which is the one receipts reflect).
+///         which reads no operator records. The marginal per non-signer is dominated by
+///         one modexp-based point-sub inverse plus, when cold, the non-signer's record
+///         SLOADs. That modexp call's own price is forge-version-dependent: EIP-7883
+///         (ModExp Gas Cost Increase, Fusaka) removes the historical GQUADDIVISOR=3 for
+///         the common <=32-byte-operand case, tripling the 32-byte-modulus call from
+///         1,360 to 4,080 gas. Toolchains without it give a ~4.2k marginal; toolchains
+///         with it (CI always installs `forge-toolchain stable`, so it tracks this as soon
+///         as revm ships it) give ~6.9k. The ceilings below are set for the repriced
+///         (current CI) toolchain with headroom; a ~4.2k marginal on an older cached local
+///         `forge` is not a regression — run `foundryup` to match CI.
 ///
 ///         The real-signature fixture (3 operators) covers k ∈ {0,1}; linearity in the
 ///         non-signer count is proven separately on a synthetic 16-operator registry
@@ -156,8 +160,10 @@ contract SchnorrStakeRegistryGasTest is Test {
             return;
         }
         // One ecrecover + a handful of warm SLOADs; loose bounds to survive solc drift.
+        // 8_000 headroom above the ~6.9k EIP-7883-repriced modexp marginal (see contract
+        // docstring above) — was 6_500 pre-repricing.
         assertLt(warmFull, 12_000, "warm full-participation verify");
-        assertLt(warmOneNs - warmFull, 6_500, "warm per-non-signer marginal");
+        assertLt(warmOneNs - warmFull, 8_000, "warm per-non-signer marginal");
     }
 
     /// Cold context, full participation: what a standalone verifyAndUpdate transaction
@@ -241,8 +247,10 @@ contract SchnorrStakeRegistryGasTest is Test {
 
         bool isolated = k0 > 15_000; // pre-warm didn't stick => cold per-call context
         // Every step lands in a tight band around one point-sub + one packed record.
+        // Non-isolated ceiling carries the same EIP-7883 headroom as the warm test above
+        // (was 6_500 pre-repricing).
         assertGt(minMarginal, 2_500, "marginal floor (point sub is real work)");
-        assertLt(maxMarginal, isolated ? 13_500 : 6_500, "marginal ceiling (no superlinear blowup)");
+        assertLt(maxMarginal, isolated ? 13_500 : 8_000, "marginal ceiling (no superlinear blowup)");
         assertLt(maxMarginal - minMarginal, 1_500, "linearity: steps within a tight band");
     }
 }
