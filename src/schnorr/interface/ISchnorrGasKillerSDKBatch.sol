@@ -29,6 +29,14 @@ struct SchnorrTaskSubmission {
 ///      key/weight/watermark slots, and the SDK's own config slots — everything after the
 ///      first sub-transition runs at warm-access prices (measured: the registry verify
 ///      alone drops from ~17.0k cold to ~6.5k warm at full participation).
+///
+///      Batch assemblers (the off-chain router composing `submissions`) should be aware
+///      that `StateChangeHandlerLib`'s `CALL` update forwards *all* remaining gas to its
+///      target with no cap. A greedy or griefing CALL target in an early sub-transition can
+///      consume enough gas to starve every later sub-transition, reverting the whole
+///      (atomic) batch — no partial-state hazard, since it's all-or-nothing, but it does
+///      nullify the amortization this extension exists for. Ordering submissions with
+///      untrusted CALL targets last, or excluding them from batches entirely, avoids this.
 interface ISchnorrGasKillerSDKBatch {
     /// @notice Verify and apply a sequence of independently signed state transitions.
     /// @dev Transitions apply in calldata order with consecutive `transitionIndex`es.

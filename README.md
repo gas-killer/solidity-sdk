@@ -24,6 +24,16 @@ differ only in how an operator quorum's approval is verified on-chain:
   Schnorr signature against a `SchnorrStakeRegistry` in constant gas (one `ecrecover`, non-signer
   subtraction). Rogue-key-safe via a registration proof of possession.
 
+## Chain requirements
+
+`TransitionGuard` (used by the Schnorr scheme's `verifyAndUpdate`/`verifyAndUpdateBatch`,
+see `src/TransitionGuard.sol`) is a reentrancy/in-transition guard built on EIP-1153
+transient storage, and has no fallback path for a pre-Cancun EVM — deploying it to a chain
+without EIP-1153 breaks settlement itself, not just the guard. `foundry.toml` pins
+`evm_version = "cancun"` accordingly. Ethereum mainnet has supported EIP-1153 since Dencun;
+before deploying to any other chain (in particular an L2 settlement target), confirm it has
+activated the equivalent of Cancun/EIP-1153.
+
 ## Repository Structure
 
 - **`src/`** — Core SDK contracts
