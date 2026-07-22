@@ -4,5 +4,12 @@ out = "out"
 libs = ["lib"]
 optimizer = true
 optimizer_runs = 200
+# Pinned, not left to track Foundry's default: TransitionGuard is a hard EIP-1153
+# (transient storage) dependency (see src/TransitionGuard.sol), which EIP-1153 makes
+# available from Cancun onward. Pinning to the floor fork that satisfies it — rather than
+# whatever newer fork Foundry defaults to next — keeps codegen from assuming opcodes a
+# target chain may not have yet. Any settlement target must itself support Cancun/EIP-1153;
+# see README's "Chain requirements" section.
+evm_version = "cancun"
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

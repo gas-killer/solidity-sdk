@@ -49,6 +49,7 @@ abstract contract SchnorrGasKillerSDK is
     error InvalidSignature();
     error InvalidQuorumSignature();
     error EmptyBatch();
+    error BlockStaleMeasureOverflow();
 
     /// @notice Verify an aggregate Schnorr quorum signature and apply the state updates.
     /// @param msgHash             the task digest (recomputed and checked below).
@@ -91,6 +92,12 @@ abstract contract SchnorrGasKillerSDK is
     ///      transition for this contract, so a skipped item's transition has already
     ///      happened. Reverts (`InvalidTransitionIndex`) only on a genuine gap — an index
     ///      above the next expected one.
+    ///
+    ///      Batch assemblers: a `CALL` state update forwards all remaining gas to its target
+    ///      with no cap (see `StateChangeHandlerLib`). A greedy/griefing target in an early
+    ///      sub-transition can therefore starve every later one in the same batch, reverting
+    ///      the whole (atomic) batch — no partial-state hazard, but it does nullify the
+    ///      amortization this function exists for.
     /// @param submissions The transitions to apply, in order of ascending transition index.
     function verifyAndUpdateBatch(SchnorrTaskSubmission[] calldata submissions) external guardTransition {
         uint256 len = submissions.length;
@@ -204,7 +211,7 @@ abstract contract SchnorrGasKillerSDK is
     }
 
     function _setBlockStaleMeasure(uint256 _blockStaleMeasure) internal {
-        require(_blockStaleMeasure <= type(uint96).max, "stale measure overflow");
+        require(_blockStaleMeasure <= type(uint96).max, BlockStaleMeasureOverflow());
         _sto().blockStaleMeasure = uint96(_blockStaleMeasure);
     }
 
