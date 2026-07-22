@@ -53,6 +53,13 @@ library StateChangeHandlerLib {
                     sstore(slot, value)
                 }
             } else if (stateUpdateType == StateUpdateType.CALL) {
+                // Forwards all remaining gas (no stipend cap). In a batched settlement
+                // (e.g. SchnorrGasKillerSDK.verifyAndUpdateBatch) this is amplified: a
+                // greedy or griefing target in an earlier sub-transition's CALL can consume
+                // enough gas to starve every later sub-transition in the same batch,
+                // reverting the whole (atomic) batch. No partial-state hazard — it's all or
+                // nothing — but it does nullify the batch's cost amortization. See
+                // ISchnorrGasKillerSDKBatch for the batch-assembly-side note.
                 (address target, uint256 value, bytes memory callargs) = abi.decode(arg, (address, uint256, bytes));
                 bool success;
                 assembly {

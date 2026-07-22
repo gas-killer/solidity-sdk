@@ -43,6 +43,14 @@ struct SchnorrTaskSubmission {
 ///      key/weight/watermark slots, and the SDK's own config slots — everything after the
 ///      first sub-transition runs at warm-access prices (measured: the registry verify
 ///      alone drops from ~17.0k cold to ~6.5k warm at full participation).
+///
+///      Batch assemblers (the off-chain router composing `submissions`) should be aware
+///      that `StateChangeHandlerLib`'s `CALL` update forwards *all* remaining gas to its
+///      target with no cap. A greedy or griefing CALL target in an early sub-transition can
+///      consume enough gas to starve every later sub-transition, reverting the whole
+///      (atomic) batch — no partial-state hazard, since it's all-or-nothing, but it does
+///      nullify the amortization this extension exists for. Ordering submissions with
+///      untrusted CALL targets last, or excluding them from batches entirely, avoids this.
 interface ISchnorrGasKillerSDKBatch {
     /// @notice Verify and apply a sequence of independently signed state transitions.
     /// @dev Transitions apply in calldata order with consecutive `transitionIndex`es.
@@ -133,6 +141,13 @@ library StateChangeHandlerLib {
                     sstore(slot, value)
                 }
             } else if (stateUpdateType == StateUpdateType.CALL) {
+                // Forwards all remaining gas (no stipend cap). In a batched settlement
+                // (e.g. SchnorrGasKillerSDK.verifyAndUpdateBatch) this is amplified: a
+                // greedy or griefing target in an earlier sub-transition's CALL can consume
+                // enough gas to starve every later sub-transition in the same batch,
+                // reverting the whole (atomic) batch. No partial-state hazard — it's all or
+                // nothing — but it does nullify the batch's cost amortization. See
+                // ISchnorrGasKillerSDKBatch for the batch-assembly-side note.
                 (address target, uint256 value, bytes memory callargs) = abi.decode(arg, (address, uint256, bytes));
                 bool success;
                 assembly {
@@ -441,6 +456,7 @@ abstract contract SchnorrGasKillerSDK is
     error InvalidSignature();
     error InvalidQuorumSignature();
     error EmptyBatch();
+    error BlockStaleMeasureOverflow();
 
     /// @notice Verify an aggregate Schnorr quorum signature and apply the state updates.
     /// @param msgHash             the task digest (recomputed and checked below).
@@ -483,6 +499,12 @@ abstract contract SchnorrGasKillerSDK is
     ///      transition for this contract, so a skipped item's transition has already
     ///      happened. Reverts (`InvalidTransitionIndex`) only on a genuine gap — an index
     ///      above the next expected one.
+    ///
+    ///      Batch assemblers: a `CALL` state update forwards all remaining gas to its target
+    ///      with no cap (see `StateChangeHandlerLib`). A greedy/griefing target in an early
+    ///      sub-transition can therefore starve every later one in the same batch, reverting
+    ///      the whole (atomic) batch — no partial-state hazard, but it does nullify the
+    ///      amortization this function exists for.
     /// @param submissions The transitions to apply, in order of ascending transition index.
     function verifyAndUpdateBatch(SchnorrTaskSubmission[] calldata submissions) external guardTransition {
         uint256 len = submissions.length;
@@ -596,7 +618,7 @@ abstract contract SchnorrGasKillerSDK is
     }
 
     function _setBlockStaleMeasure(uint256 _blockStaleMeasure) internal {
-        require(_blockStaleMeasure <= type(uint96).max, "stale measure overflow");
+        require(_blockStaleMeasure <= type(uint96).max, BlockStaleMeasureOverflow());
         _sto().blockStaleMeasure = uint96(_blockStaleMeasure);
     }
 
