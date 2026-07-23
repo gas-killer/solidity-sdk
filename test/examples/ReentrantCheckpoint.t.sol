@@ -6,7 +6,7 @@ import {ReentrantCheckpoint} from "../../src/examples/reentrant-checkpoint/Reent
 import {ReentrantObserver} from "../../src/examples/reentrant-checkpoint/ReentrantObserver.sol";
 import {ReentrantCheckpointFactory} from "../../src/examples/reentrant-checkpoint/ReentrantCheckpointFactory.sol";
 import {ISchnorrStakeRegistry} from "../../src/schnorr/interface/ISchnorrStakeRegistry.sol";
-import {StateUpdateType} from "../../src/StateChangeHandlerLib.sol";
+import {StateUpdateType, StateChangeHandlerLib} from "../../src/StateChangeHandlerLib.sol";
 
 /// Registry stub that approves any signature — this suite exercises the
 /// state-application + re-entrancy behavior, not signature verification (covered in
@@ -119,7 +119,18 @@ contract ReentrantCheckpointTest is Test {
         bytes32 h = _digest(0, program); // sha256 done before expectRevert
         address[] memory none = new address[](0);
 
-        vm.expectRevert(); // RevertingContext wrapping CounterNotCanonical(0, 1)
+        // The observe() call is program index 0; the re-entrant read sees counter=0 but
+        // expects 1 (the canonical post-increment value), so it reverts with
+        // CounterNotCanonical(0, 1), which the CALL handler wraps in RevertingContext.
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                StateChangeHandlerLib.RevertingContext.selector,
+                uint256(0),
+                address(observer),
+                abi.encodeWithSelector(ReentrantObserver.CounterNotCanonical.selector, uint256(0), uint256(1)),
+                abi.encodeCall(ReentrantObserver.observe, (1))
+            )
+        );
         checkpoint.verifyAndUpdate(
             h, uint32(block.number - 1), program, 0, ReentrantCheckpoint.advance.selector, 1, address(0x1234), none
         );
@@ -140,7 +151,18 @@ contract ReentrantCheckpointTest is Test {
         bytes32 h = _digest(0, program);
         address[] memory none = new address[](0);
 
-        vm.expectRevert(); // RevertingContext wrapping FinalStateAppliedTooEarly()
+        // The observe() call is program index 2; by then lastObserved already equals the
+        // expected counter (1), so the re-entrant read reverts with
+        // FinalStateAppliedTooEarly(), wrapped in RevertingContext.
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                StateChangeHandlerLib.RevertingContext.selector,
+                uint256(2),
+                address(observer),
+                abi.encodeWithSelector(ReentrantObserver.FinalStateAppliedTooEarly.selector),
+                abi.encodeCall(ReentrantObserver.observe, (1))
+            )
+        );
         checkpoint.verifyAndUpdate(
             h, uint32(block.number - 1), program, 0, ReentrantCheckpoint.advance.selector, 1, address(0x1234), none
         );
