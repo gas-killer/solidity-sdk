@@ -8,6 +8,7 @@ import {StateTracker} from "../StateTracker.sol";
 import {TransitionGuard} from "../TransitionGuard.sol";
 import {StateChangeHandlerLib, StateUpdateType} from "../StateChangeHandlerLib.sol";
 import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
+import {IGasKillerSlasher} from "../interface/IGasKillerSlasher.sol";
 
 /// @title SchnorrGasKillerSDK
 /// @notice Aggregate-Schnorr variant of `GasKillerSDK`. Identical task-hash and
@@ -16,8 +17,9 @@ import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
 ///         a `SchnorrStakeRegistry` (constant gas, non-signer subtraction) instead of `N`
 ///         per-operator ECDSA signatures verified against `ECDSAStakeRegistry`.
 ///
-/// @dev The signed message is unchanged — `sha256(abi.encode(transitionIndex,
-///      address(this), targetFunction, storageUpdates))` — so the off-chain digest and the
+/// @dev The signed message mirrors the ECDSA `GasKillerSDK` digest —
+///      `sha256(abi.encode(transitionIndex, address(this), anchorHash, callerAddress,
+///      contractCalldata, storageUpdates))` — so the off-chain digest and the
 ///      slashing/fraud-proof machinery are scheme-agnostic. The calldata swaps
 ///      `(operators[], signatures[])` for `(s, Raddr, nonSigners[])`.
 ///
@@ -36,6 +38,8 @@ abstract contract SchnorrGasKillerSDK is
         address avsAddress;
         ISchnorrStakeRegistry registry;
         uint96 blockStaleMeasure;
+        /// @notice Optional Gas Killer slasher; when set, applied commitments are recorded for challenge-window tracking
+        IGasKillerSlasher slasher;
     }
 
     // keccak256(abi.encode(uint256(keccak256("gaskiller.SchnorrGasKillerSDK.storage")) - 1)) & ~bytes32(uint256(0xff))
@@ -56,7 +60,9 @@ abstract contract SchnorrGasKillerSDK is
     /// @param referenceBlockNumber block at which stake/keys are evaluated by the registry.
     /// @param storageUpdates      ABI-encoded `(StateUpdateType[], bytes[])`.
     /// @param transitionIndex     expected `stateTransitionCount() - 1`.
-    /// @param targetFunction      selector bound into the digest.
+    /// @param anchorHash          hash of the block the off-chain execution was anchored to.
+    /// @param callerAddress       the msg.sender of the original call.
+    /// @param contractCalldata    the full calldata of the original call.
     /// @param s                   aggregate Schnorr response scalar.
     /// @param Raddr               aggregate nonce address `address(R)`.
     /// @param nonSigners          operators that did not sign, strictly ascending.
@@ -65,13 +71,24 @@ abstract contract SchnorrGasKillerSDK is
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
-        bytes4 targetFunction,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
         uint256 s,
         address Raddr,
         address[] calldata nonSigners
     ) external guardTransition {
         _verifyAndUpdateOne(
-            msgHash, referenceBlockNumber, storageUpdates, transitionIndex, targetFunction, s, Raddr, nonSigners
+            msgHash,
+            referenceBlockNumber,
+            storageUpdates,
+            transitionIndex,
+            anchorHash,
+            callerAddress,
+            contractCalldata,
+            s,
+            Raddr,
+            nonSigners
         );
     }
 
@@ -111,7 +128,9 @@ abstract contract SchnorrGasKillerSDK is
                 sub.referenceBlockNumber,
                 sub.storageUpdates,
                 sub.transitionIndex,
-                sub.targetFunction,
+                sub.anchorHash,
+                sub.callerAddress,
+                sub.contractCalldata,
                 sub.s,
                 sub.Raddr,
                 sub.nonSigners
@@ -126,7 +145,9 @@ abstract contract SchnorrGasKillerSDK is
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
-        bytes4 targetFunction,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
         uint256 s,
         address Raddr,
         address[] calldata nonSigners
@@ -135,10 +156,15 @@ abstract contract SchnorrGasKillerSDK is
         require((uint256(referenceBlockNumber) + _getBlockStaleMeasure()) >= block.number, StaleBlockNumber());
 
         require(transitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
-        bytes32 expectedHash = sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
+        bytes32 expectedHash = sha256(
+            abi.encode(transitionIndex, address(this), anchorHash, callerAddress, contractCalldata, storageUpdates)
+        );
         require(expectedHash == msgHash, InvalidSignature());
 
         _verifyQuorum(msgHash, s, Raddr, nonSigners, referenceBlockNumber);
+
+        // Record the commitment for challenge-window tracking when a slasher is configured
+        _recordCommitment(msgHash);
 
         _stateChangeHandler(storageUpdates);
     }
@@ -152,6 +178,15 @@ abstract contract SchnorrGasKillerSDK is
     ) private view {
         bool ok = _sto().registry.isValidSignature(msgHash, s, Raddr, nonSigners, referenceBlockNumber);
         require(ok, InvalidQuorumSignature());
+    }
+
+    /// @notice Record an applied commitment with the configured slasher, if any
+    /// @param commitmentHash The verified message hash
+    function _recordCommitment(bytes32 commitmentHash) internal {
+        IGasKillerSlasher gasKillerSlasher = _sto().slasher;
+        if (address(gasKillerSlasher) != address(0)) {
+            gasKillerSlasher.recordCommitment(commitmentHash);
+        }
     }
 
     function _stateChangeHandler(bytes calldata storageUpdates) internal {
@@ -170,19 +205,25 @@ abstract contract SchnorrGasKillerSDK is
             || interfaceId == type(ISchnorrGasKillerSDKBatch).interfaceId;
     }
 
-    /// @notice Compute the expected message hash for a given transition, function, and storage updates
+    /// @notice Compute the expected message hash for a given transition and execution context
     /// @dev Exact mirror of the ECDSA `GasKillerSDK.getMessageHash` — the digest is
     ///      scheme-agnostic, so off-chain parity checks work unchanged.
     /// @param transitionIndex The transition index
-    /// @param targetFunction The target function selector
+    /// @param anchorHash The hash of the block the off-chain execution was anchored to
+    /// @param callerAddress The msg.sender of the original call
+    /// @param contractCalldata The full calldata of the original call
     /// @param storageUpdates The ABI-encoded storage updates
     /// @return The expected SHA-256 hash
-    function getMessageHash(uint256 transitionIndex, bytes4 targetFunction, bytes calldata storageUpdates)
-        external
-        view
-        returns (bytes32)
-    {
-        return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
+    function getMessageHash(
+        uint256 transitionIndex,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
+        bytes calldata storageUpdates
+    ) external view returns (bytes32) {
+        return sha256(
+            abi.encode(transitionIndex, address(this), anchorHash, callerAddress, contractCalldata, storageUpdates)
+        );
     }
 
     /// @inheritdoc TransitionGuard
@@ -208,6 +249,17 @@ abstract contract SchnorrGasKillerSDK is
 
     function _setSchnorrRegistry(address _registry) internal {
         _sto().registry = ISchnorrStakeRegistry(_registry);
+    }
+
+    /// @notice Return the configured Gas Killer slasher address (zero when unset)
+    function slasher() external view returns (address) {
+        return address(_sto().slasher);
+    }
+
+    /// @notice Set the Gas Killer slasher used for challenge-window recording (zero to disable)
+    /// @param _slasher The new slasher address
+    function _setSlasher(address _slasher) internal {
+        _sto().slasher = IGasKillerSlasher(_slasher);
     }
 
     function _setBlockStaleMeasure(uint256 _blockStaleMeasure) internal {

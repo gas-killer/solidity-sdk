@@ -32,6 +32,12 @@ contract SchnorrArraySummationTest is Test {
     MockSchnorrRegistry mock;
     SchnorrArraySummation target;
 
+    // Fixed execution-context fields bound into the task digest. The mock registry ignores the
+    // signature, so only digest/preimage consistency matters — the values themselves are arbitrary.
+    bytes32 internal constant ANCHOR = keccak256("anchor-block");
+    address internal constant CALLER = address(0xCA11E4);
+    bytes internal constant CALLDATA = hex"deadbeef";
+
     function setUp() public {
         vm.roll(1000);
         mock = new MockSchnorrRegistry();
@@ -46,8 +52,16 @@ contract SchnorrArraySummationTest is Test {
         return abi.encode(types, args);
     }
 
-    function _digest(uint256 transitionIndex, bytes4 targetFn, bytes memory updates) internal view returns (bytes32) {
-        return sha256(abi.encode(transitionIndex, address(target), targetFn, updates));
+    function _digest(
+        uint256 transitionIndex,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes memory contractCalldata,
+        bytes memory updates
+    ) internal view returns (bytes32) {
+        return sha256(
+            abi.encode(transitionIndex, address(target), anchorHash, callerAddress, contractCalldata, updates)
+        );
     }
 
     function test_supportsInterface() public view {
@@ -75,12 +89,8 @@ contract SchnorrArraySummationTest is Test {
 
     function test_getMessageHash_parity() public view {
         bytes memory updates = _storeUpdate(bytes32(uint256(0)), bytes32(uint256(99)));
-        bytes32 expected = sha256(abi.encode(uint256(0), address(target), SchnorrArraySummation.sum.selector, updates));
-        assertEq(
-            target.getMessageHash(0, SchnorrArraySummation.sum.selector, updates),
-            expected,
-            "getMessageHash parity broken"
-        );
+        bytes32 expected = sha256(abi.encode(uint256(0), address(target), ANCHOR, CALLER, CALLDATA, updates));
+        assertEq(target.getMessageHash(0, ANCHOR, CALLER, CALLDATA, updates), expected, "getMessageHash parity broken");
     }
 
     function test_factory_deploysAndWires() public {
@@ -102,11 +112,12 @@ contract SchnorrArraySummationTest is Test {
         // StateTracker state live at constant ERC-7201-style slots).
         bytes memory updates = _storeUpdate(bytes32(uint256(0)), bytes32(uint256(1352)));
         uint256 ti = target.stateTransitionCount(); // 0
-        bytes4 fn = SchnorrArraySummation.sum.selector;
-        bytes32 h = _digest(ti, fn, updates);
+        bytes32 h = _digest(ti, ANCHOR, CALLER, CALLDATA, updates);
         address[] memory none = new address[](0);
 
-        target.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, fn, 1, address(0x1234), none);
+        target.verifyAndUpdate(
+            h, uint32(block.number - 1), updates, ti, ANCHOR, CALLER, CALLDATA, 1, address(0x1234), none
+        );
 
         assertEq(target.currentSum(), 1352, "STORE not applied to currentSum");
         assertEq(target.stateTransitionCount(), ti + 1, "transition not tracked");

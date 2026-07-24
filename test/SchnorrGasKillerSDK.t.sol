@@ -36,6 +36,12 @@ contract SchnorrGasKillerSDKTest is Test {
     MockSchnorrRegistry mock;
     TestSchnorrSDK sdk;
 
+    // Fixed execution-context fields bound into the task digest. The mock registry ignores the
+    // signature, so only digest/preimage consistency matters — the values themselves are arbitrary.
+    bytes32 internal constant ANCHOR = keccak256("anchor-block");
+    address internal constant CALLER = address(0xCA11E4);
+    bytes internal constant CALLDATA = hex"deadbeef";
+
     function setUp() public {
         vm.roll(1000);
         mock = new MockSchnorrRegistry();
@@ -50,18 +56,25 @@ contract SchnorrGasKillerSDKTest is Test {
         return abi.encode(types, args);
     }
 
-    function _digest(uint256 transitionIndex, bytes4 targetFn, bytes memory updates) internal view returns (bytes32) {
-        return sha256(abi.encode(transitionIndex, address(sdk), targetFn, updates));
+    function _digest(
+        uint256 transitionIndex,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes memory contractCalldata,
+        bytes memory updates
+    ) internal view returns (bytes32) {
+        return sha256(abi.encode(transitionIndex, address(sdk), anchorHash, callerAddress, contractCalldata, updates));
     }
 
     function test_verifyAndUpdate_appliesStore() public {
         bytes memory updates = _storeUpdate(bytes32(0), bytes32(uint256(42)));
         uint256 ti = sdk.stateTransitionCount(); // 0
-        bytes4 fn = bytes4(keccak256("set()"));
-        bytes32 h = _digest(ti, fn, updates);
+        bytes32 h = _digest(ti, ANCHOR, CALLER, CALLDATA, updates);
         address[] memory none = new address[](0);
 
-        sdk.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, fn, 1, address(0x1234), none);
+        sdk.verifyAndUpdate(
+            h, uint32(block.number - 1), updates, ti, ANCHOR, CALLER, CALLDATA, 1, address(0x1234), none
+        );
 
         assertEq(sdk.value(), 42, "STORE applied");
         assertEq(sdk.stateTransitionCount(), ti + 1, "transition tracked");
@@ -73,38 +86,37 @@ contract SchnorrGasKillerSDKTest is Test {
         address[] memory none = new address[](0);
         vm.expectRevert(SchnorrGasKillerSDK.InvalidSignature.selector);
         sdk.verifyAndUpdate(
-            bytes32(uint256(1)), uint32(block.number - 1), updates, ti, bytes4(0), 1, address(0x1), none
+            bytes32(uint256(1)), uint32(block.number - 1), updates, ti, ANCHOR, CALLER, CALLDATA, 1, address(0x1), none
         );
     }
 
     function test_verifyAndUpdate_revertsOnBadTransitionIndex() public {
         bytes memory updates = _storeUpdate(bytes32(0), bytes32(uint256(1)));
-        bytes4 fn = bytes4(0);
         uint256 badTi = 5;
-        bytes32 h = _digest(badTi, fn, updates);
+        bytes32 h = _digest(badTi, ANCHOR, CALLER, CALLDATA, updates);
         address[] memory none = new address[](0);
         vm.expectRevert(SchnorrGasKillerSDK.InvalidTransitionIndex.selector);
-        sdk.verifyAndUpdate(h, uint32(block.number - 1), updates, badTi, fn, 1, address(0x1), none);
+        sdk.verifyAndUpdate(
+            h, uint32(block.number - 1), updates, badTi, ANCHOR, CALLER, CALLDATA, 1, address(0x1), none
+        );
     }
 
     function test_verifyAndUpdate_revertsWhenRegistryRejects() public {
         mock.setVerdict(false);
         bytes memory updates = _storeUpdate(bytes32(0), bytes32(uint256(7)));
         uint256 ti = sdk.stateTransitionCount();
-        bytes4 fn = bytes4(0);
-        bytes32 h = _digest(ti, fn, updates);
+        bytes32 h = _digest(ti, ANCHOR, CALLER, CALLDATA, updates);
         address[] memory none = new address[](0);
         vm.expectRevert(SchnorrGasKillerSDK.InvalidQuorumSignature.selector);
-        sdk.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, fn, 1, address(0x1), none);
+        sdk.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, ANCHOR, CALLER, CALLDATA, 1, address(0x1), none);
     }
 
     function test_verifyAndUpdate_revertsOnFutureBlock() public {
         bytes memory updates = _storeUpdate(bytes32(0), bytes32(uint256(1)));
         uint256 ti = sdk.stateTransitionCount();
-        bytes4 fn = bytes4(0);
-        bytes32 h = _digest(ti, fn, updates);
+        bytes32 h = _digest(ti, ANCHOR, CALLER, CALLDATA, updates);
         address[] memory none = new address[](0);
         vm.expectRevert(SchnorrGasKillerSDK.FutureBlockNumber.selector);
-        sdk.verifyAndUpdate(h, uint32(block.number), updates, ti, fn, 1, address(0x1), none);
+        sdk.verifyAndUpdate(h, uint32(block.number), updates, ti, ANCHOR, CALLER, CALLDATA, 1, address(0x1), none);
     }
 }

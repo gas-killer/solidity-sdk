@@ -64,7 +64,9 @@ contract ReentrantAttacker {
     uint32 public refBlock;
     bytes public storageUpdates;
     uint256 public transitionIndex;
-    bytes4 public targetFunction;
+    bytes32 public anchorHash;
+    address public callerAddress;
+    bytes public contractCalldata;
 
     constructor(TestSchnorrSDK _sdk) {
         sdk = _sdk;
@@ -75,13 +77,17 @@ contract ReentrantAttacker {
         uint32 _refBlock,
         bytes calldata _storageUpdates,
         uint256 _transitionIndex,
-        bytes4 _targetFunction
+        bytes32 _anchorHash,
+        address _callerAddress,
+        bytes calldata _contractCalldata
     ) external {
         msgHash = _msgHash;
         refBlock = _refBlock;
         storageUpdates = _storageUpdates;
         transitionIndex = _transitionIndex;
-        targetFunction = _targetFunction;
+        anchorHash = _anchorHash;
+        callerAddress = _callerAddress;
+        contractCalldata = _contractCalldata;
     }
 
     /// The CALL-update target. Records the latch state, then tries to re-enter.
@@ -89,7 +95,16 @@ contract ReentrantAttacker {
         sawInTransition = sdk.inTransition();
         address[] memory none = new address[](0);
         try sdk.verifyAndUpdate(
-            msgHash, refBlock, storageUpdates, transitionIndex, targetFunction, 1, address(0x1), none
+            msgHash,
+            refBlock,
+            storageUpdates,
+            transitionIndex,
+            anchorHash,
+            callerAddress,
+            contractCalldata,
+            1,
+            address(0x1),
+            none
         ) {
             reentrySucceeded = true;
         } catch (bytes memory reason) {
@@ -106,7 +121,9 @@ contract ReentrantAttacker {
             referenceBlockNumber: refBlock,
             storageUpdates: storageUpdates,
             transitionIndex: transitionIndex,
-            targetFunction: targetFunction,
+            anchorHash: anchorHash,
+            callerAddress: callerAddress,
+            contractCalldata: contractCalldata,
             s: 1,
             Raddr: address(0x1),
             nonSigners: new address[](0)
@@ -140,6 +157,12 @@ contract SchnorrGasKillerSDKHardeningTest is Test {
     MockSchnorrRegistry mock;
     TestSchnorrSDK sdk;
 
+    // Fixed execution-context fields bound into the task digest. The mock registry ignores the
+    // signature, so only digest/preimage consistency matters — the values themselves are arbitrary.
+    bytes32 internal constant ANCHOR = keccak256("anchor-block");
+    address internal constant CALLER = address(0xCA11E4);
+    bytes internal constant CALLDATA = hex"deadbeef";
+
     function setUp() public {
         vm.roll(1000);
         mock = new MockSchnorrRegistry();
@@ -170,8 +193,14 @@ contract SchnorrGasKillerSDKHardeningTest is Test {
         return abi.encode(types, args);
     }
 
-    function _digest(uint256 transitionIndex, bytes4 targetFn, bytes memory updates) internal view returns (bytes32) {
-        return sha256(abi.encode(transitionIndex, address(sdk), targetFn, updates));
+    function _digest(
+        uint256 transitionIndex,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes memory contractCalldata,
+        bytes memory updates
+    ) internal view returns (bytes32) {
+        return sha256(abi.encode(transitionIndex, address(sdk), anchorHash, callerAddress, contractCalldata, updates));
     }
 
     function _submission(uint256 transitionIndex, bytes memory updates)
@@ -179,13 +208,14 @@ contract SchnorrGasKillerSDKHardeningTest is Test {
         view
         returns (SchnorrTaskSubmission memory)
     {
-        bytes4 fn = bytes4(keccak256("set()"));
         return SchnorrTaskSubmission({
-            msgHash: _digest(transitionIndex, fn, updates),
+            msgHash: _digest(transitionIndex, ANCHOR, CALLER, CALLDATA, updates),
             referenceBlockNumber: uint32(block.number - 1),
             storageUpdates: updates,
             transitionIndex: transitionIndex,
-            targetFunction: fn,
+            anchorHash: ANCHOR,
+            callerAddress: CALLER,
+            contractCalldata: CALLDATA,
             s: 1,
             Raddr: address(0x1234),
             nonSigners: new address[](0)
@@ -204,17 +234,26 @@ contract SchnorrGasKillerSDKHardeningTest is Test {
         bytes memory outerUpdates = _storeAndCallUpdate(
             bytes32(0), bytes32(uint256(42)), address(attacker), abi.encodeCall(ReentrantAttacker.attack, ())
         );
-        bytes4 fn = bytes4(keccak256("set()"));
-        bytes32 outerHash = _digest(0, fn, outerUpdates);
+        bytes32 outerHash = _digest(0, ANCHOR, CALLER, CALLDATA, outerUpdates);
 
         // Inner transition 1 (what the attacker will try mid-flight): STORE 666. Its
         // digest/index are exactly what a legitimate *next* submission would carry — the
         // mock registry would approve it, so only the guard stands in the way.
         bytes memory innerUpdates = _storeUpdate(bytes32(0), bytes32(uint256(666)));
-        attacker.stage(_digest(1, fn, innerUpdates), uint32(block.number - 1), innerUpdates, 1, fn);
+        attacker.stage(
+            _digest(1, ANCHOR, CALLER, CALLDATA, innerUpdates),
+            uint32(block.number - 1),
+            innerUpdates,
+            1,
+            ANCHOR,
+            CALLER,
+            CALLDATA
+        );
 
         address[] memory none = new address[](0);
-        sdk.verifyAndUpdate(outerHash, uint32(block.number - 1), outerUpdates, 0, fn, 1, address(0x1234), none);
+        sdk.verifyAndUpdate(
+            outerHash, uint32(block.number - 1), outerUpdates, 0, ANCHOR, CALLER, CALLDATA, 1, address(0x1234), none
+        );
 
         assertTrue(attacker.sawInTransition(), "latch visible mid-transition");
         assertFalse(attacker.reentrySucceeded(), "re-entry must not succeed");
@@ -234,14 +273,23 @@ contract SchnorrGasKillerSDKHardeningTest is Test {
         bytes memory outerUpdates = _storeAndCallUpdate(
             bytes32(0), bytes32(uint256(7)), address(attacker), abi.encodeCall(ReentrantAttacker.attackViaBatch, ())
         );
-        bytes4 fn = bytes4(keccak256("set()"));
-        bytes32 outerHash = _digest(0, fn, outerUpdates);
+        bytes32 outerHash = _digest(0, ANCHOR, CALLER, CALLDATA, outerUpdates);
 
         bytes memory innerUpdates = _storeUpdate(bytes32(0), bytes32(uint256(666)));
-        attacker.stage(_digest(1, fn, innerUpdates), uint32(block.number - 1), innerUpdates, 1, fn);
+        attacker.stage(
+            _digest(1, ANCHOR, CALLER, CALLDATA, innerUpdates),
+            uint32(block.number - 1),
+            innerUpdates,
+            1,
+            ANCHOR,
+            CALLER,
+            CALLDATA
+        );
 
         address[] memory none = new address[](0);
-        sdk.verifyAndUpdate(outerHash, uint32(block.number - 1), outerUpdates, 0, fn, 1, address(0x1234), none);
+        sdk.verifyAndUpdate(
+            outerHash, uint32(block.number - 1), outerUpdates, 0, ANCHOR, CALLER, CALLDATA, 1, address(0x1234), none
+        );
 
         assertFalse(attacker.reentrySucceeded(), "batch re-entry must not succeed");
         assertEq(
@@ -262,18 +310,26 @@ contract SchnorrGasKillerSDKHardeningTest is Test {
         bytes memory outerUpdates = _storeAndCallUpdate(
             bytes32(0), bytes32(uint256(5)), address(attacker), abi.encodeCall(ReentrantAttacker.attack, ())
         );
-        bytes4 fn = bytes4(keccak256("set()"));
-
         bytes memory innerUpdates = _storeUpdate(bytes32(0), bytes32(uint256(666)));
-        attacker.stage(_digest(1, fn, innerUpdates), uint32(block.number - 1), innerUpdates, 1, fn);
+        attacker.stage(
+            _digest(1, ANCHOR, CALLER, CALLDATA, innerUpdates),
+            uint32(block.number - 1),
+            innerUpdates,
+            1,
+            ANCHOR,
+            CALLER,
+            CALLDATA
+        );
 
         SchnorrTaskSubmission[] memory subs = new SchnorrTaskSubmission[](1);
         subs[0] = SchnorrTaskSubmission({
-            msgHash: _digest(0, fn, outerUpdates),
+            msgHash: _digest(0, ANCHOR, CALLER, CALLDATA, outerUpdates),
             referenceBlockNumber: uint32(block.number - 1),
             storageUpdates: outerUpdates,
             transitionIndex: 0,
-            targetFunction: fn,
+            anchorHash: ANCHOR,
+            callerAddress: CALLER,
+            contractCalldata: CALLDATA,
             s: 1,
             Raddr: address(0x1234),
             nonSigners: new address[](0)
@@ -296,13 +352,31 @@ contract SchnorrGasKillerSDKHardeningTest is Test {
         bytes memory updates0 = _storeUpdate(bytes32(0), bytes32(uint256(1)));
         SchnorrTaskSubmission memory s0 = _submission(0, updates0);
         sdk.verifyAndUpdate(
-            s0.msgHash, s0.referenceBlockNumber, s0.storageUpdates, 0, s0.targetFunction, s0.s, s0.Raddr, s0.nonSigners
+            s0.msgHash,
+            s0.referenceBlockNumber,
+            s0.storageUpdates,
+            0,
+            s0.anchorHash,
+            s0.callerAddress,
+            s0.contractCalldata,
+            s0.s,
+            s0.Raddr,
+            s0.nonSigners
         );
 
         bytes memory updates1 = _storeUpdate(bytes32(0), bytes32(uint256(2)));
         SchnorrTaskSubmission memory s1 = _submission(1, updates1);
         sdk.verifyAndUpdate(
-            s1.msgHash, s1.referenceBlockNumber, s1.storageUpdates, 1, s1.targetFunction, s1.s, s1.Raddr, s1.nonSigners
+            s1.msgHash,
+            s1.referenceBlockNumber,
+            s1.storageUpdates,
+            1,
+            s1.anchorHash,
+            s1.callerAddress,
+            s1.contractCalldata,
+            s1.s,
+            s1.Raddr,
+            s1.nonSigners
         );
 
         assertEq(sdk.value(), 2);
@@ -321,12 +395,11 @@ contract SchnorrGasKillerSDKHardeningTest is Test {
         bytes memory updates = _storeAndCallUpdate(
             bytes32(0), bytes32(uint256(9)), address(reader), abi.encodeCall(LatchReader.observe, ())
         );
-        bytes4 fn = bytes4(keccak256("set()"));
-        bytes32 h = _digest(0, fn, updates);
+        bytes32 h = _digest(0, ANCHOR, CALLER, CALLDATA, updates);
 
         assertFalse(sdk.inTransition(), "latch down before");
         address[] memory none = new address[](0);
-        sdk.verifyAndUpdate(h, uint32(block.number - 1), updates, 0, fn, 1, address(0x1234), none);
+        sdk.verifyAndUpdate(h, uint32(block.number - 1), updates, 0, ANCHOR, CALLER, CALLDATA, 1, address(0x1234), none);
 
         assertTrue(reader.sawInTransition(), "reader saw the latch up mid-transition");
         assertEq(reader.sawTransitionCount(), 1, "counter already bumped mid-transition (why the latch exists)");
@@ -382,7 +455,9 @@ contract SchnorrGasKillerSDKHardeningTest is Test {
             subs[0].referenceBlockNumber,
             subs[0].storageUpdates,
             subs[0].transitionIndex,
-            subs[0].targetFunction,
+            subs[0].anchorHash,
+            subs[0].callerAddress,
+            subs[0].contractCalldata,
             subs[0].s,
             subs[0].Raddr,
             subs[0].nonSigners
