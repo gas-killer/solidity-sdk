@@ -227,6 +227,7 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
     error WeightOverflow();
 
     event OperatorRegistered(address indexed operator, uint256 weight);
+    event OperatorDeregistered(address indexed operator, uint256 weight);
 
     constructor(uint256 _thresholdNum, uint256 _thresholdDen, address _owner) {
         require(_thresholdDen != 0 && _thresholdNum <= _thresholdDen, "bad threshold");
@@ -277,6 +278,33 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
         effectiveBlock = block.number;
 
         emit OperatorRegistered(id, weight);
+    }
+
+    /// @notice Deregister an operator, removing its key and weight from the aggregate.
+    /// @dev The inverse of `registerOperator`: subtracts the operator's stored key from
+    ///      `X_all`, debits `totalWeight`, and advances the `effectiveBlock` watermark. The
+    ///      watermark bump is load-bearing — verification fail-closes on `refBlock <
+    ///      effectiveBlock`, so any in-flight signature assembled against the pre-removal
+    ///      aggregate is rejected rather than checked against the now-smaller cached one.
+    ///      The record is deleted so the identity can be re-registered from a clean slate
+    ///      and so a stale non-signer reference to it reverts as `NotRegistered`.
+    /// @param operator  the operator identity (`pointAddress(x, y)`) to remove.
+    function deregisterOperator(address operator) external {
+        if (msg.sender != owner) revert NotOwner();
+
+        Operator storage op = operators[operator];
+        if (!op.registered) revert NotRegistered(operator);
+
+        // Read the weight before deleting the record; `op` is a storage pointer, so the
+        // delete below would otherwise zero it before the event is emitted.
+        uint256 weight = op.weight;
+        (aggX, aggY) = Secp256k1.sub(aggX, aggY, op.x, op.y);
+        totalWeight -= weight;
+        effectiveBlock = block.number;
+
+        delete operators[operator];
+
+        emit OperatorDeregistered(operator, weight);
     }
 
     /// @notice Verify an aggregate Schnorr signature for `message`, accounting for the

@@ -171,6 +171,116 @@ contract SchnorrStakeRegistryTest is Test {
         assertEq(fresh.totalWeight(), uint256(type(uint96).max), "totalWeight credits the full value");
     }
 
+    // ---- deregistration ----
+
+    // Deregistering an operator subtracts its key and weight from the running aggregate and
+    // clears its record. The resulting aggregate must equal X_all − X_i computed directly.
+    function test_deregister_updatesAggregateAndWeight() public {
+        address id = _nonSigner(1);
+        (uint256 ex, uint256 ey) = Secp256k1.sub(XALL_X, XALL_Y, opX[1], opY[1]);
+
+        registry.deregisterOperator(id);
+
+        assertEq(registry.aggX(), ex, "aggX after deregister");
+        assertEq(registry.aggY(), ey, "aggY after deregister");
+        assertEq(registry.totalWeight(), 2 * WEIGHT, "totalWeight debited");
+
+        (,, uint96 w, bool registered) = registry.operators(id);
+        assertEq(uint256(w), 0, "record cleared");
+        assertFalse(registered, "no longer registered");
+    }
+
+    // After deregistering operator 1, the on-chain aggregate equals X_all − X_1 — exactly what
+    // the subset signature (signers 0,2) was signed against. So that signature now verifies
+    // with NO non-signers declared: deregistration and non-signer subtraction are equivalent.
+    function test_deregister_thenSubsetVerifiesWithNoNonSigners() public {
+        registry.deregisterOperator(_nonSigner(1));
+        vm.roll(block.number + 10); // refBlock stays >= the new effectiveBlock
+
+        address[] memory none = new address[](0);
+        assertTrue(registry.isValidSignature(MESSAGE, SUB_S, SUB_R, none, _refBlock()));
+    }
+
+    // Advancing effectiveBlock is fail-closed: a signature valid before the deregistration
+    // (referencing a block prior to it) is rejected as stale afterwards.
+    function test_deregister_advancesWatermark() public {
+        uint256 preBlock = block.number - 1; // valid refBlock before the mutation
+        address[] memory none = new address[](0);
+        assertTrue(registry.isValidSignature(MESSAGE, FULL_S, FULL_R, none, preBlock), "valid before");
+
+        registry.deregisterOperator(_nonSigner(1));
+
+        vm.expectRevert(SchnorrStakeRegistry.StaleSnapshot.selector);
+        registry.isValidSignature(MESSAGE, FULL_S, FULL_R, none, preBlock);
+    }
+
+    // A deregistered identity is no longer a valid non-signer: the verification loop reverts
+    // rather than subtracting a zeroed record (which would corrupt the aggregate).
+    function test_deregister_nonSignerLookupReverts() public {
+        address id = _nonSigner(1);
+        registry.deregisterOperator(id);
+        vm.roll(block.number + 10);
+
+        address[] memory ns = new address[](1);
+        ns[0] = id;
+        vm.expectRevert(abi.encodeWithSelector(SchnorrStakeRegistry.NotRegistered.selector, id));
+        registry.isValidSignature(MESSAGE, SUB_S, SUB_R, ns, _refBlock());
+    }
+
+    // Re-registering a deregistered operator restores the exact original aggregate and weight,
+    // confirming the record was cleared cleanly (no residual key left in X_all).
+    function test_deregister_thenReregisterRestoresAggregate() public {
+        registry.deregisterOperator(_nonSigner(1));
+        registry.registerOperator(opX[1], opY[1], WEIGHT, popS[1], popR[1]);
+
+        assertEq(registry.aggX(), XALL_X, "aggX restored");
+        assertEq(registry.aggY(), XALL_Y, "aggY restored");
+        assertEq(registry.totalWeight(), 3 * WEIGHT, "totalWeight restored");
+    }
+
+    // Deregistering the last remaining operator collapses the aggregate back to the identity.
+    function test_deregister_allClearsAggregate() public {
+        for (uint256 i = 0; i < 3; i++) {
+            registry.deregisterOperator(_nonSigner(i));
+        }
+        assertEq(registry.aggX(), 0, "aggX identity");
+        assertEq(registry.aggY(), 0, "aggY identity");
+        assertEq(registry.totalWeight(), 0, "totalWeight zero");
+    }
+
+    // Only the owner may mutate the operator set.
+    function test_deregister_onlyOwner() public {
+        // Resolve the id before pranking: `_nonSigner` makes an external call that would
+        // otherwise consume the prank meant for `deregisterOperator`.
+        address id = _nonSigner(1);
+        vm.prank(address(0xBEEF));
+        vm.expectRevert(SchnorrStakeRegistry.NotOwner.selector);
+        registry.deregisterOperator(id);
+    }
+
+    // Deregistering an unknown identity reverts rather than silently underflowing weight.
+    function test_deregister_unknownReverts() public {
+        address ghost = address(0xDEAD);
+        vm.expectRevert(abi.encodeWithSelector(SchnorrStakeRegistry.NotRegistered.selector, ghost));
+        registry.deregisterOperator(ghost);
+    }
+
+    // Deregistering the same operator twice reverts: the record is gone after the first call.
+    function test_deregister_twiceReverts() public {
+        address id = _nonSigner(1);
+        registry.deregisterOperator(id);
+        vm.expectRevert(abi.encodeWithSelector(SchnorrStakeRegistry.NotRegistered.selector, id));
+        registry.deregisterOperator(id);
+    }
+
+    // Deregistration announces the removed identity and its weight.
+    function test_deregister_emitsEvent() public {
+        address id = _nonSigner(1);
+        vm.expectEmit(true, false, false, true, address(registry));
+        emit SchnorrStakeRegistry.OperatorDeregistered(id, WEIGHT);
+        registry.deregisterOperator(id);
+    }
+
     // ---- gas benchmark (constant in signer count at full participation) ----
     // NOTE: this measures the WARM access context (the warm-up calls below put the
     // registry in the EIP-2929 access set). A standalone on-chain transaction pays the
