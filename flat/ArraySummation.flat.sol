@@ -507,6 +507,155 @@ interface IERC20 {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
 }
 
+// src/interface/IGasKillerSlasher.sol
+
+/// @title IGasKillerSlasher
+/// @notice Scheme-agnostic interface for the Gas Killer slashing contracts
+/// @dev Enables fraud detection and slashing of malicious operators via SP1 zkVM proofs. The
+///      commitment structs, events, errors and challenge-window/chain-config surface are shared
+///      across signature schemes; the scheme-specific `slash` entrypoint (which carries the
+///      aggregate signature material) lives in a per-scheme interface such as `IGasKillerBLSSlasher`.
+interface IGasKillerSlasher {
+    // ============ Structs ============
+
+    /// @notice A commitment signed by the aggregate network
+    /// @dev `sha256(abi.encode(transitionIndex, contractAddress, anchorHash, callerAddress,
+    ///      contractCalldata, storageUpdates))` is the message hash operators sign and the
+    ///      hash `GasKillerSDK.verifyAndUpdate` verifies
+    /// @param transitionIndex Sequential counter for state transitions
+    /// @param contractAddress The target contract address
+    /// @param anchorHash Hash of the block the execution is anchored to
+    /// @param callerAddress The caller address (msg.sender for the original call)
+    /// @param contractCalldata Full calldata with arguments
+    /// @param storageUpdates Claimed storage changes, encoded as `abi.encode(StateUpdateType[], bytes[])`
+    struct SignedCommitment {
+        uint256 transitionIndex;
+        address contractAddress;
+        bytes32 anchorHash;
+        address callerAddress;
+        bytes contractCalldata;
+        bytes storageUpdates;
+    }
+
+    /// @notice Public values committed by the Gas Killer challenger SP1 program
+    /// @param id Anchor id (block number for BlockHash anchors)
+    /// @param anchorHash Hash of the block the execution was anchored to
+    /// @param anchorType Type of anchor (0 = BlockHash, 1 = Timestamp, 2 = Slot)
+    /// @param chainConfigHash Hash of the chain configuration (chain id + active hardfork)
+    /// @param callerAddress The caller address used in the proven execution
+    /// @param contractAddress The contract address used in the proven execution
+    /// @param contractCalldata The calldata used in the proven execution
+    /// @param contractOutput The return data of the proven execution
+    /// @param storageUpdates The storage updates produced by the proven execution, encoded
+    ///        exactly as an honest operator would sign them
+    /// @param opcodeHash keccak256 of the state-modifying opcodes executed
+    struct GasKillerPublicValues {
+        uint256 id;
+        bytes32 anchorHash;
+        uint8 anchorType;
+        bytes32 chainConfigHash;
+        address callerAddress;
+        address contractAddress;
+        bytes contractCalldata;
+        bytes contractOutput;
+        bytes storageUpdates;
+        bytes32 opcodeHash;
+    }
+
+    // ============ Events ============
+
+    /// @notice Emitted when slashing is executed
+    /// @param commitmentHash Hash of the slashed commitment
+    /// @param challenger Address of the challenger who submitted the proof
+    /// @param slashedOperators Operators who were slashed
+    /// @param slashAmount Slash proportion per strategy, in WAD (1e18 = 100%)
+    event SlashingExecuted(
+        bytes32 indexed commitmentHash, address indexed challenger, address[] slashedOperators, uint256 slashAmount
+    );
+
+    /// @notice Emitted when a commitment is recorded for challenge-window tracking
+    /// @param targetContract The Gas Killer contract the commitment was applied to
+    /// @param commitmentHash Hash of the commitment
+    event CommitmentRecorded(address indexed targetContract, bytes32 indexed commitmentHash);
+
+    /// @notice Emitted when a chain config hash is accepted or revoked
+    /// @param chainConfigHash The chain config hash (chain id + active hardfork)
+    /// @param accepted Whether proofs carrying this hash are accepted
+    event ChainConfigHashSet(bytes32 indexed chainConfigHash, bool accepted);
+
+    // ============ Errors ============
+
+    /// @notice Thrown when the SP1 proof is invalid
+    error InvalidProof();
+
+    /// @notice Thrown when the anchor block hash cannot be verified
+    error UnverifiedBlock();
+
+    /// @notice Thrown when the proof's public values do not match the commitment inputs
+    error InputMismatch();
+
+    /// @notice Thrown when the proven execution used an unexpected chain configuration
+    error InvalidChainConfig();
+
+    /// @notice Thrown when the proven storage updates equal the signed ones (no fraud)
+    error NoFraudDetected();
+
+    /// @notice Thrown when the challenge window has expired
+    error ChallengeExpired();
+
+    /// @notice Thrown when the commitment has already been slashed
+    error AlreadySlashed();
+
+    /// @notice Thrown when the aggregate signature does not meet the quorum threshold
+    error InsufficientQuorumThreshold();
+
+    // ============ External Functions ============
+
+    /// @notice Accept or revoke a chain config hash for challenger proofs
+    /// @dev Owner-only. The challenger program commits `keccak256(chainId ++ activeForkName)`,
+    ///      which changes at every network hardfork; the owner accepts the new fork's hash so
+    ///      post-fork commitments stay challengeable.
+    /// @param chainConfigHash The chain config hash to accept or revoke
+    /// @param accepted Whether proofs carrying this hash should be accepted
+    function setChainConfigHashAccepted(bytes32 chainConfigHash, bool accepted) external;
+
+    /// @notice Whether proofs carrying `chainConfigHash` are accepted
+    /// @param chainConfigHash The chain config hash (chain id + active hardfork)
+    /// @return True if accepted
+    function acceptedChainConfigHash(bytes32 chainConfigHash) external view returns (bool);
+
+    /// @notice Record a commitment application for challenge-window tracking
+    /// @dev Called by the Gas Killer contract itself during `verifyAndUpdate`; records are
+    ///      keyed by `msg.sender` so third parties cannot start (or exhaust) the window
+    ///      for a contract they do not control
+    /// @param commitmentHash The commitment hash (the verified message hash)
+    function recordCommitment(bytes32 commitmentHash) external;
+
+    /// @notice Check if a commitment has been slashed
+    /// @param commitmentHash The hash of the commitment
+    /// @return True if the commitment has been slashed
+    function isSlashed(bytes32 commitmentHash) external view returns (bool);
+
+    /// @notice Get the timestamp a commitment was recorded at (0 if never recorded)
+    /// @param targetContract The Gas Killer contract the commitment was applied to
+    /// @param commitmentHash The commitment hash
+    /// @return The recording timestamp
+    function getCommitmentTimestamp(address targetContract, bytes32 commitmentHash) external view returns (uint256);
+
+    /// @notice Get the challenge window duration
+    /// @return The challenge window in seconds
+    function challengeWindow() external view returns (uint256);
+
+    /// @notice Get the SP1 program verification key of the challenger program
+    /// @return The verification key
+    function programVKey() external view returns (bytes32);
+
+    /// @notice Compute the commitment hash operators sign
+    /// @param commitment The signed commitment
+    /// @return The sha256 hash of the commitment
+    function computeCommitmentHash(SignedCommitment calldata commitment) external pure returns (bytes32);
+}
+
 // lib/eigenlayer-middleware/src/interfaces/IIndexRegistry.sol
 
 interface IIndexRegistryErrors {
@@ -5556,7 +5705,9 @@ interface IGasKillerSDK is IERC165 {
     /// @param referenceBlockNumber The block number to use as reference for operator set
     /// @param storageUpdates The storage updates to verify
     /// @param transitionIndex The transition index
-    /// @param targetFunction The target function selector
+    /// @param anchorHash The hash of the block the off-chain execution was anchored to
+    /// @param callerAddress The msg.sender of the original call
+    /// @param contractCalldata The full calldata of the original call
     /// @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
     function verifyAndUpdate(
         bytes32 msgHash,
@@ -5564,7 +5715,9 @@ interface IGasKillerSDK is IERC165 {
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
-        bytes4 targetFunction,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
         IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
     ) external;
 }
@@ -5585,6 +5738,8 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         IBLSSignatureChecker blsSignatureChecker;
         /// @notice Maximum number of blocks a reference block may lag behind the current block
         uint256 blockStaleMeasure;
+        /// @notice Optional Gas Killer slasher; when set, applied commitments are recorded for challenge-window tracking
+        IGasKillerSlasher slasher;
     }
 
     // keccak256(abi.encode(uint256(keccak256("gaskiller.GasKillerSDK.storage")) - 1)) & ~bytes32(uint256(0xff));
@@ -5601,12 +5756,17 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     uint256 private constant DEFAULT_BLOCK_STALE_MEASURE = 300;
 
     /// @notice Verify BLS quorum signatures and apply the encoded state updates
+    /// @dev The signed message binds the full execution context (anchor block, caller, calldata)
+    ///      so that incorrect storage updates are provable — and slashable — after the fact via
+    ///      an SP1 execution proof (see `GasKillerSlasher`)
     /// @param msgHash The hash of the message to verify
     /// @param quorumNumbers The quorum numbers to check signatures for
     /// @param referenceBlockNumber The block number to use as reference for operator set
     /// @param storageUpdates The storage updates to verify
     /// @param transitionIndex The transition index
-    /// @param targetFunction The target function selector
+    /// @param anchorHash The hash of the block the off-chain execution was anchored to
+    /// @param callerAddress The msg.sender of the original call
+    /// @param contractCalldata The full calldata of the original call
     /// @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
     function verifyAndUpdate(
         bytes32 msgHash,
@@ -5614,22 +5774,47 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
-        bytes4 targetFunction,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
         IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
     ) external trackState {
-        GasKillerSDKStorage storage $ = _getGasKillerSDKStorage();
-
         // Check block number validity
         require(referenceBlockNumber < block.number, FutureBlockNumber());
         require((uint256(referenceBlockNumber) + _getBlockStaleMeasure()) >= block.number, StaleBlockNumber());
 
         // Verify transition index and message hash
         require(transitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
-        bytes32 expectedHash = sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
-        require(expectedHash == msgHash, InvalidSignature());
+        require(
+            _computeMessageHash(transitionIndex, anchorHash, callerAddress, contractCalldata, storageUpdates)
+                == msgHash,
+            InvalidSignature()
+        );
 
+        // Verify the signatures and the quorum threshold
+        _verifyQuorumSignatures(msgHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
+
+        // Record the commitment for challenge-window tracking when a slasher is configured
+        _recordCommitment(msgHash);
+
+        // Apply the state changes
+        _stateChangeHandler(storageUpdates);
+    }
+
+    /// @notice Verify the aggregate BLS signature and require the quorum threshold on every quorum
+    /// @param msgHash The signed message hash
+    /// @param quorumNumbers The quorum numbers to check signatures for
+    /// @param referenceBlockNumber The block number to use as reference for operator set
+    /// @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
+    function _verifyQuorumSignatures(
+        bytes32 msgHash,
+        bytes calldata quorumNumbers,
+        uint32 referenceBlockNumber,
+        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
+    ) internal {
         // Verify the signatures using checkSignatures
-        (IBLSSignatureCheckerTypes.QuorumStakeTotals memory stakeTotals,) = $.blsSignatureChecker
+        (IBLSSignatureCheckerTypes.QuorumStakeTotals memory stakeTotals,) = _getGasKillerSDKStorage()
+            .blsSignatureChecker
             .checkSignatures(msgHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
 
         // Check that signatories own at least 66% of each quorum
@@ -5641,9 +5826,15 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
                 InsufficientQuorumThreshold()
             );
         }
+    }
 
-        // Apply the state changes
-        _stateChangeHandler(storageUpdates);
+    /// @notice Record an applied commitment with the configured slasher, if any
+    /// @param commitmentHash The verified message hash
+    function _recordCommitment(bytes32 commitmentHash) internal {
+        IGasKillerSlasher gasKillerSlasher = _getGasKillerSDKStorage().slasher;
+        if (address(gasKillerSlasher) != address(0)) {
+            gasKillerSlasher.recordCommitment(commitmentHash);
+        }
     }
 
     /// @notice Query if a contract implements an interface
@@ -5654,17 +5845,21 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         return interfaceId == type(IERC165).interfaceId || interfaceId == type(IGasKillerSDK).interfaceId;
     }
 
-    /// @notice Compute the expected message hash for a given transition, function, and storage updates
+    /// @notice Compute the expected message hash for a given transition and execution context
     /// @param transitionIndex The transition index
-    /// @param targetFunction The target function selector
+    /// @param anchorHash The hash of the block the off-chain execution was anchored to
+    /// @param callerAddress The msg.sender of the original call
+    /// @param contractCalldata The full calldata of the original call
     /// @param storageUpdates The ABI-encoded storage updates
     /// @return The expected SHA-256 hash
-    function getMessageHash(uint256 transitionIndex, bytes4 targetFunction, bytes calldata storageUpdates)
-        external
-        view
-        returns (bytes32)
-    {
-        return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
+    function getMessageHash(
+        uint256 transitionIndex,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
+        bytes calldata storageUpdates
+    ) external view returns (bytes32) {
+        return _computeMessageHash(transitionIndex, anchorHash, callerAddress, contractCalldata, storageUpdates);
     }
 
     /// @notice Return the configured AVS service manager address
@@ -5697,6 +5892,31 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         return _getBlockStaleMeasure();
     }
 
+    /// @notice Return the configured Gas Killer slasher address (zero when unset)
+    /// @return The slasher address
+    function slasher() external view returns (address) {
+        return address(_getGasKillerSDKStorage().slasher);
+    }
+
+    /// @notice Compute the signed message hash for a transition and its execution context
+    /// @param transitionIndex The transition index
+    /// @param anchorHash The hash of the block the off-chain execution was anchored to
+    /// @param callerAddress The msg.sender of the original call
+    /// @param contractCalldata The full calldata of the original call
+    /// @param storageUpdates The ABI-encoded storage updates
+    /// @return The expected SHA-256 hash
+    function _computeMessageHash(
+        uint256 transitionIndex,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
+        bytes calldata storageUpdates
+    ) internal view returns (bytes32) {
+        return sha256(
+            abi.encode(transitionIndex, address(this), anchorHash, callerAddress, contractCalldata, storageUpdates)
+        );
+    }
+
     /// @notice Decode and execute ABI-encoded storage updates
     /// @param storageUpdates ABI-encoded `(StateUpdateType[], bytes[])` pair
     function _stateChangeHandler(bytes calldata storageUpdates) internal {
@@ -5722,6 +5942,12 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     /// @param _blockStaleMeasure The new block stale measure value
     function _setBlockStaleMeasure(uint256 _blockStaleMeasure) internal {
         _getGasKillerSDKStorage().blockStaleMeasure = _blockStaleMeasure;
+    }
+
+    /// @notice Set the Gas Killer slasher used for challenge-window recording (zero to disable)
+    /// @param _slasher The new slasher address
+    function _setSlasher(address _slasher) internal {
+        _getGasKillerSDKStorage().slasher = IGasKillerSlasher(_slasher);
     }
 
     /// @notice Return the block stale measure, falling back to the default when unset

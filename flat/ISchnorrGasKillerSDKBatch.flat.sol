@@ -13,7 +13,9 @@ struct SchnorrTaskSubmission {
     uint32 referenceBlockNumber;
     bytes storageUpdates;
     uint256 transitionIndex;
-    bytes4 targetFunction;
+    bytes32 anchorHash;
+    address callerAddress;
+    bytes contractCalldata;
     uint256 s;
     address Raddr;
     address[] nonSigners;
