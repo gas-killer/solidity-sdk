@@ -3,7 +3,7 @@ pragma solidity ^0.8.27;
 
 import {Test} from "forge-std/Test.sol";
 
-import {GasKillerSlasher} from "../src/GasKillerSlasher.sol";
+import {GasKillerBLSSlasher} from "../src/GasKillerBLSSlasher.sol";
 import {IGasKillerSlasher} from "../src/interface/IGasKillerSlasher.sol";
 import {GasKillerSDKExposed} from "./exposed/GasKillerSDKExposed.sol";
 
@@ -183,7 +183,7 @@ contract MockStrategy {}
 contract GasKillerSlasherTest is Test {
     using BN254 for BN254.G1Point;
 
-    GasKillerSlasher public slasher;
+    GasKillerBLSSlasher public slasher;
     MockSP1Verifier public sp1Verifier;
     MockHeliosLightClient public helios;
     MockBLSSignatureChecker public blsSignatureChecker;
@@ -270,7 +270,7 @@ contract GasKillerSlasherTest is Test {
         allocationManager.setOperatorSlashable(operator2, true);
         allocationManager.setOperatorSlashable(operator3, true);
 
-        slasher = new GasKillerSlasher(
+        slasher = new GasKillerBLSSlasher(
             address(sp1Verifier),
             address(helios),
             address(blsSignatureChecker),
@@ -556,7 +556,7 @@ contract GasKillerSlasherTest is Test {
     }
 
     function test_slash_revertsUnverifiedBlock_whenHeliosUnset() public {
-        GasKillerSlasher slasherNoHelios = new GasKillerSlasher(
+        GasKillerBLSSlasher slasherNoHelios = new GasKillerBLSSlasher(
             address(sp1Verifier),
             address(0), // no Helios light client
             address(blsSignatureChecker),

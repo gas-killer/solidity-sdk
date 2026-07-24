@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.27;
 
-import {IGasKillerSlasher} from "./interface/IGasKillerSlasher.sol";
-import {ISP1Verifier} from "./interface/ISP1Verifier.sol";
-import {IHeliosLightClient} from "./interface/IHeliosLightClient.sol";
+import {GasKillerSlasherBase} from "./GasKillerSlasherBase.sol";
+import {IGasKillerBLSSlasher} from "./interface/IGasKillerBLSSlasher.sol";
 import {
     IBLSSignatureChecker,
     IBLSSignatureCheckerTypes
@@ -18,53 +17,26 @@ import {
 } from "eigenlayer-contracts/src/contracts/interfaces/IAllocationManager.sol";
 import {IStrategy} from "eigenlayer-contracts/src/contracts/interfaces/IStrategy.sol";
 import {OperatorSet} from "eigenlayer-contracts/src/contracts/libraries/OperatorSetLib.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-/// @title GasKillerSlasher
-/// @notice Detects fraudulent Gas Killer commitments and slashes the operators who signed them
-/// @dev A commitment is fraudulent when the aggregate network signed storage updates that differ
-///      from the ones produced by actually executing the committed call. A challenger proves the
-///      correct execution with the Gas Killer challenger SP1 program (see the sp1-contract-call
-///      `examples/gas-killer` guest), which re-executes `contractCalldata` from `callerAddress`
-///      against `contractAddress` at the state anchored by `anchorHash` and commits the resulting
-///      canonical storage updates.
+/// @title GasKillerBLSSlasher
+/// @notice Detects fraudulent Gas Killer commitments signed by the BLS AVS and slashes the signers
+/// @dev Wires the BLS signature scheme into `GasKillerSlasherBase`. The two scheme-specific steps
+///      are re-checking the aggregate BLS signature (same `checkSignatures` + quorum threshold as
+///      `GasKillerSDK.verifyAndUpdate`) and deriving + slashing the signer set through EigenLayer.
 ///
 ///      Slashing flow:
 ///      1. Challenger calls `slash()` with the signed commitment, the aggregate BLS signature
 ///         material, and the SP1 fraud proof
-///      2. The contract checks the aggregate network actually signed the commitment (same
-///         `checkSignatures` + quorum threshold as `GasKillerSDK.verifyAndUpdate`)
-///      3. The SP1 proof and the anchor block hash are verified
-///      4. Proven storage updates are compared with the signed ones; a mismatch is fraud
+///      2. The contract checks the aggregate network actually signed the commitment
+///      3. The SP1 proof and the anchor block hash are verified (base)
+///      4. Proven storage updates are compared with the signed ones; a mismatch is fraud (base)
 ///      5. Every operator that signed is slashed through `InstantSlasher.fulfillSlashingRequest`
 ///
 ///      Note: this contract must be set as the authorized `slasher` in the InstantSlasher contract.
-contract GasKillerSlasher is IGasKillerSlasher, Ownable {
+contract GasKillerBLSSlasher is GasKillerSlasherBase, IGasKillerBLSSlasher {
     using BN254 for BN254.G1Point;
 
-    // ============ Constants ============
-
-    /// @notice Denominator used when evaluating stake percentage thresholds (representing 100%)
-    uint8 public constant THRESHOLD_DENOMINATOR = 100;
-
-    /// @notice Minimum percentage of quorum stake that must have signed the commitment
-    /// @dev Matches `GasKillerSDK.QUORUM_THRESHOLD`: a commitment below this threshold could
-    ///      never have been applied on-chain
-    uint8 public constant QUORUM_THRESHOLD = 66;
-
-    /// @notice `AnchorType.BlockHash` as committed by the challenger program
-    uint8 public constant ANCHOR_TYPE_BLOCK_HASH = 0;
-
-    /// @notice Wad amount for full slash (100%)
-    uint256 public constant FULL_SLASH_WAD = 1e18;
-
     // ============ Immutables ============
-
-    /// @notice The SP1 verifier contract (Groth16 or PLONK gateway)
-    ISP1Verifier public immutable SP1_VERIFIER;
-
-    /// @notice The Helios light client contract used to verify anchor block hashes
-    IHeliosLightClient public immutable HELIOS;
 
     /// @notice The BLS signature checker of the Gas Killer AVS
     IBLSSignatureChecker public immutable BLS_SIGNATURE_CHECKER;
@@ -84,36 +56,12 @@ contract GasKillerSlasher is IGasKillerSlasher, Ownable {
     /// @notice The AVS address (Gas Killer service manager)
     address public immutable AVS;
 
-    /// @notice The SP1 verification key of the Gas Killer challenger program
-    bytes32 public immutable PROGRAM_V_KEY;
-
-    /// @notice The challenge window duration in seconds
-    uint256 public immutable CHALLENGE_WINDOW;
-
     /// @notice The operator set ID for Gas Killer
     uint32 public immutable OPERATOR_SET_ID;
 
-    // ============ Storage ============
-
-    /// @notice Mapping of commitment hash to slashed status
-    mapping(bytes32 => bool) private _slashed;
-
-    /// @notice Mapping of (target contract, commitment hash) to application timestamp
-    /// @dev Keyed by the recording contract so third parties cannot start the challenge
-    ///      window for commitments they did not apply
-    mapping(address => mapping(bytes32 => uint256)) private _commitmentTimestamp;
-
-    /// @notice Chain config hashes (chain id + active hardfork) accepted for proofs
-    /// @dev The challenger program commits `keccak256(chainId ++ activeForkName)` where
-    ///      `activeForkName` is the hardfork active at the anchor block; that value changes
-    ///      the moment a network hardfork activates. The owner must accept the new fork's
-    ///      hash so commitments anchored to post-fork blocks stay challengeable. Requiring an
-    ///      explicit allowlist still blocks proofs generated against a wrong chain/fork.
-    mapping(bytes32 => bool) public acceptedChainConfigHash;
-
     // ============ Constructor ============
 
-    /// @notice Initialize the slasher contract
+    /// @notice Initialize the BLS slasher contract
     /// @param _sp1Verifier The SP1 verifier contract address
     /// @param _helios The Helios light client contract address (0 to rely on recording only)
     /// @param _blsSignatureChecker The BLS signature checker of the Gas Killer AVS
@@ -140,31 +88,19 @@ contract GasKillerSlasher is IGasKillerSlasher, Ownable {
         bytes32 _chainConfigHash,
         uint256 _challengeWindow,
         uint32 _operatorSetId
-    ) {
-        SP1_VERIFIER = ISP1Verifier(_sp1Verifier);
-        HELIOS = IHeliosLightClient(_helios);
+    ) GasKillerSlasherBase(_sp1Verifier, _helios, _programVKey, _chainConfigHash, _challengeWindow) {
         BLS_SIGNATURE_CHECKER = IBLSSignatureChecker(_blsSignatureChecker);
         REGISTRY_COORDINATOR = ISlashingRegistryCoordinator(_registryCoordinator);
         INDEX_REGISTRY = IIndexRegistry(_indexRegistry);
         INSTANT_SLASHER = IInstantSlasher(_instantSlasher);
         ALLOCATION_MANAGER = IAllocationManager(_allocationManager);
         AVS = _avs;
-        PROGRAM_V_KEY = _programVKey;
-        acceptedChainConfigHash[_chainConfigHash] = true;
-        CHALLENGE_WINDOW = _challengeWindow;
         OPERATOR_SET_ID = _operatorSetId;
-        emit ChainConfigHashSet(_chainConfigHash, true);
-    }
-
-    /// @inheritdoc IGasKillerSlasher
-    function setChainConfigHashAccepted(bytes32 chainConfigHash, bool accepted) external onlyOwner {
-        acceptedChainConfigHash[chainConfigHash] = accepted;
-        emit ChainConfigHashSet(chainConfigHash, accepted);
     }
 
     // ============ External Functions ============
 
-    /// @inheritdoc IGasKillerSlasher
+    /// @inheritdoc IGasKillerBLSSlasher
     function slash(
         SignedCommitment calldata commitment,
         bytes calldata quorumNumbers,
@@ -173,19 +109,35 @@ contract GasKillerSlasher is IGasKillerSlasher, Ownable {
         bytes calldata sp1Proof,
         bytes calldata sp1PublicValues
     ) external {
-        bytes32 commitmentHash = computeCommitmentHash(commitment);
-
-        require(!_slashed[commitmentHash], AlreadySlashed());
-
-        // Enforce the challenge window when the commitment application was recorded.
-        // Unrecorded commitments remain challengeable indefinitely: signing a fraudulent
-        // commitment is an offense even if it was never applied on-chain.
-        uint256 timestamp = _commitmentTimestamp[commitment.contractAddress][commitmentHash];
-        require(timestamp == 0 || block.timestamp <= timestamp + CHALLENGE_WINDOW, ChallengeExpired());
+        bytes32 commitmentHash = _beginSlash(commitment);
 
         // Verify the aggregate network actually signed this commitment, with the same quorum
-        // threshold `verifyAndUpdate` enforces. `checkSignatures` reverts on an invalid
-        // aggregate signature.
+        // threshold `verifyAndUpdate` enforces.
+        _verifyQuorumSignatures(commitmentHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
+
+        // Derive every operator that signed the commitment: all operators registered for the
+        // signed quorums at the reference block, minus the declared non-signers.
+        address[] memory signers = _getSigners(quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
+
+        // Verify the SP1 fraud proof and, on confirmed fraud, slash the signers.
+        _completeSlash(commitment, commitmentHash, sp1Proof, sp1PublicValues, signers);
+    }
+
+    // ============ Internal Functions ============
+
+    /// @notice Verify the aggregate BLS signature over the commitment and the quorum threshold
+    /// @dev `checkSignatures` reverts on an invalid aggregate signature; the loop then requires
+    ///      the same 66% stake threshold `GasKillerSDK.verifyAndUpdate` enforces.
+    /// @param commitmentHash The signed commitment hash
+    /// @param quorumNumbers The quorum numbers the commitment was signed for
+    /// @param referenceBlockNumber The reference block used for the operator set
+    /// @param nonSignerStakesAndSignature The aggregate BLS signature and non-signer data
+    function _verifyQuorumSignatures(
+        bytes32 commitmentHash,
+        bytes calldata quorumNumbers,
+        uint32 referenceBlockNumber,
+        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
+    ) internal view {
         (IBLSSignatureCheckerTypes.QuorumStakeTotals memory stakeTotals,) = BLS_SIGNATURE_CHECKER.checkSignatures(
             commitmentHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature
         );
@@ -196,104 +148,6 @@ contract GasKillerSlasher is IGasKillerSlasher, Ownable {
                 InsufficientQuorumThreshold()
             );
         }
-
-        // Verify the SP1 proof of the correct execution.
-        _verifyProof(sp1Proof, sp1PublicValues);
-
-        // Compare the proven execution with the signed commitment.
-        GasKillerPublicValues memory proven = abi.decode(sp1PublicValues, (GasKillerPublicValues));
-        _checkInputs(commitment, proven);
-
-        // Verify the anchor block hash is a real block on this chain.
-        _verifyAnchorHash(proven.anchorHash);
-
-        // Fraud iff the proven storage updates differ from the signed ones.
-        require(keccak256(proven.storageUpdates) != keccak256(commitment.storageUpdates), NoFraudDetected());
-
-        _slashed[commitmentHash] = true;
-
-        // Slash every operator that signed the commitment: all operators registered for the
-        // signed quorums at the reference block, minus the declared non-signers.
-        address[] memory signers = _getSigners(quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
-        _executeSlashing(signers, commitmentHash);
-
-        emit SlashingExecuted(commitmentHash, msg.sender, signers, FULL_SLASH_WAD);
-    }
-
-    /// @inheritdoc IGasKillerSlasher
-    function recordCommitment(bytes32 commitmentHash) external {
-        if (_commitmentTimestamp[msg.sender][commitmentHash] == 0) {
-            _commitmentTimestamp[msg.sender][commitmentHash] = block.timestamp;
-            emit CommitmentRecorded(msg.sender, commitmentHash);
-        }
-    }
-
-    /// @inheritdoc IGasKillerSlasher
-    function isSlashed(bytes32 commitmentHash) external view returns (bool) {
-        return _slashed[commitmentHash];
-    }
-
-    /// @inheritdoc IGasKillerSlasher
-    function getCommitmentTimestamp(address targetContract, bytes32 commitmentHash) external view returns (uint256) {
-        return _commitmentTimestamp[targetContract][commitmentHash];
-    }
-
-    /// @inheritdoc IGasKillerSlasher
-    function challengeWindow() external view returns (uint256) {
-        return CHALLENGE_WINDOW;
-    }
-
-    /// @inheritdoc IGasKillerSlasher
-    function programVKey() external view returns (bytes32) {
-        return PROGRAM_V_KEY;
-    }
-
-    /// @inheritdoc IGasKillerSlasher
-    function computeCommitmentHash(SignedCommitment calldata commitment) public pure returns (bytes32) {
-        return sha256(
-            abi.encode(
-                commitment.transitionIndex,
-                commitment.contractAddress,
-                commitment.anchorHash,
-                commitment.callerAddress,
-                commitment.contractCalldata,
-                commitment.storageUpdates
-            )
-        );
-    }
-
-    // ============ Internal Functions ============
-
-    /// @notice Verify the SP1 proof
-    /// @param proofBytes The SP1 proof bytes
-    /// @param publicValues The ABI-encoded public values
-    function _verifyProof(bytes calldata proofBytes, bytes calldata publicValues) internal view {
-        try SP1_VERIFIER.verifyProof(PROGRAM_V_KEY, publicValues, proofBytes) {}
-        catch {
-            revert InvalidProof();
-        }
-    }
-
-    /// @notice Require the proven execution inputs to match the signed commitment
-    /// @param commitment The signed commitment
-    /// @param proven The proof's public values
-    function _checkInputs(SignedCommitment calldata commitment, GasKillerPublicValues memory proven) internal view {
-        require(acceptedChainConfigHash[proven.chainConfigHash], InvalidChainConfig());
-        require(proven.anchorType == ANCHOR_TYPE_BLOCK_HASH, InputMismatch());
-        require(proven.anchorHash == commitment.anchorHash, InputMismatch());
-        require(proven.callerAddress == commitment.callerAddress, InputMismatch());
-        require(proven.contractAddress == commitment.contractAddress, InputMismatch());
-        require(keccak256(proven.contractCalldata) == keccak256(commitment.contractCalldata), InputMismatch());
-    }
-
-    /// @notice Verify an anchor block hash using the Helios light client
-    /// @param anchorHash The block hash to verify
-    function _verifyAnchorHash(bytes32 anchorHash) internal view {
-        if (address(HELIOS) != address(0) && HELIOS.isBlockHashValid(anchorHash)) {
-            return;
-        }
-
-        revert UnverifiedBlock();
     }
 
     /// @notice Derive the set of operators that signed: all operators registered for the given
@@ -357,7 +211,7 @@ contract GasKillerSlasher is IGasKillerSlasher, Ownable {
     /// @notice Execute slashing for the given operators via EigenLayer InstantSlasher
     /// @param signers Operator addresses to slash
     /// @param commitmentHash The commitment hash, referenced in the slashing description
-    function _executeSlashing(address[] memory signers, bytes32 commitmentHash) internal {
+    function _executeSlashing(address[] memory signers, bytes32 commitmentHash) internal override {
         OperatorSet memory operatorSet = OperatorSet({avs: AVS, id: OPERATOR_SET_ID});
         IStrategy[] memory strategies = ALLOCATION_MANAGER.getStrategiesInOperatorSet(operatorSet);
 

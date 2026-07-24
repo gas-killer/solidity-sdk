@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.0;
 
-import {IBLSSignatureCheckerTypes} from "@eigenlayer-middleware/interfaces/IBLSSignatureChecker.sol";
-
 /// @title IGasKillerSlasher
-/// @notice Interface for the Gas Killer slashing contract
-/// @dev Enables fraud detection and slashing of malicious operators via SP1 zkVM proofs
+/// @notice Scheme-agnostic interface for the Gas Killer slashing contracts
+/// @dev Enables fraud detection and slashing of malicious operators via SP1 zkVM proofs. The
+///      commitment structs, events, errors and challenge-window/chain-config surface are shared
+///      across signature schemes; the scheme-specific `slash` entrypoint (which carries the
+///      aggregate signature material) lives in a per-scheme interface such as `IGasKillerBLSSlasher`.
 interface IGasKillerSlasher {
     // ============ Structs ============
 
     /// @notice A commitment signed by the aggregate network
     /// @dev `sha256(abi.encode(transitionIndex, contractAddress, anchorHash, callerAddress,
-    ///      contractCalldata, storageUpdates))` is the message hash operators BLS-sign and the
+    ///      contractCalldata, storageUpdates))` is the message hash operators sign and the
     ///      hash `GasKillerSDK.verifyAndUpdate` verifies
     /// @param transitionIndex Sequential counter for state transitions
     /// @param contractAddress The target contract address
@@ -97,31 +98,10 @@ interface IGasKillerSlasher {
     /// @notice Thrown when the commitment has already been slashed
     error AlreadySlashed();
 
-    /// @notice Thrown when the aggregate BLS signature does not meet the quorum threshold
+    /// @notice Thrown when the aggregate signature does not meet the quorum threshold
     error InsufficientQuorumThreshold();
 
     // ============ External Functions ============
-
-    /// @notice Submit a fraud proof for a signed commitment and slash the operators who signed it
-    /// @dev Verifies (1) the aggregate network actually signed the commitment, (2) the SP1 proof
-    ///      of the correct execution, (3) the anchor block hash, and (4) that the proven storage
-    ///      updates differ from the signed ones. On success, every operator that signed the
-    ///      commitment is slashed through EigenLayer.
-    /// @param commitment The signed commitment being challenged
-    /// @param quorumNumbers The quorum numbers the commitment was signed for
-    /// @param referenceBlockNumber The reference block used for the operator set
-    /// @param nonSignerStakesAndSignature The aggregate BLS signature and non-signer data,
-    ///        exactly as submitted to `verifyAndUpdate`
-    /// @param sp1Proof The SP1 proof bytes (Groth16 or PLONK)
-    /// @param sp1PublicValues The ABI-encoded `GasKillerPublicValues`
-    function slash(
-        SignedCommitment calldata commitment,
-        bytes calldata quorumNumbers,
-        uint32 referenceBlockNumber,
-        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature,
-        bytes calldata sp1Proof,
-        bytes calldata sp1PublicValues
-    ) external;
 
     /// @notice Accept or revoke a chain config hash for challenger proofs
     /// @dev Owner-only. The challenger program commits `keccak256(chainId ++ activeForkName)`,

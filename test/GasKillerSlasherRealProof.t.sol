@@ -4,7 +4,7 @@ pragma solidity ^0.8.27;
 import {Test} from "forge-std/Test.sol";
 import {stdJson} from "forge-std/StdJson.sol";
 
-import {GasKillerSlasher} from "../src/GasKillerSlasher.sol";
+import {GasKillerBLSSlasher} from "../src/GasKillerBLSSlasher.sol";
 import {IGasKillerSlasher} from "../src/interface/IGasKillerSlasher.sol";
 import {IHeliosLightClient} from "../src/interface/IHeliosLightClient.sol";
 import {SP1Verifier} from "../src/vendor/sp1/SP1VerifierGroth16.sol";
@@ -115,7 +115,7 @@ contract MockStrategy {}
 
 /// @title GasKillerSlasherRealProofTest
 /// @notice End-to-end integration test that runs a REAL SP1 Groth16 fraud proof through
-///         `GasKillerSlasher.slash` using the vendored Succinct verifier (v5.0.0)
+///         `GasKillerBLSSlasher.slash` using the vendored Succinct verifier (v5.0.0)
 /// @dev Requires a proof fixture at `test/fixtures/gas-killer-fixture.json` produced by the
 ///      Gas Killer challenger host. When the fixture is absent (or `fs_permissions` denies
 ///      reading it) every test is skipped so the suite stays green before a proof exists.
@@ -147,7 +147,7 @@ contract GasKillerSlasherRealProofTest is Test {
 
     // ============ Test State ============
 
-    GasKillerSlasher internal slasher;
+    GasKillerBLSSlasher internal slasher;
     SP1Verifier internal sp1Verifier;
     MockHeliosLightClient internal helios;
     MockBLSSignatureChecker internal blsSignatureChecker;
@@ -213,7 +213,7 @@ contract GasKillerSlasherRealProofTest is Test {
         instantSlasher = new MockInstantSlasher();
         allocationManager = new MockAllocationManager(IStrategy(address(new MockStrategy())));
 
-        slasher = new GasKillerSlasher(
+        slasher = new GasKillerBLSSlasher(
             address(sp1Verifier),
             address(helios),
             address(blsSignatureChecker),
