@@ -48,7 +48,9 @@ contract GasKillerSDKTest is Test {
     function test_stateChangeHandlerExternal_Call_ForwardsValue() public {
         SimpleTarget target = new SimpleTarget();
         uint256 forwarded = 0.13 ether;
-        vm.deal(address(sdk), forwarded);
+        // Fund the caller only: the SDK starts at zero balance, so the update can only be
+        // paid out of msg.value.
+        vm.deal(address(this), forwarded);
 
         StateUpdateType[] memory types = new StateUpdateType[](1);
         types[0] = StateUpdateType.CALL;
@@ -60,6 +62,30 @@ contract GasKillerSDKTest is Test {
 
         assertEq(address(target).balance, forwarded);
         assertEq(target.value(), 7);
+        assertEq(address(sdk).balance, 0);
+    }
+
+    function test_stateChangeHandlerExternal_Call_InsufficientBalance() public {
+        SimpleTarget target = new SimpleTarget();
+        uint256 sent = 0.1 ether;
+        uint256 requested = 0.2 ether;
+        vm.deal(address(this), sent);
+
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        types[0] = StateUpdateType.CALL;
+
+        bytes memory callargs = abi.encodeWithSignature("setValue(uint256)", 7);
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encode(address(target), requested, callargs);
+
+        // A CALL requesting more value than the contract holds fails in the EVM before the
+        // target executes, so RevertingContext carries empty revert data.
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                StateChangeHandlerLib.RevertingContext.selector, 0, address(target), bytes(""), callargs
+            )
+        );
+        sdk.stateChangeHandlerExternal{value: sent}(abi.encode(types, args));
     }
 
     function test_stateChangeHandlerExternal_Call_RevertingContext() public {
