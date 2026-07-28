@@ -182,6 +182,16 @@ library Secp256k1 {
 ///      This is a self-contained implementation (no EigenLayer base classes) so the whole
 ///      verify + subtraction + threshold path is unit-testable; production would layer the
 ///      operator/AVS registration lifecycle on top, exactly as `ECDSAStakeRegistry` does.
+///
+///      **Operational assumption: the operator set must be quiescent relative to a signing
+///      round.** Because only the current aggregate is stored, every operator-set mutation
+///      invalidates any signature an off-chain round has already assembled against the prior
+///      set — see `isValidSignature` for the two ways that surfaces. Registration and
+///      deregistration are equally affected. Integrators must therefore treat
+///      `OperatorRegistered` and `OperatorDeregistered` as a "re-snapshot required" signal and
+///      re-assemble against the current set, and should schedule set changes for periods when
+///      no round is in flight. This costs a retry, never safety: a legitimate signature is
+///      rejected, an invalid one is never accepted.
 contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
     /// Domain tag for the proof-of-possession message — must equal the Rust `POP_TAG`.
     bytes internal constant POP_TAG = "gas-killer/schnorr/pop/v1";
@@ -249,6 +259,12 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
     }
 
     /// @notice Register an operator's Schnorr key with a proof of possession.
+    /// @dev Adds the operator's key to `X_all`, credits `totalWeight`, and advances the
+    ///      `effectiveBlock` watermark. Like any operator-set mutation, this invalidates a
+    ///      signature already assembled against the pre-registration aggregate — a newly
+    ///      registered key cannot contribute to a round that is already under way, and its
+    ///      presence in `X_all` is enough to break one. Callers must re-assemble against the
+    ///      current set.
     /// @param x       pubkey x-coordinate.
     /// @param y       pubkey y-coordinate.
     /// @param weight  stake weight to credit.
@@ -282,10 +298,17 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
 
     /// @notice Deregister an operator, removing its key and weight from the aggregate.
     /// @dev The inverse of `registerOperator`: subtracts the operator's stored key from
-    ///      `X_all`, debits `totalWeight`, and advances the `effectiveBlock` watermark. The
-    ///      watermark bump is load-bearing — verification fail-closes on `refBlock <
-    ///      effectiveBlock`, so any in-flight signature assembled against the pre-removal
-    ///      aggregate is rejected rather than checked against the now-smaller cached one.
+    ///      `X_all`, debits `totalWeight`, and advances the `effectiveBlock` watermark. As with
+    ///      any operator-set mutation, this invalidates a signature already assembled against
+    ///      the prior aggregate; callers must re-assemble against the current set.
+    ///
+    ///      The watermark bump is load-bearing for safety, not just for surfacing a clear
+    ///      error. Weights are not bound into the signature, so without it a caller could
+    ///      choose a non-signer set that reconstructs the historical aggregate while the
+    ///      threshold is measured against the smaller current `totalWeight` — letting a quorum
+    ///      that was below threshold at `refBlock` pass. Fail-closing on
+    ///      `refBlock < effectiveBlock` removes that freedom.
+    ///
     ///      The record is deleted so the identity can be re-registered from a clean slate
     ///      and so a stale non-signer reference to it reverts as `NotRegistered`.
     /// @param operator  the operator identity (`pointAddress(x, y)`) to remove.
@@ -309,6 +332,18 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
 
     /// @notice Verify an aggregate Schnorr signature for `message`, accounting for the
     ///         declared non-signers.
+    /// @dev An operator-set mutation between the moment a round assembles its signature and the
+    ///      moment the settlement is included makes that signature unusable. Which of two
+    ///      failure modes a caller observes depends on when it pins `refBlock`:
+    ///
+    ///      - pinned **before** the mutation → `refBlock < effectiveBlock` and this reverts
+    ///        `StaleSnapshot`.
+    ///      - pinned **after** the mutation (the freshest-block strategy, `block.number - 1`) →
+    ///        the watermark check passes, but the cached aggregate is no longer the one the
+    ///        operators signed against, so verification fails and this returns `false`.
+    ///
+    ///      Both require the round to be re-assembled against the current set; neither can
+    ///      admit a signature that was not valid for the set at `refBlock`.
     /// @param message     the signed 32-byte task digest.
     /// @param s           aggregate response scalar.
     /// @param Raddr       aggregate nonce address `address(R)`.

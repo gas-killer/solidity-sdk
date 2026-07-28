@@ -214,6 +214,43 @@ contract SchnorrStakeRegistryTest is Test {
         registry.isValidSignature(MESSAGE, FULL_S, FULL_R, none, preBlock);
     }
 
+    // Pinning the freshest possible reference block does not rescue a signature assembled before
+    // a mutation: the watermark check passes, but the cached aggregate is X_all − X_1 while the
+    // signature was made for X_all, so verification simply fails. This is the other half of the
+    // in-flight invalidation surface — the caller sees `false`, not `StaleSnapshot`. Mirror of
+    // test_deregister_thenSubsetVerifiesWithNoNonSigners, which passes in this same state
+    // because the subset signature *does* match the post-removal aggregate.
+    function test_deregister_freshRefBlockRejectsPreMutationSignature() public {
+        registry.deregisterOperator(_nonSigner(1));
+        vm.roll(block.number + 10); // refBlock is now at or above the new effectiveBlock
+
+        address[] memory none = new address[](0);
+        assertFalse(registry.isValidSignature(MESSAGE, FULL_S, FULL_R, none, _refBlock()));
+    }
+
+    // Registration invalidates in-flight signatures exactly as deregistration does. Re-adding a
+    // previously removed operator restores X_all, so the subset signature that was valid against
+    // X_all − X_1 no longer matches — and referencing a block from before the re-registration is
+    // stale. Both directions of a set mutation break an assembled round.
+    function test_register_advancesWatermark() public {
+        address id = _nonSigner(1);
+        registry.deregisterOperator(id);
+        vm.roll(block.number + 10);
+
+        address[] memory none = new address[](0);
+        assertTrue(registry.isValidSignature(MESSAGE, SUB_S, SUB_R, none, _refBlock()), "valid before");
+
+        uint256 preBlock = block.number - 1; // valid refBlock before the registration
+        registry.registerOperator(opX[1], opY[1], WEIGHT, popS[1], popR[1]);
+
+        vm.expectRevert(SchnorrStakeRegistry.StaleSnapshot.selector);
+        registry.isValidSignature(MESSAGE, SUB_S, SUB_R, none, preBlock);
+
+        // ...and a fresh reference block does not help either: X_all is back to its full value.
+        vm.roll(block.number + 10);
+        assertFalse(registry.isValidSignature(MESSAGE, SUB_S, SUB_R, none, _refBlock()));
+    }
+
     // A deregistered identity is no longer a valid non-signer: the verification loop reverts
     // rather than subtracting a zeroed record (which would corrupt the aggregate).
     function test_deregister_nonSignerLookupReverts() public {

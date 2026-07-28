@@ -34,6 +34,36 @@ without EIP-1153 breaks settlement itself, not just the guard. `foundry.toml` pi
 before deploying to any other chain (in particular an L2 settlement target), confirm it has
 activated the equivalent of Cancun/EIP-1153.
 
+## Operator-set changes (Schnorr)
+
+`SchnorrStakeRegistry` stores a single *current* aggregate key and total weight rather than a
+per-block history. Any change to the operator set — registration **or** deregistration —
+therefore invalidates a signature that an off-chain round has already assembled against the
+previous set. The round must be re-assembled and resubmitted.
+
+This costs a retry, never safety: a legitimate signature is rejected, an invalid one is never
+accepted. Depending on when the reference block is chosen, the rejection surfaces one of two ways:
+
+| Reference block pinned | Result |
+|---|---|
+| Before the mutation | `StaleSnapshot` revert — `refBlock` is below the registry's `effectiveBlock` watermark |
+| After the mutation (freshest block, `block.number - 1`) | `isValidSignature` returns `false`, surfacing as `InvalidQuorumSignature` — the cached aggregate no longer matches what the operators signed |
+
+The window of exposure runs from the operator set the signers observed through to the block the
+settlement is included in — the signing round's duration plus however long the assembled payload
+waits before inclusion. `verifyAndUpdate` bounds the second part: a reference block must be within
+`blockStaleMeasure` blocks of the current block (300 by default), so a payload expires rather than
+lingering indefinitely.
+
+Two consequences for integrators:
+
+- Treat the `OperatorRegistered` and `OperatorDeregistered` events as a "re-snapshot required"
+  signal, and schedule operator-set changes for periods when no round is in flight.
+- `blockStaleMeasure` is set per consumer contract and is owner-adjustable, while one registry
+  may back several consumers. The registry cannot enforce any relationship between its own
+  mutation timing and each consumer's staleness bound, so keeping the two consistent is
+  deployment discipline rather than a contract guarantee.
+
 ## Repository Structure
 
 - **`src/`** — Core SDK contracts
