@@ -606,6 +606,95 @@ contract SchnorrStakeRegistryTest is Test {
         assertEq(r.totalWeight(), 2 * WEIGHT);
     }
 
+    // Cancelling by identity reaches an entry that is not the head, so clearing the way for an
+    // emergency force does not require cancelling everything queued ahead of it.
+    function test_cancelChange_targetsMiddleOfQueue() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address first = r.pointAddress(opX[0], opY[0]);
+        address second = r.pointAddress(opX[1], opY[1]);
+
+        r.announceDeregister(first);
+        uint256 horizon = r.nextPossibleMutationBlock();
+        vm.roll(block.number + 5);
+        r.announceDeregister(second);
+        assertEq(r.pendingChangeCount(), 2);
+
+        r.cancelChange(second); // not the head
+
+        assertEq(r.pendingChangeCount(), 1, "only the targeted entry dropped");
+        assertEq(r.nextPossibleMutationBlock(), horizon, "head entry keeps its window");
+
+        // The untouched head still commits on its original schedule.
+        vm.roll(horizon);
+        r.commitNextChange();
+        (,,, bool firstActive,) = r.operators(first);
+        (,,, bool secondActive,) = r.operators(second);
+        assertFalse(firstActive, "head applied");
+        assertTrue(secondActive, "cancelled entry never applied");
+    }
+
+    // The emergency sequence: clear the operator's queued change, then force it out. Two calls in
+    // one block, with no notice window between them and no collateral to other queued changes.
+    function test_cancelChange_thenForceInSameBlock() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address other = r.pointAddress(opX[0], opY[0]);
+        address compromised = r.pointAddress(opX[1], opY[1]);
+
+        r.announceDeregister(other);
+        uint256 horizon = r.nextPossibleMutationBlock();
+        r.announceDeregister(compromised);
+
+        r.cancelChange(compromised);
+        r.deregisterOperator(compromised); // no roll between these
+
+        (,,, bool active,) = r.operators(compromised);
+        assertFalse(active, "removed immediately");
+        assertEq(r.totalWeight(), 2 * WEIGHT);
+        assertEq(r.pendingChangeCount(), 1, "the other operator's change survived");
+        assertEq(r.nextPossibleMutationBlock(), horizon, "and kept its window");
+    }
+
+    // Committing past a hole left by a mid-queue cancellation must not land on the cleared slot.
+    function test_commit_skipsCancelledHead() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address first = r.pointAddress(opX[0], opY[0]);
+        address second = r.pointAddress(opX[1], opY[1]);
+
+        r.announceDeregister(first);
+        r.announceDeregister(second);
+        r.cancelChange(first); // the head becomes a hole
+
+        assertEq(r.pendingChangeCount(), 1);
+        vm.roll(r.nextPossibleMutationBlock());
+        r.commitNextChange();
+
+        (,,, bool firstActive,) = r.operators(first);
+        (,,, bool secondActive,) = r.operators(second);
+        assertTrue(firstActive, "cancelled entry never applied");
+        assertFalse(secondActive, "the surviving entry applied");
+        assertEq(r.pendingChangeCount(), 0);
+        assertEq(r.nextPossibleMutationBlock(), type(uint256).max);
+    }
+
+    // Cancelling an identity with nothing queued reverts rather than silently succeeding.
+    function test_cancelChange_unknownReverts() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address id = r.pointAddress(opX[1], opY[1]);
+        vm.expectRevert(SchnorrStakeRegistry.NoPendingChange.selector);
+        r.cancelChange(id);
+    }
+
+    // Targeted cancel is owner-gated like the rest of the scheduled path.
+    function test_cancelChange_onlyOwner() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address id = r.pointAddress(opX[1], opY[1]);
+        r.announceDeregister(id);
+
+        vm.prank(address(0xBEEF));
+        vm.expectRevert(SchnorrStakeRegistry.NotOwner.selector);
+        r.cancelChange(id);
+    }
+
     // A notice window large enough to wrap `eligibleBlock` when narrowed to uint48 would land it
     // in the past and make changes committable immediately, defeating the window.
     function test_constructor_rejectsUnboundedNoticeWindow() public {

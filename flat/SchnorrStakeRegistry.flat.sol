@@ -258,13 +258,24 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
     // `effectiveBlock`; they are declared first so scheduling state cannot displace them.
 
     /// FIFO of announced-but-unapplied changes, `[pendingHead, pendingTail)`.
-    /// `eligibleBlock` is non-decreasing in announcement order, so the head is always the
-    /// earliest block at which the operator set can next change.
+    ///
+    /// `eligibleBlock` is non-decreasing in announcement order, so the head is the earliest block
+    /// at which the operator set can next change. Cancelling out of the middle leaves a zeroed
+    /// hole; `pendingHead` is always kept on a live entry (or equal to `pendingTail`) so reading
+    /// the horizon stays a single storage load. A live entry's `operator` is never the zero
+    /// address — it is either `pointAddress` of a key with a verified proof of possession, or an
+    /// identity that had to be `registered` to be queued for removal — so zero marks a hole
+    /// unambiguously.
     mapping(uint256 => PendingChange) public pendingChanges;
     uint256 public pendingHead;
     uint256 public pendingTail;
-    /// Identities with an announced change, so a second one cannot be queued against them.
-    mapping(address => bool) public hasPendingChange;
+    /// Queue position of an identity's announced change, stored one-based so that zero means
+    /// "nothing queued". Keeps both the duplicate-announcement check and cancelling a specific
+    /// identity's change O(1), wherever it sits in the queue.
+    mapping(address => uint256) public pendingChangeIndex;
+    /// Live entries in the queue. Tracked rather than derived from `pendingTail - pendingHead`,
+    /// which counts the holes a mid-queue cancellation leaves behind.
+    uint256 internal pendingLive;
 
     /// Threshold as a fraction `num/den` of total weight required to sign (e.g. 2/3).
     uint256 public immutable thresholdNum;
@@ -395,14 +406,20 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
     ///      that order, the head of the queue is always the earliest possible mutation, which is
     ///      what makes `nextPossibleMutationBlock()` a single storage read rather than a scan.
     function commitNextChange() external onlyOwner {
+        // Cancellation already leaves the head on a live entry, so this is a no-op in practice.
+        // It runs before the head is read rather than after, so committing a cleared slot — which
+        // would apply a zero-address, zero-weight change — cannot depend on that being true.
+        _advancePastHoles();
         if (pendingHead == pendingTail) revert NoPendingChange();
 
         PendingChange memory change = pendingChanges[pendingHead];
         if (block.number < change.eligibleBlock) revert NoticeWindowNotElapsed(change.eligibleBlock);
 
         delete pendingChanges[pendingHead];
-        delete hasPendingChange[change.operator];
+        delete pendingChangeIndex[change.operator];
+        --pendingLive;
         ++pendingHead;
+        _advancePastHoles();
 
         if (change.kind == ChangeKind.Register) {
             _applyRegister(change.operator, change.x, change.y, change.weight);
@@ -418,13 +435,26 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
     ///      it in the queue.
     function cancelNextChange() external onlyOwner {
         if (pendingHead == pendingTail) revert NoPendingChange();
+        _cancelAt(pendingHead);
+    }
 
-        PendingChange memory change = pendingChanges[pendingHead];
-        delete pendingChanges[pendingHead];
-        delete hasPendingChange[change.operator];
-        ++pendingHead;
-
-        emit ChangeCancelled(pendingHead - 1, change.operator);
+    /// @notice Drop a specific identity's announced change, wherever it sits in the queue.
+    /// @dev Cancelling out of the middle leaves a hole rather than reordering, so the entries
+    ///      around it keep both their positions and their `eligibleBlock`s — an unrelated
+    ///      operator part-way through its notice window is not sent back to the start of it.
+    ///
+    ///      This is what keeps the forced paths usable: they refuse to act on an identity with a
+    ///      queued change, and clearing that one entry no longer means cancelling everything
+    ///      ahead of it. An emergency removal is `cancelChange(operator)` then
+    ///      `deregisterOperator(operator)`, with no time gate between them.
+    ///
+    ///      Horizon-monotonic like `cancelNextChange`: removing a non-head entry leaves the
+    ///      earliest `eligibleBlock` untouched, and removing the head can only move it later.
+    /// @param operator  the identity whose announced change should be dropped.
+    function cancelChange(address operator) external onlyOwner {
+        uint256 oneBased = pendingChangeIndex[operator];
+        if (oneBased == 0) revert NoPendingChange();
+        _cancelAt(oneBased - 1);
     }
 
     /// @notice The earliest block at which the operator set can change, or `type(uint256).max`
@@ -439,7 +469,7 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
 
     /// @notice Number of announced changes not yet committed or cancelled.
     function pendingChangeCount() external view returns (uint256) {
-        return pendingTail - pendingHead;
+        return pendingLive;
     }
 
     // ---------------------------------------------------------------------------------------
@@ -508,6 +538,31 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
         }
     }
 
+    /// @dev Clear one queue slot and keep `pendingHead` on a live entry.
+    function _cancelAt(uint256 index) private {
+        address operator = pendingChanges[index].operator;
+
+        delete pendingChanges[index];
+        delete pendingChangeIndex[operator];
+        --pendingLive;
+
+        emit ChangeCancelled(index, operator);
+
+        _advancePastHoles();
+    }
+
+    /// @dev Restore the invariant that `pendingHead` addresses a live entry, so the horizon is a
+    ///      single read and `commitNextChange` never lands on a cancelled slot. The loop only ever
+    ///      walks holes the owner created, and each iteration permanently retires one queue slot.
+    function _advancePastHoles() private {
+        uint256 head = pendingHead;
+        uint256 tail = pendingTail;
+        while (head < tail && pendingChanges[head].operator == address(0)) {
+            ++head;
+        }
+        pendingHead = head;
+    }
+
     /// @dev The forced paths refuse to act on an identity that already has a queued change, so the
     ///      scheduled and forced paths can never both apply to it.
     ///
@@ -523,7 +578,7 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
     ///      also keeps the queue head valid by construction, since only `_applyRegister` and
     ///      `_applyDeregister` change membership and neither can now run behind the queue's back.
     function _requireNoScheduledChange(address operator) private view {
-        if (hasPendingChange[operator]) revert ChangeAlreadyPending(operator);
+        if (pendingChangeIndex[operator] != 0) revert ChangeAlreadyPending(operator);
     }
 
     /// @dev Append a change to the FIFO and mark its identity as spoken for.
@@ -531,8 +586,7 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
         private
         returns (uint256 index)
     {
-        if (hasPendingChange[operator]) revert ChangeAlreadyPending(operator);
-        hasPendingChange[operator] = true;
+        if (pendingChangeIndex[operator] != 0) revert ChangeAlreadyPending(operator);
 
         // Cannot wrap: `noticeWindow` is bounded by MAX_NOTICE_WINDOW and a block number
         // approaching the other half of uint48 (~1.4e14) is unreachable.
@@ -540,6 +594,8 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
         uint48 eligibleBlock = uint48(block.number + noticeWindow);
 
         index = pendingTail;
+        pendingChangeIndex[operator] = index + 1;
+        ++pendingLive;
         pendingChanges[index] =
             PendingChange({kind: kind, eligibleBlock: eligibleBlock, operator: operator, x: x, y: y, weight: weight});
         ++pendingTail;

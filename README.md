@@ -72,6 +72,7 @@ quiescence requirement above from an assumption into something a router can chec
 | `announceRegister` / `announceDeregister` | Queue a change, applicable after `noticeWindow` blocks. Nothing is mutated yet |
 | `commitNextChange` | Apply the oldest announced change, once its window has elapsed |
 | `cancelNextChange` | Drop the oldest announced change without applying it |
+| `cancelChange(operator)` | Drop one identity's announced change, wherever it sits in the queue |
 | `nextPossibleMutationBlock()` | The earliest block the set can change, or `type(uint256).max` when nothing is queued |
 
 A round is safe from set-mutation invalidation while the block its settlement lands in is below
@@ -89,6 +90,11 @@ commit, so it is expected to keep signing throughout its window.
 does not yet back any consumer and for emergencies such as a compromised key. They emit
 `ForcedMutation` so consumers relying on the horizon can detect the bypass, and the fail-closed
 watermark remains the backstop for it.
+
+They refuse to act on an identity that has a change queued, so that the scheduled and forced paths
+can never both apply to it. Clearing the way is `cancelChange(operator)` followed by the forced
+call, in the same block if needed — cancelling by identity reaches into the middle of the queue, so
+other operators keep both their positions and their remaining notice windows.
 
 Consequences for integrators:
 
