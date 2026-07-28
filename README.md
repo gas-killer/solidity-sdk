@@ -111,6 +111,34 @@ Consequences for integrators:
   mutation timing and each consumer's staleness bound, so keeping the two consistent is
   deployment discipline rather than a contract guarantee.
 
+## Funding value-bearing state updates
+
+A `CALL`, `CREATE` or `CREATE2` state update can move ETH, and it is paid out of the settling
+contract's own balance. Every settlement entrypoint is therefore `payable` — `GasKillerSDK.verifyAndUpdate`
+under the BLS scheme, and `SchnorrGasKillerSDK.verifyAndUpdate`/`verifyAndUpdateBatch` under the
+Schnorr one — so a pass-through caller (deposit-then-forward, intent settler, swap router) can fund
+the transition from `msg.value` instead of having to pre-fund the contract.
+
+`msg.value` cannot redirect value: how much each update moves, and to whom, is fixed inside the
+quorum-signed `storageUpdates`. All `msg.value` does is top the balance up, which leaves exactly two
+ways to get it wrong:
+
+- **Under-funding** reverts the whole transition — `RevertingContext` with empty revert data for a
+  `CALL` (the EVM fails the call before the target runs), `DeploymentFailed` for a `CREATE`/`CREATE2`.
+- **Over-funding is not refunded.** Whatever the updates do not consume stays in the contract.
+  Recovery is the inheriting contract's job: a withdrawal function, or a refund executed as a signed
+  `CALL` update in a later transition.
+
+There is deliberately no balance-delta invariant on the entrypoint. The signed updates already fix
+how much value every operation moves, so a check could only re-assert what the signature already
+guarantees.
+
+For `verifyAndUpdateBatch`, `msg.value` tops the balance up **once for the whole batch** and is
+pooled across every applied sub-transition rather than partitioned per submission. Assemblers must
+send the sum of what the applied submissions spend; the batch is atomic, so a shortfall on any one
+of them unwinds all of them. A submission skipped as already-settled — the front-run tolerance
+described above — spends nothing, so its share simply lands in the retained-surplus case.
+
 ## Repository Structure
 
 - **`src/`** — Core SDK contracts
