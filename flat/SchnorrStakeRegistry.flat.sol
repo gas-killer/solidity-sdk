@@ -190,8 +190,8 @@ library Secp256k1 {
 ///      deregistration are equally affected. Integrators must therefore treat
 ///      `OperatorRegistered` and `OperatorDeregistered` as a "re-snapshot required" signal and
 ///      re-assemble against the current set, and should schedule set changes for periods when
-///      no round is in flight. This costs a retry, never safety: a legitimate signature is
-///      rejected, an invalid one is never accepted.
+///      no round is in flight. The cost is a retry, not a soundness risk: the failure mode is a
+///      rejected signature, never acceptance of one that no current-set quorum endorsed.
 contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
     /// Domain tag for the proof-of-possession message — must equal the Rust `POP_TAG`.
     bytes internal constant POP_TAG = "gas-killer/schnorr/pop/v1";
@@ -302,12 +302,15 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
     ///      any operator-set mutation, this invalidates a signature already assembled against
     ///      the prior aggregate; callers must re-assemble against the current set.
     ///
-    ///      The watermark bump is load-bearing for safety, not just for surfacing a clear
-    ///      error. Weights are not bound into the signature, so without it a caller could
-    ///      choose a non-signer set that reconstructs the historical aggregate while the
-    ///      threshold is measured against the smaller current `totalWeight` — letting a quorum
-    ///      that was below threshold at `refBlock` pass. Fail-closing on
-    ///      `refBlock < effectiveBlock` removes that freedom.
+    ///      Removal also changes what constitutes a quorum, because the threshold is measured
+    ///      against the *current* `totalWeight`. A signature holding less than the threshold
+    ///      share of the old set can hold more than the threshold share of the smaller one, and
+    ///      is then accepted — legitimately so, since the remaining signers do carry that share.
+    ///      What binds a signature to one specific signer set is the aggregate match
+    ///      (`X_all − Σ non-signers` must equal the key that signed), not the watermark:
+    ///      advancing `effectiveBlock` does not restrict which quorums are acceptable, it
+    ///      guarantees the cached aggregate and weights are the ones in force at `refBlock` so
+    ///      the registry never answers for a snapshot it no longer holds.
     ///
     ///      The record is deleted so the identity can be re-registered from a clean slate
     ///      and so a stale non-signer reference to it reverts as `NotRegistered`.

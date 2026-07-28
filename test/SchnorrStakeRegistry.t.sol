@@ -251,6 +251,34 @@ contract SchnorrStakeRegistryTest is Test {
         assertFalse(registry.isValidSignature(MESSAGE, SUB_S, SUB_R, none, _refBlock()));
     }
 
+    // The threshold is measured against the *current* totalWeight, so removing an operator
+    // redefines what counts as a quorum. With a heavy non-signer in the set, signers {0,2} hold
+    // 20/120 and are rejected; once that operator is deregistered the same signature holds 20/20
+    // and is accepted. This is not something the watermark prevents — a freshest-block reference
+    // clears it, as asserted below — and it is the correct outcome, because the remaining signers
+    // really do carry the whole remaining weight. What still binds the signature to one signer set
+    // is the aggregate match: the caller must present a non-signer set whose subtraction yields
+    // exactly the key that signed. Uses non-uniform weights, which the shared fixture does not.
+    function test_thresholdMeasuredAgainstCurrentTotalWeight() public {
+        SchnorrStakeRegistry r = new SchnorrStakeRegistry(2, 3, address(this));
+        uint256[3] memory w = [uint256(10), 100, 10];
+        for (uint256 i = 0; i < 3; i++) {
+            r.registerOperator(opX[i], opY[i], w[i], popS[i], popR[i]);
+        }
+        vm.roll(block.number + 10);
+
+        address heavy = r.pointAddress(opX[1], opY[1]);
+        address[] memory ns = new address[](1);
+        ns[0] = heavy;
+        assertFalse(r.isValidSignature(MESSAGE, SUB_S, SUB_R, ns, _refBlock()), "20/120 is below 2/3");
+
+        r.deregisterOperator(heavy);
+        vm.roll(block.number + 10);
+
+        address[] memory none = new address[](0);
+        assertTrue(r.isValidSignature(MESSAGE, SUB_S, SUB_R, none, _refBlock()), "20/20 is a quorum");
+    }
+
     // A deregistered identity is no longer a valid non-signer: the verification loop reverts
     // rather than subtracting a zeroed record (which would corrupt the aggregate).
     function test_deregister_nonSignerLookupReverts() public {

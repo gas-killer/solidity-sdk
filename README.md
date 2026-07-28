@@ -41,8 +41,9 @@ per-block history. Any change to the operator set — registration **or** deregi
 therefore invalidates a signature that an off-chain round has already assembled against the
 previous set. The round must be re-assembled and resubmitted.
 
-This costs a retry, never safety: a legitimate signature is rejected, an invalid one is never
-accepted. Depending on when the reference block is chosen, the rejection surfaces one of two ways:
+The cost is a retry, not a soundness risk: the failure mode is a rejected signature, never
+acceptance of one that no current-set quorum endorsed. Depending on when the reference block is
+chosen, the rejection surfaces one of two ways:
 
 | Reference block pinned | Result |
 |---|---|
@@ -55,10 +56,15 @@ waits before inclusion. `verifyAndUpdate` bounds the second part: a reference bl
 `blockStaleMeasure` blocks of the current block (300 by default), so a payload expires rather than
 lingering indefinitely.
 
-Two consequences for integrators:
+Consequences for integrators:
 
 - Treat the `OperatorRegistered` and `OperatorDeregistered` events as a "re-snapshot required"
   signal, and schedule operator-set changes for periods when no round is in flight.
+- A mutation also changes *what counts as* a quorum, since the threshold is measured against the
+  current total weight. Removing an operator can turn a signature that held less than the
+  threshold share of the old set into a valid quorum of the smaller one — correctly, because the
+  remaining signers do carry that share. Signatures stay bound to one signer set by the aggregate
+  match, not by the reference block.
 - `blockStaleMeasure` is set per consumer contract and is owner-adjustable, while one registry
   may back several consumers. The registry cannot enforce any relationship between its own
   mutation timing and each consumer's staleness bound, so keeping the two consistent is
