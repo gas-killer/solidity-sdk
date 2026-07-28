@@ -56,7 +56,7 @@ contract SchnorrStakeRegistryTest is Test {
     function setUp() public {
         // Move off genesis so a valid reference block (< effectiveBlock) exists later.
         vm.roll(1000);
-        registry = new SchnorrStakeRegistry(2, 3, address(this)); // 2/3 threshold
+        registry = new SchnorrStakeRegistry(2, 3, address(this), 0); // 2/3 threshold
         for (uint256 i = 0; i < 3; i++) {
             registry.registerOperator(opX[i], opY[i], WEIGHT, popS[i], popR[i]);
         }
@@ -139,14 +139,14 @@ contract SchnorrStakeRegistryTest is Test {
     function test_registration_rejectsBadPoP() public {
         // Reuse operator 0's key but operator 1's PoP → mismatch.
         vm.roll(block.number + 1);
-        SchnorrStakeRegistry fresh = new SchnorrStakeRegistry(2, 3, address(this));
+        SchnorrStakeRegistry fresh = new SchnorrStakeRegistry(2, 3, address(this), 0);
         vm.expectRevert(SchnorrStakeRegistry.InvalidProofOfPossession.selector);
         fresh.registerOperator(opX[0], opY[0], WEIGHT, popS[1], popR[1]);
     }
 
     // An off-curve key is rejected.
     function test_registration_rejectsOffCurve() public {
-        SchnorrStakeRegistry fresh = new SchnorrStakeRegistry(2, 3, address(this));
+        SchnorrStakeRegistry fresh = new SchnorrStakeRegistry(2, 3, address(this), 0);
         vm.expectRevert(SchnorrStakeRegistry.NotOnCurve.selector);
         fresh.registerOperator(opX[0], opY[0] ^ 1, WEIGHT, popS[0], popR[0]);
     }
@@ -154,7 +154,7 @@ contract SchnorrStakeRegistryTest is Test {
     // A weight that does not fit the packed uint96 field is rejected (rather than
     // silently truncated into the quorum arithmetic).
     function test_registration_rejectsWeightOverflow() public {
-        SchnorrStakeRegistry fresh = new SchnorrStakeRegistry(2, 3, address(this));
+        SchnorrStakeRegistry fresh = new SchnorrStakeRegistry(2, 3, address(this), 0);
         vm.expectRevert(SchnorrStakeRegistry.WeightOverflow.selector);
         fresh.registerOperator(opX[0], opY[0], uint256(type(uint96).max) + 1, popS[0], popR[0]);
     }
@@ -162,10 +162,10 @@ contract SchnorrStakeRegistryTest is Test {
     // The boundary itself is accepted and stored losslessly (guards against the check
     // regressing from > to >=, and against a truncating cast reappearing).
     function test_registration_acceptsMaxUint96Weight() public {
-        SchnorrStakeRegistry fresh = new SchnorrStakeRegistry(2, 3, address(this));
+        SchnorrStakeRegistry fresh = new SchnorrStakeRegistry(2, 3, address(this), 0);
         fresh.registerOperator(opX[0], opY[0], uint256(type(uint96).max), popS[0], popR[0]);
         address id = fresh.pointAddress(opX[0], opY[0]);
-        (,, uint96 w, bool registered) = fresh.operators(id);
+        (,, uint96 w, bool registered,) = fresh.operators(id);
         assertEq(uint256(w), uint256(type(uint96).max), "stored weight lossless at the bound");
         assertTrue(registered, "registered");
         assertEq(fresh.totalWeight(), uint256(type(uint96).max), "totalWeight credits the full value");
@@ -173,8 +173,10 @@ contract SchnorrStakeRegistryTest is Test {
 
     // ---- deregistration ----
 
-    // Deregistering an operator subtracts its key and weight from the running aggregate and
-    // clears its record. The resulting aggregate must equal X_all − X_i computed directly.
+    // Deregistering an operator subtracts its key and weight from the running aggregate. The
+    // resulting aggregate must equal X_all − X_i computed directly. The record is left behind as
+    // a tombstone: the key and weight stay readable and `exitBlock` records when it left, while
+    // `registered` going false is what removes it from the active set.
     function test_deregister_updatesAggregateAndWeight() public {
         address id = _nonSigner(1);
         (uint256 ex, uint256 ey) = Secp256k1.sub(XALL_X, XALL_Y, opX[1], opY[1]);
@@ -185,9 +187,12 @@ contract SchnorrStakeRegistryTest is Test {
         assertEq(registry.aggY(), ey, "aggY after deregister");
         assertEq(registry.totalWeight(), 2 * WEIGHT, "totalWeight debited");
 
-        (,, uint96 w, bool registered) = registry.operators(id);
-        assertEq(uint256(w), 0, "record cleared");
-        assertFalse(registered, "no longer registered");
+        (uint256 x, uint256 y, uint96 w, bool registered, uint48 exitBlock) = registry.operators(id);
+        assertFalse(registered, "no longer in the active set");
+        assertEq(x, opX[1], "tombstone retains x");
+        assertEq(y, opY[1], "tombstone retains y");
+        assertEq(uint256(w), WEIGHT, "tombstone retains weight");
+        assertEq(uint256(exitBlock), block.number, "tombstone records the exit block");
     }
 
     // After deregistering operator 1, the on-chain aggregate equals X_all − X_1 — exactly what
@@ -212,6 +217,71 @@ contract SchnorrStakeRegistryTest is Test {
 
         vm.expectRevert(SchnorrStakeRegistry.StaleSnapshot.selector);
         registry.isValidSignature(MESSAGE, FULL_S, FULL_R, none, preBlock);
+    }
+
+    // Pinning the freshest possible reference block does not rescue a signature assembled before
+    // a mutation: the watermark check passes, but the cached aggregate is X_all − X_1 while the
+    // signature was made for X_all, so verification simply fails. This is the other half of the
+    // in-flight invalidation surface — the caller sees `false`, not `StaleSnapshot`. Mirror of
+    // test_deregister_thenSubsetVerifiesWithNoNonSigners, which passes in this same state
+    // because the subset signature *does* match the post-removal aggregate.
+    function test_deregister_freshRefBlockRejectsPreMutationSignature() public {
+        registry.deregisterOperator(_nonSigner(1));
+        vm.roll(block.number + 10); // refBlock is now at or above the new effectiveBlock
+
+        address[] memory none = new address[](0);
+        assertFalse(registry.isValidSignature(MESSAGE, FULL_S, FULL_R, none, _refBlock()));
+    }
+
+    // Registration invalidates in-flight signatures exactly as deregistration does. Re-adding a
+    // previously removed operator restores X_all, so the subset signature that was valid against
+    // X_all − X_1 no longer matches — and referencing a block from before the re-registration is
+    // stale. Both directions of a set mutation break an assembled round.
+    function test_register_advancesWatermark() public {
+        address id = _nonSigner(1);
+        registry.deregisterOperator(id);
+        vm.roll(block.number + 10);
+
+        address[] memory none = new address[](0);
+        assertTrue(registry.isValidSignature(MESSAGE, SUB_S, SUB_R, none, _refBlock()), "valid before");
+
+        uint256 preBlock = block.number - 1; // valid refBlock before the registration
+        registry.registerOperator(opX[1], opY[1], WEIGHT, popS[1], popR[1]);
+
+        vm.expectRevert(SchnorrStakeRegistry.StaleSnapshot.selector);
+        registry.isValidSignature(MESSAGE, SUB_S, SUB_R, none, preBlock);
+
+        // ...and a fresh reference block does not help either: X_all is back to its full value.
+        vm.roll(block.number + 10);
+        assertFalse(registry.isValidSignature(MESSAGE, SUB_S, SUB_R, none, _refBlock()));
+    }
+
+    // The threshold is measured against the *current* totalWeight, so removing an operator
+    // redefines what counts as a quorum. With a heavy non-signer in the set, signers {0,2} hold
+    // 20/120 and are rejected; once that operator is deregistered the same signature holds 20/20
+    // and is accepted. This is not something the watermark prevents — a freshest-block reference
+    // clears it, as asserted below — and it is the correct outcome, because the remaining signers
+    // really do carry the whole remaining weight. What still binds the signature to one signer set
+    // is the aggregate match: the caller must present a non-signer set whose subtraction yields
+    // exactly the key that signed. Uses non-uniform weights, which the shared fixture does not.
+    function test_thresholdMeasuredAgainstCurrentTotalWeight() public {
+        SchnorrStakeRegistry r = new SchnorrStakeRegistry(2, 3, address(this), 0);
+        uint256[3] memory w = [uint256(10), 100, 10];
+        for (uint256 i = 0; i < 3; i++) {
+            r.registerOperator(opX[i], opY[i], w[i], popS[i], popR[i]);
+        }
+        vm.roll(block.number + 10);
+
+        address heavy = r.pointAddress(opX[1], opY[1]);
+        address[] memory ns = new address[](1);
+        ns[0] = heavy;
+        assertFalse(r.isValidSignature(MESSAGE, SUB_S, SUB_R, ns, _refBlock()), "20/120 is below 2/3");
+
+        r.deregisterOperator(heavy);
+        vm.roll(block.number + 10);
+
+        address[] memory none = new address[](0);
+        assertTrue(r.isValidSignature(MESSAGE, SUB_S, SUB_R, none, _refBlock()), "20/20 is a quorum");
     }
 
     // A deregistered identity is no longer a valid non-signer: the verification loop reverts
@@ -263,6 +333,384 @@ contract SchnorrStakeRegistryTest is Test {
         address ghost = address(0xDEAD);
         vm.expectRevert(abi.encodeWithSelector(SchnorrStakeRegistry.NotRegistered.selector, ghost));
         registry.deregisterOperator(ghost);
+    }
+
+    // Re-registering a tombstoned identity clears `exitBlock`, so a record cannot look
+    // simultaneously active and exited.
+    function test_reregister_clearsTombstone() public {
+        address id = _nonSigner(1);
+        registry.deregisterOperator(id);
+        (,,,, uint48 exitedAt) = registry.operators(id);
+        assertGt(uint256(exitedAt), 0, "tombstoned");
+
+        registry.registerOperator(opX[1], opY[1], WEIGHT, popS[1], popR[1]);
+
+        (,, uint96 w, bool registered, uint48 exitBlock) = registry.operators(id);
+        assertTrue(registered, "active again");
+        assertEq(uint256(w), WEIGHT, "weight restored");
+        assertEq(uint256(exitBlock), 0, "exitBlock cleared");
+    }
+
+    // ---- scheduled changes (notice window) ----
+
+    uint256 constant NOTICE = 50;
+
+    // A registry with a real notice window and the three fixture operators already in the active
+    // set, positioned so `_refBlock()` is a valid reference block.
+    function _noticeRegistry() internal returns (SchnorrStakeRegistry r) {
+        r = new SchnorrStakeRegistry(2, 3, address(this), NOTICE);
+        for (uint256 i = 0; i < 3; i++) {
+            r.registerOperator(opX[i], opY[i], WEIGHT, popS[i], popR[i]);
+        }
+        vm.roll(block.number + 10);
+    }
+
+    // With nothing announced there is no scheduled mutation, so the horizon is unbounded.
+    function test_horizon_unboundedWhenNothingPending() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        assertEq(r.nextPossibleMutationBlock(), type(uint256).max);
+        assertEq(r.pendingChangeCount(), 0);
+    }
+
+    // Announcing publishes a horizon and changes nothing else: the aggregate, the total weight
+    // and the watermark are untouched, so a signature assembled now still verifies. This is the
+    // property the whole mechanism exists for.
+    function test_announce_publishesHorizonWithoutMutating() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        uint256 aggXBefore = r.aggX();
+        uint256 watermarkBefore = r.effectiveBlock();
+
+        r.announceDeregister(r.pointAddress(opX[1], opY[1]));
+
+        assertEq(r.nextPossibleMutationBlock(), block.number + NOTICE, "horizon published");
+        assertEq(r.pendingChangeCount(), 1);
+        assertEq(r.aggX(), aggXBefore, "aggregate untouched");
+        assertEq(r.totalWeight(), 3 * WEIGHT, "weight untouched");
+        assertEq(r.effectiveBlock(), watermarkBefore, "watermark untouched");
+
+        address[] memory none = new address[](0);
+        assertTrue(r.isValidSignature(MESSAGE, FULL_S, FULL_R, none, _refBlock()), "still verifies");
+    }
+
+    // The set cannot change before the horizon: any block up to `eligibleBlock - 1` still
+    // verifies a signature assembled against the pre-announcement set, and the commit that would
+    // change it is rejected until then.
+    function test_horizon_setUnchangedUntilEligibleBlock() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        r.announceDeregister(r.pointAddress(opX[1], opY[1]));
+        uint256 eligible = r.nextPossibleMutationBlock();
+
+        vm.roll(eligible - 1);
+        vm.expectRevert(abi.encodeWithSelector(SchnorrStakeRegistry.NoticeWindowNotElapsed.selector, eligible));
+        r.commitNextChange();
+
+        address[] memory none = new address[](0);
+        assertTrue(r.isValidSignature(MESSAGE, FULL_S, FULL_R, none, _refBlock()), "set unchanged");
+    }
+
+    // Committing after the window applies exactly what the immediate path would have.
+    function test_commit_appliesDeregistration() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address id = r.pointAddress(opX[1], opY[1]);
+        (uint256 ex, uint256 ey) = Secp256k1.sub(XALL_X, XALL_Y, opX[1], opY[1]);
+
+        r.announceDeregister(id);
+        vm.roll(r.nextPossibleMutationBlock());
+        r.commitNextChange();
+
+        assertEq(r.aggX(), ex, "aggX");
+        assertEq(r.aggY(), ey, "aggY");
+        assertEq(r.totalWeight(), 2 * WEIGHT, "weight debited");
+        assertEq(r.effectiveBlock(), block.number, "watermark advanced on commit");
+        assertEq(r.pendingChangeCount(), 0, "dequeued");
+        assertEq(r.nextPossibleMutationBlock(), type(uint256).max, "horizon released");
+    }
+
+    // An announced registration is not in the aggregate until commit — an operator must not sign
+    // before then, because its key is not yet part of X_all.
+    function test_commit_appliesRegistration() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address id = r.pointAddress(opX[1], opY[1]);
+        r.deregisterOperator(id);
+        vm.roll(block.number + 10);
+
+        r.announceRegister(opX[1], opY[1], WEIGHT, popS[1], popR[1]);
+        assertEq(r.totalWeight(), 2 * WEIGHT, "not credited while pending");
+
+        vm.roll(r.nextPossibleMutationBlock());
+        r.commitNextChange();
+
+        assertEq(r.aggX(), XALL_X, "aggregate restored on commit");
+        assertEq(r.totalWeight(), 3 * WEIGHT, "weight credited on commit");
+    }
+
+    // An announced-but-uncommitted exit still counts toward the threshold denominator, so the
+    // operator is expected to keep signing through its notice window.
+    function test_announcedExitStillCountsTowardThreshold() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address id = r.pointAddress(opX[1], opY[1]);
+        r.announceDeregister(id);
+
+        // The subset signature (op 1 absent) needs op 1 declared as a non-signer and still
+        // clears 2/3 — its weight is in the denominator either way.
+        address[] memory ns = new address[](1);
+        ns[0] = id;
+        assertTrue(r.isValidSignature(MESSAGE, SUB_S, SUB_R, ns, _refBlock()), "absorbed as non-signer");
+        assertEq(r.totalWeight(), 3 * WEIGHT, "weight still counted");
+    }
+
+    // Proof of possession is checked when the change is announced, so an unusable announcement
+    // cannot sit in the queue holding the horizon.
+    function test_announceRegister_validatesUpFront() public {
+        SchnorrStakeRegistry r = new SchnorrStakeRegistry(2, 3, address(this), NOTICE);
+        vm.expectRevert(SchnorrStakeRegistry.InvalidProofOfPossession.selector);
+        r.announceRegister(opX[0], opY[0], WEIGHT, popS[1], popR[1]);
+        assertEq(r.pendingChangeCount(), 0, "nothing queued");
+    }
+
+    // One pending change per identity, so the queue cannot hold contradictory entries.
+    function test_announce_rejectsSecondChangeForSameOperator() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address id = r.pointAddress(opX[1], opY[1]);
+        r.announceDeregister(id);
+        vm.expectRevert(abi.encodeWithSelector(SchnorrStakeRegistry.ChangeAlreadyPending.selector, id));
+        r.announceDeregister(id);
+    }
+
+    // Changes commit in announcement order, which is what makes the queue head the earliest
+    // possible mutation and the horizon a single storage read.
+    function test_commit_isFifo() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address first = r.pointAddress(opX[0], opY[0]);
+        address second = r.pointAddress(opX[1], opY[1]);
+
+        r.announceDeregister(first);
+        vm.roll(block.number + 5);
+        r.announceDeregister(second);
+
+        vm.roll(r.nextPossibleMutationBlock());
+        r.commitNextChange();
+
+        (,,, bool firstActive,) = r.operators(first);
+        (,,, bool secondActive,) = r.operators(second);
+        assertFalse(firstActive, "head applied first");
+        assertTrue(secondActive, "tail still pending");
+    }
+
+    // Cancelling drops the head. The horizon can only move later as a result, never earlier, so
+    // a round assembled against the published horizon stays valid.
+    function test_cancel_movesHorizonLater() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        r.announceDeregister(r.pointAddress(opX[0], opY[0]));
+        uint256 firstHorizon = r.nextPossibleMutationBlock();
+
+        vm.roll(block.number + 5);
+        r.announceDeregister(r.pointAddress(opX[1], opY[1]));
+
+        r.cancelNextChange();
+
+        assertGt(r.nextPossibleMutationBlock(), firstHorizon, "horizon pushed later");
+        assertEq(r.pendingChangeCount(), 1, "only the head dropped");
+    }
+
+    // A cancelled identity is free to be announced again.
+    function test_cancel_releasesTheIdentity() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address id = r.pointAddress(opX[1], opY[1]);
+        r.announceDeregister(id);
+        r.cancelNextChange();
+        r.announceDeregister(id); // must not revert
+        assertEq(r.pendingChangeCount(), 1);
+    }
+
+    // Committing or cancelling an empty queue reverts rather than silently doing nothing.
+    function test_emptyQueueReverts() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        vm.expectRevert(SchnorrStakeRegistry.NoPendingChange.selector);
+        r.commitNextChange();
+        vm.expectRevert(SchnorrStakeRegistry.NoPendingChange.selector);
+        r.cancelNextChange();
+    }
+
+    // The whole scheduled path is owner-gated, like the immediate one.
+    function test_scheduledPath_onlyOwner() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address id = r.pointAddress(opX[1], opY[1]);
+        // Resolved before the prank: an external view call inside the expectRevert window would
+        // consume it and the assertion would test the wrong call.
+        address other = r.pointAddress(opX[0], opY[0]);
+        r.announceDeregister(id);
+
+        vm.startPrank(address(0xBEEF));
+        vm.expectRevert(SchnorrStakeRegistry.NotOwner.selector);
+        r.announceDeregister(other);
+        vm.expectRevert(SchnorrStakeRegistry.NotOwner.selector);
+        r.commitNextChange();
+        vm.expectRevert(SchnorrStakeRegistry.NotOwner.selector);
+        r.cancelNextChange();
+        vm.stopPrank();
+    }
+
+    // ---- cross-path collisions between the scheduled and forced paths ----
+
+    // Forcing a registration that is already announced would apply the same key twice — once
+    // immediately (an announcement leaves `registered` false, so validation does not object) and
+    // again when the still-queued entry commits — doubling it in X_all and in totalWeight. The
+    // forced path must refuse while a change is queued.
+    function test_forcedRegister_rejectedWhileChangePending() public {
+        SchnorrStakeRegistry r = new SchnorrStakeRegistry(2, 3, address(this), NOTICE);
+        address id = r.pointAddress(opX[0], opY[0]);
+
+        r.announceRegister(opX[0], opY[0], WEIGHT, popS[0], popR[0]);
+
+        vm.expectRevert(abi.encodeWithSelector(SchnorrStakeRegistry.ChangeAlreadyPending.selector, id));
+        r.registerOperator(opX[0], opY[0], WEIGHT, popS[0], popR[0]);
+
+        // The queued change still applies exactly once.
+        vm.roll(r.nextPossibleMutationBlock());
+        r.commitNextChange();
+        assertEq(r.totalWeight(), WEIGHT, "credited once");
+        (,, uint96 w, bool registered,) = r.operators(id);
+        assertTrue(registered);
+        assertEq(uint256(w), WEIGHT);
+    }
+
+    // The mirror case would wedge the queue instead of corrupting the aggregate: the head would
+    // revert NotRegistered on every commit and, because changes commit in order, block everything
+    // behind it. Same rule closes it.
+    function test_forcedDeregister_rejectedWhileChangePending() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address id = r.pointAddress(opX[1], opY[1]);
+
+        r.announceDeregister(id);
+
+        vm.expectRevert(abi.encodeWithSelector(SchnorrStakeRegistry.ChangeAlreadyPending.selector, id));
+        r.deregisterOperator(id);
+
+        // The queue is still committable rather than wedged.
+        vm.roll(r.nextPossibleMutationBlock());
+        r.commitNextChange();
+        assertEq(r.totalWeight(), 2 * WEIGHT, "debited once");
+    }
+
+    // Cancelling releases the identity back to the forced path, so the guard blocks a collision
+    // rather than locking an operator out permanently.
+    function test_cancelReleasesIdentityToForcedPath() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address id = r.pointAddress(opX[1], opY[1]);
+
+        r.announceDeregister(id);
+        r.cancelNextChange();
+        r.deregisterOperator(id); // must not revert
+
+        assertEq(r.totalWeight(), 2 * WEIGHT);
+    }
+
+    // Cancelling by identity reaches an entry that is not the head, so clearing the way for an
+    // emergency force does not require cancelling everything queued ahead of it.
+    function test_cancelChange_targetsMiddleOfQueue() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address first = r.pointAddress(opX[0], opY[0]);
+        address second = r.pointAddress(opX[1], opY[1]);
+
+        r.announceDeregister(first);
+        uint256 horizon = r.nextPossibleMutationBlock();
+        vm.roll(block.number + 5);
+        r.announceDeregister(second);
+        assertEq(r.pendingChangeCount(), 2);
+
+        r.cancelChange(second); // not the head
+
+        assertEq(r.pendingChangeCount(), 1, "only the targeted entry dropped");
+        assertEq(r.nextPossibleMutationBlock(), horizon, "head entry keeps its window");
+
+        // The untouched head still commits on its original schedule.
+        vm.roll(horizon);
+        r.commitNextChange();
+        (,,, bool firstActive,) = r.operators(first);
+        (,,, bool secondActive,) = r.operators(second);
+        assertFalse(firstActive, "head applied");
+        assertTrue(secondActive, "cancelled entry never applied");
+    }
+
+    // The emergency sequence: clear the operator's queued change, then force it out. Two calls in
+    // one block, with no notice window between them and no collateral to other queued changes.
+    function test_cancelChange_thenForceInSameBlock() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address other = r.pointAddress(opX[0], opY[0]);
+        address compromised = r.pointAddress(opX[1], opY[1]);
+
+        r.announceDeregister(other);
+        uint256 horizon = r.nextPossibleMutationBlock();
+        r.announceDeregister(compromised);
+
+        r.cancelChange(compromised);
+        r.deregisterOperator(compromised); // no roll between these
+
+        (,,, bool active,) = r.operators(compromised);
+        assertFalse(active, "removed immediately");
+        assertEq(r.totalWeight(), 2 * WEIGHT);
+        assertEq(r.pendingChangeCount(), 1, "the other operator's change survived");
+        assertEq(r.nextPossibleMutationBlock(), horizon, "and kept its window");
+    }
+
+    // Committing past a hole left by a mid-queue cancellation must not land on the cleared slot.
+    function test_commit_skipsCancelledHead() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address first = r.pointAddress(opX[0], opY[0]);
+        address second = r.pointAddress(opX[1], opY[1]);
+
+        r.announceDeregister(first);
+        r.announceDeregister(second);
+        r.cancelChange(first); // the head becomes a hole
+
+        assertEq(r.pendingChangeCount(), 1);
+        vm.roll(r.nextPossibleMutationBlock());
+        r.commitNextChange();
+
+        (,,, bool firstActive,) = r.operators(first);
+        (,,, bool secondActive,) = r.operators(second);
+        assertTrue(firstActive, "cancelled entry never applied");
+        assertFalse(secondActive, "the surviving entry applied");
+        assertEq(r.pendingChangeCount(), 0);
+        assertEq(r.nextPossibleMutationBlock(), type(uint256).max);
+    }
+
+    // Cancelling an identity with nothing queued reverts rather than silently succeeding.
+    function test_cancelChange_unknownReverts() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address id = r.pointAddress(opX[1], opY[1]);
+        vm.expectRevert(SchnorrStakeRegistry.NoPendingChange.selector);
+        r.cancelChange(id);
+    }
+
+    // Targeted cancel is owner-gated like the rest of the scheduled path.
+    function test_cancelChange_onlyOwner() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address id = r.pointAddress(opX[1], opY[1]);
+        r.announceDeregister(id);
+
+        vm.prank(address(0xBEEF));
+        vm.expectRevert(SchnorrStakeRegistry.NotOwner.selector);
+        r.cancelChange(id);
+    }
+
+    // A notice window large enough to wrap `eligibleBlock` when narrowed to uint48 would land it
+    // in the past and make changes committable immediately, defeating the window.
+    function test_constructor_rejectsUnboundedNoticeWindow() public {
+        vm.expectRevert(SchnorrStakeRegistry.NoticeWindowTooLarge.selector);
+        new SchnorrStakeRegistry(2, 3, address(this), uint256(type(uint48).max));
+    }
+
+    // The immediate paths mark themselves, so a consumer relying on the horizon can detect that
+    // it was bypassed.
+    function test_immediatePath_emitsForcedMutation() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address id = r.pointAddress(opX[1], opY[1]);
+
+        vm.expectEmit(true, false, false, false, address(r));
+        emit SchnorrStakeRegistry.ForcedMutation(id);
+        r.deregisterOperator(id);
     }
 
     // Deregistering the same operator twice reverts: the record is gone after the first call.
