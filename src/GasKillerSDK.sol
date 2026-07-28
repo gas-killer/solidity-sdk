@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.27;
 
 import {
     IBLSSignatureChecker,
@@ -9,12 +9,19 @@ import {IERC165} from "forge-std/interfaces/IERC165.sol";
 
 import {IGasKillerSDK} from "./interface/IGasKillerSDK.sol";
 import {StateTracker} from "./StateTracker.sol";
+import {TransitionGuard} from "./TransitionGuard.sol";
 import {StateChangeHandlerLib, StateUpdateType} from "./StateChangeHandlerLib.sol";
 
 /// @title GasKillerSDK
 /// @notice Base SDK for implementing Gas Killer functionality in contracts
-/// @dev Inherit from this contract to add Gas Killer capabilities to your contract
-abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
+/// @dev Inherit from this contract to add Gas Killer capabilities to your contract.
+///
+///      `verifyAndUpdate` is `guardTransition`-protected (see `TransitionGuard`): a `CALL`
+///      state update runs arbitrary external code mid-transition, so re-entering
+///      `verifyAndUpdate` with the *next* transition's valid quorum signature would
+///      otherwise interleave two signed transitions. The same transient flag is queryable
+///      as `inTransition()` so external readers can reject mid-transition state.
+abstract contract GasKillerSDK is StateTracker, TransitionGuard, IGasKillerSDK {
     /// @custom:storage-location erc7201:gaskiller.GasKillerSDK.storage
     struct GasKillerSDKStorage {
         /// @notice Deprecated. Maintained to preserve storage layout. Now derived on read by `namespace()`
@@ -65,7 +72,7 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         uint256 transitionIndex,
         bytes4 targetFunction,
         IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
-    ) external payable trackState {
+    ) external payable guardTransition trackState {
         GasKillerSDKStorage storage $ = _getGasKillerSDKStorage();
 
         // Check block number validity
