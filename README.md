@@ -56,15 +56,49 @@ waits before inclusion. `verifyAndUpdate` bounds the second part: a reference bl
 `blockStaleMeasure` blocks of the current block (300 by default), so a payload expires rather than
 lingering indefinitely.
 
+A mutation also changes *what counts as* a quorum, since the threshold is measured against the
+current total weight. Removing an operator can turn a signature that held less than the threshold
+share of the old set into a valid quorum of the smaller one — correctly, because the remaining
+signers do carry that share. Signatures stay bound to one signer set by the aggregate match, not
+by the reference block.
+
+### Scheduling changes with a notice window
+
+`SchnorrStakeRegistry` takes a `noticeWindow` (in blocks) at construction, which turns the
+quiescence requirement above from an assumption into something a router can check:
+
+| Call | Effect |
+|---|---|
+| `announceRegister` / `announceDeregister` | Queue a change, applicable after `noticeWindow` blocks. Nothing is mutated yet |
+| `commitNextChange` | Apply the oldest announced change, once its window has elapsed |
+| `cancelNextChange` | Drop the oldest announced change without applying it |
+| `nextPossibleMutationBlock()` | The earliest block the set can change, or `type(uint256).max` when nothing is queued |
+
+A round is safe from set-mutation invalidation while the block its settlement lands in is below
+`nextPossibleMutationBlock()`. Size `noticeWindow` to exceed the signing round's duration plus the
+consumer's `blockStaleMeasure`, or a round can still be assembled under one set and settled under
+another.
+
+Registration is validated in full at announcement — curve membership, weight bounds, proof of
+possession — so an unusable entry cannot sit in the queue holding the horizon. An announced
+operator is *not* in the aggregate until its change commits, so it must not sign before then; an
+operator announced for removal stays in the aggregate and in the threshold denominator until
+commit, so it is expected to keep signing throughout its window.
+
+`registerOperator` and `deregisterOperator` bypass the window, for bootstrapping a registry that
+does not yet back any consumer and for emergencies such as a compromised key. They emit
+`ForcedMutation` so consumers relying on the horizon can detect the bypass, and the fail-closed
+watermark remains the backstop for it.
+
 Consequences for integrators:
 
-- Treat the `OperatorRegistered` and `OperatorDeregistered` events as a "re-snapshot required"
-  signal, and schedule operator-set changes for periods when no round is in flight.
-- A mutation also changes *what counts as* a quorum, since the threshold is measured against the
-  current total weight. Removing an operator can turn a signature that held less than the
-  threshold share of the old set into a valid quorum of the smaller one — correctly, because the
-  remaining signers do carry that share. Signatures stay bound to one signer set by the aggregate
-  match, not by the reference block.
+- Prefer the announced path once the registry is live, and enforce the horizon check before
+  submitting.
+- Treat `ForcedMutation`, and any `OperatorRegistered` / `OperatorDeregistered` without a
+  preceding announcement, as a "re-snapshot required" signal.
+- An exited operator's record is kept as a tombstone rather than deleted: its key, weight and
+  `exitBlock` stay readable so the identity remains attributable after it leaves, while
+  `registered` going false is what removes it from the active set.
 - `blockStaleMeasure` is set per consumer contract and is owner-adjustable, while one registry
   may back several consumers. The registry cannot enforce any relationship between its own
   mutation timing and each consumer's staleness bound, so keeping the two consistent is

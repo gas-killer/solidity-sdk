@@ -77,7 +77,7 @@ contract SchnorrStakeRegistryGasTest is Test {
     function setUp() public {
         vm.roll(1000);
 
-        registry = new SchnorrStakeRegistry(2, 3, address(this));
+        registry = new SchnorrStakeRegistry(2, 3, address(this), 0);
         for (uint256 i = 0; i < 3; i++) {
             registry.registerOperator(opX[i], opY[i], 100, popS[i], popR[i]);
         }
@@ -86,9 +86,10 @@ contract SchnorrStakeRegistryGasTest is Test {
 
         // Synthetic registry: inject packed Operator records directly (bypasses PoP —
         // fine, we measure the gas path, not signature validity). Storage layout:
-        // operators mapping @ slot 0 {x, y, weight|registered<<96}, aggX @ 1, aggY @ 2,
-        // totalWeight @ 3, effectiveBlock @ 4.
-        synth = new SchnorrStakeRegistry(2, 3, address(this));
+        // operators mapping @ slot 0 {x, y, weight|registered<<96|exitBlock<<104}, aggX @ 1,
+        // aggY @ 2, totalWeight @ 3, effectiveBlock @ 4. Scheduling state is declared after
+        // these so it cannot displace them.
+        synth = new SchnorrStakeRegistry(2, 3, address(this), 0);
         for (uint256 i = 0; i < SYNTH_OPS; i++) {
             uint256 x = uint256(keccak256(abi.encode("x", i))) >> 4;
             uint256 y = uint256(keccak256(abi.encode("y", i))) >> 4;
