@@ -41,6 +41,15 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     uint256 private constant DEFAULT_BLOCK_STALE_MEASURE = 300;
 
     /// @notice Verify BLS quorum signatures and apply the encoded state updates
+    /// @dev Payable so a caller can fund value-bearing `CALL`/`CREATE`/`CREATE2` state updates
+    ///      out of `msg.value`. The value each update moves is fixed inside the quorum-signed
+    ///      `storageUpdates`, so `msg.value` only tops up this contract's balance — it cannot
+    ///      redirect value anywhere the quorum did not sign. Under-funding reverts the whole
+    ///      transition (`RevertingContext` for a CALL, `DeploymentFailed` for a CREATE/CREATE2).
+    ///      Over-funding is NOT refunded: whatever the updates do not consume simply stays in
+    ///      this contract. Inheriting contracts whose callers may over-send must provide their
+    ///      own recovery path (e.g. a withdrawal function, or a refund executed as a signed
+    ///      CALL update in a later transition).
     /// @param msgHash The hash of the message to verify
     /// @param quorumNumbers The quorum numbers to check signatures for
     /// @param referenceBlockNumber The block number to use as reference for operator set
