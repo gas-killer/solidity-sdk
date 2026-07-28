@@ -7,7 +7,7 @@ import {TransitionGuard} from "../src/TransitionGuard.sol";
 import {ISchnorrGasKillerSDK} from "../src/schnorr/interface/ISchnorrGasKillerSDK.sol";
 import {ISchnorrGasKillerSDKBatch, SchnorrTaskSubmission} from "../src/schnorr/interface/ISchnorrGasKillerSDKBatch.sol";
 import {ISchnorrStakeRegistry} from "../src/schnorr/interface/ISchnorrStakeRegistry.sol";
-import {StateUpdateType} from "../src/StateChangeHandlerLib.sol";
+import {StateChangeHandlerLib, StateUpdateType} from "../src/StateChangeHandlerLib.sol";
 
 /// Registry stub with a settable verdict — the guard/latch/batch control flow under test
 /// is independent of real signature verification (covered in SchnorrStakeRegistry.t.sol).
@@ -136,6 +136,15 @@ contract LatchReader {
     }
 }
 
+/// Payable CALL-update target for the value-forwarding tests.
+contract ValueSink {
+    uint256 public received;
+
+    function take() external payable {
+        received += msg.value;
+    }
+}
+
 contract SchnorrGasKillerSDKHardeningTest is Test {
     MockSchnorrRegistry mock;
     TestSchnorrSDK sdk;
@@ -167,6 +176,16 @@ contract SchnorrGasKillerSDKHardeningTest is Test {
         bytes[] memory args = new bytes[](2);
         args[0] = abi.encode(slot, val);
         args[1] = abi.encode(callTarget, uint256(0), callData);
+        return abi.encode(types, args);
+    }
+
+    /// A lone value-bearing CALL update — the shape that has no funding source unless the
+    /// entrypoint is payable.
+    function _callUpdate(address target, uint256 val, bytes memory callData) internal pure returns (bytes memory) {
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        types[0] = StateUpdateType.CALL;
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encode(target, val, callData);
         return abi.encode(types, args);
     }
 
@@ -333,6 +352,63 @@ contract SchnorrGasKillerSDKHardeningTest is Test {
         assertFalse(sdk.inTransition(), "latch down after");
     }
 
+    // ---- value forwarding ----------------------------------------------------------
+
+    /// A value-bearing CALL update funded purely out of `msg.value`: the SDK starts at zero
+    /// balance, so this only settles because the entrypoint is payable.
+    function test_verifyAndUpdate_forwardsMsgValue() public {
+        ValueSink sink = new ValueSink();
+        uint256 forwarded = 0.13 ether;
+        vm.deal(address(this), forwarded);
+
+        SchnorrTaskSubmission memory sub =
+            _submission(0, _callUpdate(address(sink), forwarded, abi.encodeCall(ValueSink.take, ())));
+
+        sdk.verifyAndUpdate{value: forwarded}(
+            sub.msgHash,
+            sub.referenceBlockNumber,
+            sub.storageUpdates,
+            sub.transitionIndex,
+            sub.targetFunction,
+            sub.s,
+            sub.Raddr,
+            sub.nonSigners
+        );
+
+        assertEq(sink.received(), forwarded, "value reached the CALL target");
+        assertEq(address(sdk).balance, 0, "msg.value alone funded the update");
+        assertEq(sdk.stateTransitionCount(), 1);
+    }
+
+    /// Under-funding is a hard failure, not a partial application: the EVM fails the CALL
+    /// before the target executes, so `RevertingContext` carries empty revert data.
+    function test_verifyAndUpdate_underFundedCallReverts() public {
+        ValueSink sink = new ValueSink();
+        vm.deal(address(this), 0.1 ether);
+
+        bytes memory callData = abi.encodeCall(ValueSink.take, ());
+        SchnorrTaskSubmission memory sub = _submission(0, _callUpdate(address(sink), 0.2 ether, callData));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                StateChangeHandlerLib.RevertingContext.selector, 0, address(sink), bytes(""), callData
+            )
+        );
+        sdk.verifyAndUpdate{value: 0.1 ether}(
+            sub.msgHash,
+            sub.referenceBlockNumber,
+            sub.storageUpdates,
+            sub.transitionIndex,
+            sub.targetFunction,
+            sub.s,
+            sub.Raddr,
+            sub.nonSigners
+        );
+
+        assertEq(sdk.stateTransitionCount(), 0, "whole transition rolled back");
+        assertEq(sink.received(), 0);
+    }
+
     // ---- batch entrypoint ----------------------------------------------------------
 
     function test_batch_appliesSequentially() public {
@@ -483,6 +559,85 @@ contract SchnorrGasKillerSDKHardeningTest is Test {
         sdk.verifyAndUpdateBatch(subs);
     }
 
+    // ---- batch value pooling ---------------------------------------------------------
+
+    /// One `msg.value` covers the whole batch: it tops the balance up once and every applied
+    /// sub-transition draws from the same pool rather than from a per-submission allowance.
+    function test_batch_poolsMsgValueAcrossSubTransitions() public {
+        ValueSink sink = new ValueSink();
+        uint256 a = 0.2 ether;
+        uint256 b = 0.05 ether;
+        vm.deal(address(this), a + b);
+
+        SchnorrTaskSubmission[] memory subs = new SchnorrTaskSubmission[](2);
+        subs[0] = _submission(0, _callUpdate(address(sink), a, abi.encodeCall(ValueSink.take, ())));
+        subs[1] = _submission(1, _callUpdate(address(sink), b, abi.encodeCall(ValueSink.take, ())));
+
+        sdk.verifyAndUpdateBatch{value: a + b}(subs);
+
+        assertEq(sink.received(), a + b, "both sub-transitions drew from the same pool");
+        assertEq(address(sdk).balance, 0, "the batch consumed exactly what was sent");
+        assertEq(sdk.stateTransitionCount(), 2);
+    }
+
+    /// The pool is shared, so a shortfall on the *last* sub-transition still unwinds the
+    /// fully-funded earlier one — atomicity applies to value as much as to storage.
+    function test_batch_underFundedRevertsAtomically() public {
+        ValueSink sink = new ValueSink();
+        uint256 a = 0.2 ether;
+        uint256 b = 0.05 ether;
+        vm.deal(address(this), a + b);
+
+        bytes memory callData = abi.encodeCall(ValueSink.take, ());
+        SchnorrTaskSubmission[] memory subs = new SchnorrTaskSubmission[](2);
+        subs[0] = _submission(0, _callUpdate(address(sink), a, callData));
+        subs[1] = _submission(1, _callUpdate(address(sink), b, callData));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                StateChangeHandlerLib.RevertingContext.selector, 0, address(sink), bytes(""), callData
+            )
+        );
+        sdk.verifyAndUpdateBatch{value: a + b - 1}(subs);
+
+        assertEq(sink.received(), 0, "nothing applied");
+        assertEq(sdk.stateTransitionCount(), 0, "whole batch rolled back");
+        assertEq(address(sdk).balance, 0, "reverted batch retains nothing");
+    }
+
+    /// A front-run turns one submission into a skip. Its share of the pooled `msg.value` is
+    /// neither spent nor refunded — it just stays in the contract, which is what the
+    /// "over-funding is retained" rule means in practice for a batch assembler.
+    function test_batch_skippedSubmissionLeavesValueRetained() public {
+        ValueSink sink = new ValueSink();
+        uint256 a = 0.2 ether;
+        uint256 b = 0.05 ether;
+        vm.deal(address(this), 2 * a + b);
+
+        SchnorrTaskSubmission[] memory subs = new SchnorrTaskSubmission[](2);
+        subs[0] = _submission(0, _callUpdate(address(sink), a, abi.encodeCall(ValueSink.take, ())));
+        subs[1] = _submission(1, _callUpdate(address(sink), b, abi.encodeCall(ValueSink.take, ())));
+
+        // Front-runner lifts subs[0] and settles it standalone, funding it themselves.
+        sdk.verifyAndUpdate{value: a}(
+            subs[0].msgHash,
+            subs[0].referenceBlockNumber,
+            subs[0].storageUpdates,
+            subs[0].transitionIndex,
+            subs[0].targetFunction,
+            subs[0].s,
+            subs[0].Raddr,
+            subs[0].nonSigners
+        );
+
+        // The victim's batch still sends the full sum; subs[0] is skipped.
+        sdk.verifyAndUpdateBatch{value: a + b}(subs);
+
+        assertEq(sink.received(), a + b, "only the two applied transitions moved value");
+        assertEq(sdk.stateTransitionCount(), 2);
+        assertEq(address(sdk).balance, a, "the skipped submission's share is retained, not refunded");
+    }
+
     // ---- ERC-165 -------------------------------------------------------------------
 
     /// The router's preflight id is untouched; the batch extension is additive.
@@ -494,5 +649,10 @@ contract SchnorrGasKillerSDKHardeningTest is Test {
             ISchnorrGasKillerSDK.verifyAndUpdate.selector,
             "core id is still exactly the verifyAndUpdate selector"
         );
+        // Pinned literals: state mutability is not part of a function signature, so making
+        // both entrypoints `payable` must leave the IDs the router preflights untouched.
+        // A change here is an interface break for every already-deployed router.
+        assertEq(type(ISchnorrGasKillerSDK).interfaceId, bytes4(0x82b35a01), "core id must not drift");
+        assertEq(type(ISchnorrGasKillerSDKBatch).interfaceId, bytes4(0x2ea5ee1d), "batch id must not drift");
     }
 }
