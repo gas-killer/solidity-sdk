@@ -138,6 +138,7 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
     error ChangeAlreadyPending(address operator);
     error NoPendingChange();
     error NoticeWindowNotElapsed(uint256 eligibleBlock);
+    error NoticeWindowTooLarge();
 
     event OperatorRegistered(address indexed operator, uint256 weight);
     event OperatorDeregistered(address indexed operator, uint256 weight);
@@ -146,8 +147,15 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
     /// Emitted when a change bypasses the notice window via the forced path.
     event ForcedMutation(address indexed operator);
 
+    /// Upper bound on `noticeWindow`. Keeping both terms of `block.number + noticeWindow` under
+    /// half of `uint48` means `eligibleBlock` cannot wrap when narrowed — a wrapped value would
+    /// land in the past and make a change committable immediately, defeating the window. The
+    /// bound is ~1.4e14 blocks, so it constrains nothing reachable.
+    uint256 internal constant MAX_NOTICE_WINDOW = uint256(type(uint48).max) / 2;
+
     constructor(uint256 _thresholdNum, uint256 _thresholdDen, address _owner, uint256 _noticeWindow) {
         require(_thresholdDen != 0 && _thresholdNum <= _thresholdDen, "bad threshold");
+        if (_noticeWindow > MAX_NOTICE_WINDOW) revert NoticeWindowTooLarge();
         thresholdNum = _thresholdNum;
         thresholdDen = _thresholdDen;
         owner = _owner;
@@ -296,6 +304,7 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
     /// @param popR    PoP nonce address `address(R)`.
     function registerOperator(uint256 x, uint256 y, uint256 weight, uint256 popS, address popR) external onlyOwner {
         address id = _validateRegistration(x, y, weight, popS, popR);
+        _requireNoScheduledChange(id);
         emit ForcedMutation(id);
         // casting to 'uint96' is safe: bounds-checked against type(uint96).max above
         // forge-lint: disable-next-line(unsafe-typecast)
@@ -309,6 +318,7 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
     ///      operator and this is the exception.
     /// @param operator  the operator identity (`pointAddress(x, y)`) to remove.
     function deregisterOperator(address operator) external onlyOwner {
+        _requireNoScheduledChange(operator);
         emit ForcedMutation(operator);
         _applyDeregister(operator);
     }
@@ -340,6 +350,24 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
         }
     }
 
+    /// @dev The forced paths refuse to act on an identity that already has a queued change, so the
+    ///      scheduled and forced paths can never both apply to it.
+    ///
+    ///      Without this rule an announced registration could be forced through first — an
+    ///      announcement leaves `registered` false, so nothing in `_validateRegistration` would
+    ///      object — and the still-queued entry would then apply the same key a second time on
+    ///      commit, adding it to `X_all` and `totalWeight` twice. The mirror case, forcing a
+    ///      deregistration that is already announced, would instead wedge the queue: the head
+    ///      would revert `NotRegistered` on every commit and, because changes commit in order,
+    ///      block everything behind it until cancelled.
+    ///
+    ///      An identity must therefore be committed or cancelled before it can be forced. That
+    ///      also keeps the queue head valid by construction, since only `_applyRegister` and
+    ///      `_applyDeregister` change membership and neither can now run behind the queue's back.
+    function _requireNoScheduledChange(address operator) private view {
+        if (hasPendingChange[operator]) revert ChangeAlreadyPending(operator);
+    }
+
     /// @dev Append a change to the FIFO and mark its identity as spoken for.
     function _enqueue(ChangeKind kind, address operator, uint256 x, uint256 y, uint96 weight)
         private
@@ -348,7 +376,8 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
         if (hasPendingChange[operator]) revert ChangeAlreadyPending(operator);
         hasPendingChange[operator] = true;
 
-        // A block number exceeding uint48 is unreachable (~2.8e14 blocks).
+        // Cannot wrap: `noticeWindow` is bounded by MAX_NOTICE_WINDOW and a block number
+        // approaching the other half of uint48 (~1.4e14) is unreachable.
         // forge-lint: disable-next-line(unsafe-typecast)
         uint48 eligibleBlock = uint48(block.number + noticeWindow);
 
@@ -362,7 +391,14 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
 
     /// @dev Add a validated key to the active set. Overwrites the record wholesale, which clears
     ///      any tombstone left by a previous exit.
+    ///
+    ///      The membership check is redundant against the callers — the forced path validates and
+    ///      `_requireNoScheduledChange` keeps the queue head valid — but adding a key already in
+    ///      `X_all` corrupts the aggregate irrecoverably, so the invariant is asserted where it is
+    ///      relied on rather than only where it is currently established. `_applyDeregister`
+    ///      carries the same check in the opposite direction.
     function _applyRegister(address id, uint256 x, uint256 y, uint96 weight) private {
+        if (operators[id].registered) revert AlreadyRegistered();
         operators[id] = Operator({x: x, y: y, weight: weight, registered: true, exitBlock: 0});
         (aggX, aggY) = Secp256k1.add(aggX, aggY, x, y);
         totalWeight += weight;

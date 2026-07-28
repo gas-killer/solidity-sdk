@@ -551,6 +551,68 @@ contract SchnorrStakeRegistryTest is Test {
         vm.stopPrank();
     }
 
+    // ---- cross-path collisions between the scheduled and forced paths ----
+
+    // Forcing a registration that is already announced would apply the same key twice — once
+    // immediately (an announcement leaves `registered` false, so validation does not object) and
+    // again when the still-queued entry commits — doubling it in X_all and in totalWeight. The
+    // forced path must refuse while a change is queued.
+    function test_forcedRegister_rejectedWhileChangePending() public {
+        SchnorrStakeRegistry r = new SchnorrStakeRegistry(2, 3, address(this), NOTICE);
+        address id = r.pointAddress(opX[0], opY[0]);
+
+        r.announceRegister(opX[0], opY[0], WEIGHT, popS[0], popR[0]);
+
+        vm.expectRevert(abi.encodeWithSelector(SchnorrStakeRegistry.ChangeAlreadyPending.selector, id));
+        r.registerOperator(opX[0], opY[0], WEIGHT, popS[0], popR[0]);
+
+        // The queued change still applies exactly once.
+        vm.roll(r.nextPossibleMutationBlock());
+        r.commitNextChange();
+        assertEq(r.totalWeight(), WEIGHT, "credited once");
+        (,, uint96 w, bool registered,) = r.operators(id);
+        assertTrue(registered);
+        assertEq(uint256(w), WEIGHT);
+    }
+
+    // The mirror case would wedge the queue instead of corrupting the aggregate: the head would
+    // revert NotRegistered on every commit and, because changes commit in order, block everything
+    // behind it. Same rule closes it.
+    function test_forcedDeregister_rejectedWhileChangePending() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address id = r.pointAddress(opX[1], opY[1]);
+
+        r.announceDeregister(id);
+
+        vm.expectRevert(abi.encodeWithSelector(SchnorrStakeRegistry.ChangeAlreadyPending.selector, id));
+        r.deregisterOperator(id);
+
+        // The queue is still committable rather than wedged.
+        vm.roll(r.nextPossibleMutationBlock());
+        r.commitNextChange();
+        assertEq(r.totalWeight(), 2 * WEIGHT, "debited once");
+    }
+
+    // Cancelling releases the identity back to the forced path, so the guard blocks a collision
+    // rather than locking an operator out permanently.
+    function test_cancelReleasesIdentityToForcedPath() public {
+        SchnorrStakeRegistry r = _noticeRegistry();
+        address id = r.pointAddress(opX[1], opY[1]);
+
+        r.announceDeregister(id);
+        r.cancelNextChange();
+        r.deregisterOperator(id); // must not revert
+
+        assertEq(r.totalWeight(), 2 * WEIGHT);
+    }
+
+    // A notice window large enough to wrap `eligibleBlock` when narrowed to uint48 would land it
+    // in the past and make changes committable immediately, defeating the window.
+    function test_constructor_rejectsUnboundedNoticeWindow() public {
+        vm.expectRevert(SchnorrStakeRegistry.NoticeWindowTooLarge.selector);
+        new SchnorrStakeRegistry(2, 3, address(this), uint256(type(uint48).max));
+    }
+
     // The immediate paths mark themselves, so a consumer relying on the horizon can detect that
     // it was bypassed.
     function test_immediatePath_emitsForcedMutation() public {
