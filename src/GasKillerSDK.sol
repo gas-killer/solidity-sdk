@@ -8,13 +8,15 @@ import {
 import {IERC165} from "forge-std/interfaces/IERC165.sol";
 
 import {IGasKillerSDK} from "./interface/IGasKillerSDK.sol";
+import {IGasKillerSDKAuth} from "./interface/IGasKillerSDKAuth.sol";
 import {StateTracker} from "./StateTracker.sol";
 import {StateChangeHandlerLib, StateUpdateType} from "./StateChangeHandlerLib.sol";
+import {Eip1559TxLib} from "./Eip1559TxLib.sol";
 
 /// @title GasKillerSDK
 /// @notice Base SDK for implementing Gas Killer functionality in contracts
 /// @dev Inherit from this contract to add Gas Killer capabilities to your contract
-abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
+abstract contract GasKillerSDK is StateTracker, IGasKillerSDK, IGasKillerSDKAuth {
     /// @custom:storage-location erc7201:gaskiller.GasKillerSDK.storage
     struct GasKillerSDKStorage {
         /// @notice Deprecated. Maintained to preserve storage layout. Now derived on read by `namespace()`
@@ -25,6 +27,11 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         IBLSSignatureChecker blsSignatureChecker;
         /// @notice Maximum number of blocks a reference block may lag behind the current block
         uint256 blockStaleMeasure;
+        /// @notice Spent `(signer, nonce)` pairs for the sender-authenticated path — the O(1)
+        /// replay guard. Appended to the struct; existing field slots are unchanged. A user's
+        /// transaction nonce is never consumed on-chain (the tx is not broadcast), so this
+        /// mapping is what makes each authenticated settlement single-use.
+        mapping(address signer => mapping(uint256 nonce => bool)) usedNonce;
     }
 
     // keccak256(abi.encode(uint256(keccak256("gaskiller.GasKillerSDK.storage")) - 1)) & ~bytes32(uint256(0xff));
@@ -86,12 +93,81 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         _stateChangeHandler(storageUpdates);
     }
 
+    /// @notice Verify BLS quorum signatures for a sender-authenticated task and apply its state
+    ///         updates, then spend the sender's nonce.
+    /// @dev The trustless counterpart to {verifyAndUpdate}: instead of trusting the operator set
+    ///      for the sender used in the off-chain simulation, this reconstructs the exact EIP-1559
+    ///      signing hash of the user's transaction and recovers the sender on-chain, binding the
+    ///      attested storage diff to the call the sender actually authorized. Correctness of the
+    ///      diff itself remains operator-attested, as in {verifyAndUpdate}.
+    /// @inheritdoc IGasKillerSDKAuth
+    function verifyAndUpdateWithAuth(
+        bytes32 msgHash,
+        bytes calldata quorumNumbers,
+        uint32 referenceBlockNumber,
+        bytes calldata storageUpdates,
+        uint256 transitionIndex,
+        SignedTx calldata userTx,
+        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
+    ) external trackState {
+        GasKillerSDKStorage storage $ = _getGasKillerSDKStorage();
+
+        // Same reference-block and ordering guards as the permissionless path.
+        require(referenceBlockNumber < block.number, FutureBlockNumber());
+        require((uint256(referenceBlockNumber) + _getBlockStaleMeasure()) >= block.number, StaleBlockNumber());
+        require(transitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
+
+        // Recover the sender from the user's own signature. chainId and `to` are pinned to this
+        // chain and this contract, so a signature can only ever authorize a call here.
+        (address signer,) = Eip1559TxLib.recoverSigner(
+            block.chainid,
+            userTx.nonce,
+            userTx.maxPriorityFeePerGas,
+            userTx.maxFeePerGas,
+            userTx.gasLimit,
+            address(this),
+            userTx.value,
+            userTx.callData,
+            userTx.yParity,
+            userTx.r,
+            userTx.s
+        );
+        require(signer != address(0), InvalidTransactionSignature());
+
+        // Bind the operators' attestation to exactly this authorized call: the signed hash commits
+        // to the recovered signer, value, nonce, and full calldata. A relayer cannot pair the
+        // user's signature with a diff computed for a different call — the hashes would not match.
+        bytes32 expectedHash =
+            getSignedMessageHash(transitionIndex, signer, userTx.value, userTx.nonce, userTx.callData, storageUpdates);
+        require(expectedHash == msgHash, InvalidSignature());
+
+        // O(1) replay protection. The transaction nonce is never consumed on-chain (the tx is
+        // never broadcast), so this mapping is the single-use guard.
+        require(!$.usedNonce[signer][userTx.nonce], ReplayedTransaction());
+        $.usedNonce[signer][userTx.nonce] = true;
+
+        // Verify the operator signatures over msgHash.
+        (IBLSSignatureCheckerTypes.QuorumStakeTotals memory stakeTotals,) = $.blsSignatureChecker
+            .checkSignatures(msgHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
+
+        for (uint256 i = 0; i < quorumNumbers.length; i++) {
+            require(
+                stakeTotals.signedStakeForQuorum[i] * THRESHOLD_DENOMINATOR
+                    >= stakeTotals.totalStakeForQuorum[i] * QUORUM_THRESHOLD,
+                InsufficientQuorumThreshold()
+            );
+        }
+
+        _stateChangeHandler(storageUpdates);
+    }
+
     /// @notice Query if a contract implements an interface
-    /// @dev Supports ERC-165 and IGasKillerSDK interface detection
+    /// @dev Supports ERC-165, IGasKillerSDK, and IGasKillerSDKAuth interface detection
     /// @param interfaceId The interface identifier, as specified in ERC-165
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
     function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
-        return interfaceId == type(IERC165).interfaceId || interfaceId == type(IGasKillerSDK).interfaceId;
+        return interfaceId == type(IERC165).interfaceId || interfaceId == type(IGasKillerSDK).interfaceId
+            || interfaceId == type(IGasKillerSDKAuth).interfaceId;
     }
 
     /// @notice Compute the expected message hash for a given transition, function, and storage updates
@@ -105,6 +181,23 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         returns (bytes32)
     {
         return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
+    }
+
+    /// @inheritdoc IGasKillerSDKAuth
+    function getSignedMessageHash(
+        uint256 transitionIndex,
+        address signer,
+        uint256 value,
+        uint256 nonce,
+        bytes calldata callData,
+        bytes calldata storageUpdates
+    ) public view returns (bytes32) {
+        return sha256(abi.encode(transitionIndex, address(this), signer, value, nonce, callData, storageUpdates));
+    }
+
+    /// @inheritdoc IGasKillerSDKAuth
+    function isNonceUsed(address signer, uint256 nonce) external view returns (bool) {
+        return _getGasKillerSDKStorage().usedNonce[signer][nonce];
     }
 
     /// @notice Return the configured AVS service manager address

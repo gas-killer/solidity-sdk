@@ -379,6 +379,157 @@ library BN254 {
     }
 }
 
+// src/Eip1559TxLib.sol
+
+/// @title Eip1559TxLib
+/// @notice Reconstructs the signing hash of an EIP-1559 (type 0x02) Ethereum transaction from its
+///         semantic fields and recovers the sender from the signature — entirely on-chain.
+/// @dev This is what makes Gas Killer's `msg.sender` attribution trustless. The Gas Killer RPC
+///      ingress accepts a user's ordinary signed transaction and turns it into an off-chain
+///      compute task; operators attest to the resulting storage diff. Without this library the
+///      chain would have to *trust the operators* about who the sender was. With it, the settlement
+///      contract independently reconstructs the exact preimage the user's wallet signed and runs
+///      `ecrecover`, so the sender is bound to the executed call cryptographically, not by
+///      attestation.
+///
+///      Scope: EIP-1559 transactions with an **empty access list** only — the shape every wallet
+///      produces when pointed at an RPC (MetaMask, viem, ethers, `cast`). A transaction that
+///      carried an access list, or a legacy/2930/blob/set-code type, simply recovers a different
+///      address here and fails the caller's signer check; it can never be silently mis-attributed.
+///      Legacy and 2930 support can be added as sibling functions later.
+///
+///      The signing hash for a type-2 transaction is:
+///
+///          keccak256( 0x02 ‖ rlp([ chainId, nonce, maxPriorityFeePerGas, maxFeePerGas,
+///                                  gasLimit, to, value, data, accessList ]) )
+///
+///      with `accessList` the empty list (RLP `0xc0`). `ecrecover` then uses `v = 27 + yParity`.
+library Eip1559TxLib {
+    /// @notice Recovers the signer of an EIP-1559 transaction with an empty access list.
+    /// @param chainId The EIP-155 chain id the transaction was signed for
+    /// @param nonce The sender's transaction nonce
+    /// @param maxPriorityFeePerGas The type-2 priority fee
+    /// @param maxFeePerGas The type-2 max fee
+    /// @param gasLimit The gas limit
+    /// @param to The transaction target (`address(this)` for a Gas Killer task)
+    /// @param value The wei value
+    /// @param data The transaction calldata
+    /// @param yParity The signature's y-parity (0 or 1)
+    /// @param r The signature `r`
+    /// @param s The signature `s`
+    /// @return signer The recovered address (`address(0)` if recovery fails)
+    /// @return sigHash The reconstructed signing hash
+    function recoverSigner(
+        uint256 chainId,
+        uint256 nonce,
+        uint256 maxPriorityFeePerGas,
+        uint256 maxFeePerGas,
+        uint256 gasLimit,
+        address to,
+        uint256 value,
+        bytes memory data,
+        uint8 yParity,
+        bytes32 r,
+        bytes32 s
+    ) internal pure returns (address signer, bytes32 sigHash) {
+        sigHash = sigHashOf(chainId, nonce, maxPriorityFeePerGas, maxFeePerGas, gasLimit, to, value, data);
+        // yParity is 0/1 for typed transactions; ecrecover wants 27/28.
+        signer = ecrecover(sigHash, 27 + yParity, r, s);
+    }
+
+    /// @notice Computes the EIP-1559 (empty access list) signing hash for the given fields.
+    function sigHashOf(
+        uint256 chainId,
+        uint256 nonce,
+        uint256 maxPriorityFeePerGas,
+        uint256 maxFeePerGas,
+        uint256 gasLimit,
+        address to,
+        uint256 value,
+        bytes memory data
+    ) internal pure returns (bytes32) {
+        // The RLP list payload: nine items, the last being the empty access list (0xc0).
+        bytes memory payload = abi.encodePacked(
+            _rlpUint(chainId),
+            _rlpUint(nonce),
+            _rlpUint(maxPriorityFeePerGas),
+            _rlpUint(maxFeePerGas),
+            _rlpUint(gasLimit),
+            _rlpAddress(to),
+            _rlpUint(value),
+            _rlpBytes(data),
+            bytes1(0xc0) // empty access list
+        );
+        // 0x02 transaction-type envelope prepended to the RLP-encoded list.
+        return keccak256(abi.encodePacked(bytes1(0x02), _rlpList(payload)));
+    }
+
+    // -- minimal RLP encoders --------------------------------------------------------------------
+
+    /// @notice RLP-encodes a scalar as a canonical big-endian byte string (no leading zeros).
+    /// @dev `0` encodes as the empty string `0x80`; a single byte in `[0x00, 0x7f]` encodes as
+    ///      itself; otherwise a `0x80 + length` prefix precedes the trimmed bytes. A uint256 is at
+    ///      most 32 bytes, so the string-length branch (< 56 bytes) always applies.
+    function _rlpUint(uint256 value) private pure returns (bytes memory) {
+        if (value == 0) {
+            return hex"80";
+        }
+        bytes memory trimmed = _trim(value);
+        if (trimmed.length == 1 && uint8(trimmed[0]) < 0x80) {
+            return trimmed;
+        }
+        return abi.encodePacked(bytes1(uint8(0x80 + trimmed.length)), trimmed);
+    }
+
+    /// @notice RLP-encodes a 20-byte address as a fixed-length string (`0x94 ‖ address`).
+    /// @dev An address is a 20-byte string; the RLP prefix for a 20-byte (< 56) string is
+    ///      `0x80 + 20 = 0x94`. Addresses are never zero-trimmed — the zero address is 20 zero
+    ///      bytes, matching how transaction encoders treat the `to` field.
+    function _rlpAddress(address value) private pure returns (bytes memory) {
+        return abi.encodePacked(bytes1(0x94), bytes20(value));
+    }
+
+    /// @notice RLP-encodes an arbitrary byte string (the transaction `data`).
+    function _rlpBytes(bytes memory value) private pure returns (bytes memory) {
+        uint256 len = value.length;
+        if (len == 1 && uint8(value[0]) < 0x80) {
+            return value;
+        }
+        return abi.encodePacked(_rlpLengthPrefix(0x80, 0xb7, len), value);
+    }
+
+    /// @notice Wraps an already-encoded RLP payload in a list header.
+    function _rlpList(bytes memory payload) private pure returns (bytes memory) {
+        return abi.encodePacked(_rlpLengthPrefix(0xc0, 0xf7, payload.length), payload);
+    }
+
+    /// @notice Builds an RLP length prefix for a string (`shortBase` 0x80 / `longBase` 0xb7) or a
+    ///         list (`0xc0` / `0xf7`). Short form for lengths < 56, long form otherwise.
+    function _rlpLengthPrefix(uint8 shortBase, uint8 longBase, uint256 len) private pure returns (bytes memory) {
+        if (len < 56) {
+            return abi.encodePacked(bytes1(uint8(shortBase + len)));
+        }
+        bytes memory lenBytes = _trim(len);
+        return abi.encodePacked(bytes1(uint8(longBase + lenBytes.length)), lenBytes);
+    }
+
+    /// @notice Returns the minimal big-endian byte representation of `value` (no leading zeros).
+    /// @dev `value` is assumed non-zero; callers handle zero separately.
+    function _trim(uint256 value) private pure returns (bytes memory) {
+        uint256 length = 0;
+        uint256 temp = value;
+        while (temp != 0) {
+            length++;
+            temp >>= 8;
+        }
+        bytes memory out = new bytes(length);
+        for (uint256 i = 0; i < length; i++) {
+            out[length - 1 - i] = bytes1(uint8(value >> (8 * i)));
+        }
+        return out;
+    }
+}
+
 // lib/eigenlayer-middleware/lib/eigenlayer-contracts/src/contracts/interfaces/IAVSRegistrar.sol
 
 interface IAVSRegistrar {
@@ -5521,6 +5672,105 @@ interface IBLSSignatureChecker is IBLSSignatureCheckerErrors, IBLSSignatureCheck
     ) external view returns (bool pairingSuccessful, bool siganatureIsValid);
 }
 
+// src/interface/IGasKillerSDKAuth.sol
+
+/// @title IGasKillerSDKAuth
+/// @notice Sender-authenticated, replay-protected settlement for Gas Killer tasks that originate
+///         from a user's ordinary signed transaction (the Gas Killer JSON-RPC ingress).
+/// @dev Kept separate from {IGasKillerSDK} so adding this capability does not change
+///      `type(IGasKillerSDK).interfaceId`, which existing deployments and off-chain ERC-165 checks
+///      depend on. A contract implementing this advertises it via `supportsInterface`.
+///
+///      Where the permissionless `verifyAndUpdate` path attributes nothing on-chain and trusts the
+///      operator set for the sender used in simulation, this path reconstructs the exact EIP-1559
+///      signing hash of the user's transaction and runs `ecrecover` in the contract, so the
+///      executed call is cryptographically bound to the account that signed it — no trust in the
+///      operators for *who* the sender was. Correctness of the storage diff itself remains the
+///      operators' attested claim (the contract does not re-execute), exactly as before.
+interface IGasKillerSDKAuth {
+    /// @notice Thrown when the same `(signer, nonce)` pair is settled twice.
+    error ReplayedTransaction();
+
+    /// @notice Thrown when the transaction signature does not recover a valid signer
+    ///         (`ecrecover` returned the zero address).
+    error InvalidTransactionSignature();
+
+    /// @notice The authenticating fields of a user's EIP-1559 transaction.
+    /// @dev `chainId` and `to` are intentionally omitted: they are fixed on-chain to
+    ///      `block.chainid` and `address(this)`, so a signature is only ever valid for the chain
+    ///      and contract it was actually signed against — settling it elsewhere recovers a
+    ///      different address and fails. Only empty-access-list type-2 transactions are supported.
+    struct SignedTx {
+        /// @notice The signer's transaction nonce (also the replay key).
+        uint256 nonce;
+        /// @notice EIP-1559 `maxPriorityFeePerGas` (part of the signed preimage).
+        uint256 maxPriorityFeePerGas;
+        /// @notice EIP-1559 `maxFeePerGas` (part of the signed preimage).
+        uint256 maxFeePerGas;
+        /// @notice Transaction gas limit (part of the signed preimage).
+        uint256 gasLimit;
+        /// @notice Wei value; becomes `msg.value` in the operators' simulation.
+        uint256 value;
+        /// @notice Transaction calldata; the call the operators simulated.
+        bytes callData;
+        /// @notice Signature y-parity (0 or 1).
+        uint8 yParity;
+        /// @notice Signature `r`.
+        bytes32 r;
+        /// @notice Signature `s`.
+        bytes32 s;
+    }
+
+    /// @notice Verify BLS quorum signatures for a sender-authenticated task and apply its state
+    ///         updates, then mark the sender's nonce as spent.
+    /// @dev Reconstructs the EIP-1559 signing hash from `userTx` (with `chainId = block.chainid`
+    ///      and `to = address(this)`), recovers `signer`, requires the operator-signed `msgHash`
+    ///      to equal `getSignedMessageHash(transitionIndex, signer, value, nonce, callData,
+    ///      storageUpdates)` — binding the attested diff to exactly the call `signer` authorized —
+    ///      and rejects a reused `(signer, nonce)`.
+    /// @param msgHash The operator-signed message hash
+    /// @param quorumNumbers The quorum numbers to check signatures for
+    /// @param referenceBlockNumber The block number to use as reference for the operator set
+    /// @param storageUpdates The ABI-encoded storage updates
+    /// @param transitionIndex The transition index
+    /// @param userTx The user's signed EIP-1559 transaction fields
+    /// @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
+    function verifyAndUpdateWithAuth(
+        bytes32 msgHash,
+        bytes calldata quorumNumbers,
+        uint32 referenceBlockNumber,
+        bytes calldata storageUpdates,
+        uint256 transitionIndex,
+        SignedTx calldata userTx,
+        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
+    ) external;
+
+    /// @notice Compute the expected message hash for a sender-authenticated transition.
+    /// @dev Commits to the full `callData` (not just the selector) and to `signer`, `value`, and
+    ///      `nonce`, so the operators' attestation is inseparable from the exact authorized call.
+    /// @param transitionIndex The transition index
+    /// @param signer The recovered transaction sender
+    /// @param value The transaction value
+    /// @param nonce The transaction nonce
+    /// @param callData The transaction calldata
+    /// @param storageUpdates The ABI-encoded storage updates
+    /// @return The expected SHA-256 hash
+    function getSignedMessageHash(
+        uint256 transitionIndex,
+        address signer,
+        uint256 value,
+        uint256 nonce,
+        bytes calldata callData,
+        bytes calldata storageUpdates
+    ) external view returns (bytes32);
+
+    /// @notice Whether `(signer, nonce)` has already been settled through this contract.
+    /// @param signer The transaction sender
+    /// @param nonce The transaction nonce
+    /// @return `true` if the pair has been spent and can no longer settle
+    function isNonceUsed(address signer, uint256 nonce) external view returns (bool);
+}
+
 // src/interface/IGasKillerSDK.sol
 
 /// @title IGasKillerSDK
@@ -5574,7 +5824,7 @@ interface IGasKillerSDK is IERC165 {
 /// @title GasKillerSDK
 /// @notice Base SDK for implementing Gas Killer functionality in contracts
 /// @dev Inherit from this contract to add Gas Killer capabilities to your contract
-abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
+abstract contract GasKillerSDK is StateTracker, IGasKillerSDK, IGasKillerSDKAuth {
     /// @custom:storage-location erc7201:gaskiller.GasKillerSDK.storage
     struct GasKillerSDKStorage {
         /// @notice Deprecated. Maintained to preserve storage layout. Now derived on read by `namespace()`
@@ -5585,6 +5835,11 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         IBLSSignatureChecker blsSignatureChecker;
         /// @notice Maximum number of blocks a reference block may lag behind the current block
         uint256 blockStaleMeasure;
+        /// @notice Spent `(signer, nonce)` pairs for the sender-authenticated path — the O(1)
+        /// replay guard. Appended to the struct; existing field slots are unchanged. A user's
+        /// transaction nonce is never consumed on-chain (the tx is not broadcast), so this
+        /// mapping is what makes each authenticated settlement single-use.
+        mapping(address signer => mapping(uint256 nonce => bool)) usedNonce;
     }
 
     // keccak256(abi.encode(uint256(keccak256("gaskiller.GasKillerSDK.storage")) - 1)) & ~bytes32(uint256(0xff));
@@ -5646,12 +5901,81 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         _stateChangeHandler(storageUpdates);
     }
 
+    /// @notice Verify BLS quorum signatures for a sender-authenticated task and apply its state
+    ///         updates, then spend the sender's nonce.
+    /// @dev The trustless counterpart to {verifyAndUpdate}: instead of trusting the operator set
+    ///      for the sender used in the off-chain simulation, this reconstructs the exact EIP-1559
+    ///      signing hash of the user's transaction and recovers the sender on-chain, binding the
+    ///      attested storage diff to the call the sender actually authorized. Correctness of the
+    ///      diff itself remains operator-attested, as in {verifyAndUpdate}.
+    /// @inheritdoc IGasKillerSDKAuth
+    function verifyAndUpdateWithAuth(
+        bytes32 msgHash,
+        bytes calldata quorumNumbers,
+        uint32 referenceBlockNumber,
+        bytes calldata storageUpdates,
+        uint256 transitionIndex,
+        SignedTx calldata userTx,
+        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
+    ) external trackState {
+        GasKillerSDKStorage storage $ = _getGasKillerSDKStorage();
+
+        // Same reference-block and ordering guards as the permissionless path.
+        require(referenceBlockNumber < block.number, FutureBlockNumber());
+        require((uint256(referenceBlockNumber) + _getBlockStaleMeasure()) >= block.number, StaleBlockNumber());
+        require(transitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
+
+        // Recover the sender from the user's own signature. chainId and `to` are pinned to this
+        // chain and this contract, so a signature can only ever authorize a call here.
+        (address signer,) = Eip1559TxLib.recoverSigner(
+            block.chainid,
+            userTx.nonce,
+            userTx.maxPriorityFeePerGas,
+            userTx.maxFeePerGas,
+            userTx.gasLimit,
+            address(this),
+            userTx.value,
+            userTx.callData,
+            userTx.yParity,
+            userTx.r,
+            userTx.s
+        );
+        require(signer != address(0), InvalidTransactionSignature());
+
+        // Bind the operators' attestation to exactly this authorized call: the signed hash commits
+        // to the recovered signer, value, nonce, and full calldata. A relayer cannot pair the
+        // user's signature with a diff computed for a different call — the hashes would not match.
+        bytes32 expectedHash =
+            getSignedMessageHash(transitionIndex, signer, userTx.value, userTx.nonce, userTx.callData, storageUpdates);
+        require(expectedHash == msgHash, InvalidSignature());
+
+        // O(1) replay protection. The transaction nonce is never consumed on-chain (the tx is
+        // never broadcast), so this mapping is the single-use guard.
+        require(!$.usedNonce[signer][userTx.nonce], ReplayedTransaction());
+        $.usedNonce[signer][userTx.nonce] = true;
+
+        // Verify the operator signatures over msgHash.
+        (IBLSSignatureCheckerTypes.QuorumStakeTotals memory stakeTotals,) = $.blsSignatureChecker
+            .checkSignatures(msgHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
+
+        for (uint256 i = 0; i < quorumNumbers.length; i++) {
+            require(
+                stakeTotals.signedStakeForQuorum[i] * THRESHOLD_DENOMINATOR
+                    >= stakeTotals.totalStakeForQuorum[i] * QUORUM_THRESHOLD,
+                InsufficientQuorumThreshold()
+            );
+        }
+
+        _stateChangeHandler(storageUpdates);
+    }
+
     /// @notice Query if a contract implements an interface
-    /// @dev Supports ERC-165 and IGasKillerSDK interface detection
+    /// @dev Supports ERC-165, IGasKillerSDK, and IGasKillerSDKAuth interface detection
     /// @param interfaceId The interface identifier, as specified in ERC-165
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
     function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
-        return interfaceId == type(IERC165).interfaceId || interfaceId == type(IGasKillerSDK).interfaceId;
+        return interfaceId == type(IERC165).interfaceId || interfaceId == type(IGasKillerSDK).interfaceId
+            || interfaceId == type(IGasKillerSDKAuth).interfaceId;
     }
 
     /// @notice Compute the expected message hash for a given transition, function, and storage updates
@@ -5665,6 +5989,23 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         returns (bytes32)
     {
         return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
+    }
+
+    /// @inheritdoc IGasKillerSDKAuth
+    function getSignedMessageHash(
+        uint256 transitionIndex,
+        address signer,
+        uint256 value,
+        uint256 nonce,
+        bytes calldata callData,
+        bytes calldata storageUpdates
+    ) public view returns (bytes32) {
+        return sha256(abi.encode(transitionIndex, address(this), signer, value, nonce, callData, storageUpdates));
+    }
+
+    /// @inheritdoc IGasKillerSDKAuth
+    function isNonceUsed(address signer, uint256 nonce) external view returns (bool) {
+        return _getGasKillerSDKStorage().usedNonce[signer][nonce];
     }
 
     /// @notice Return the configured AVS service manager address

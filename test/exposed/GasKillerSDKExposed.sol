@@ -9,6 +9,13 @@ contract GasKillerSDKExposed is GasKillerSDK {
         _setBlsSignatureChecker(_blsSignatureChecker);
     }
 
+    /// @dev Sets the same state the constructor would, for use after `vm.etch` places this code at
+    /// a chosen address (etch copies code, not constructor-initialised storage). Test-only.
+    function init(address _avsAddress, address _blsSignatureChecker) external {
+        _setAvsAddress(_avsAddress);
+        _setBlsSignatureChecker(_blsSignatureChecker);
+    }
+
     function stateChangeHandlerExternal(bytes calldata storageUpdates) external {
         super._stateChangeHandler(storageUpdates);
     }
