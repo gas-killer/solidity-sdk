@@ -26,8 +26,9 @@ differ only in how an operator quorum's approval is verified on-chain:
 
 ## Chain requirements
 
-`TransitionGuard` (used by the Schnorr scheme's `verifyAndUpdate`/`verifyAndUpdateBatch`,
-see `src/TransitionGuard.sol`) is a reentrancy/in-transition guard built on EIP-1153
+`TransitionGuard` (used by the base `GasKillerSDK.verifyAndUpdate` and the Schnorr scheme's
+`verifyAndUpdate`/`verifyAndUpdateBatch`, see `src/TransitionGuard.sol`) is a
+reentrancy/in-transition guard built on EIP-1153
 transient storage, and has no fallback path for a pre-Cancun EVM — deploying it to a chain
 without EIP-1153 breaks settlement itself, not just the guard. `foundry.toml` pins
 `evm_version = "cancun"` accordingly. Ethereum mainnet has supported EIP-1153 since Dencun;
