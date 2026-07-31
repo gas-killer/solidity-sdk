@@ -45,8 +45,16 @@ interface ISchnorrGasKillerSDKBatch {
     ///      submission settled standalone would revert the whole batch); an index gap or
     ///      any failing applied sub-transition reverts the whole batch. The in-transition
     ///      latch is held across the entire batch.
+    ///
+    ///      Payable, on the same terms as `ISchnorrGasKillerSDK.verifyAndUpdate`, with one
+    ///      batch-specific wrinkle: `msg.value` tops up the contract's balance **once for the
+    ///      whole batch** and is pooled across every applied sub-transition rather than
+    ///      partitioned per submission. Batch assemblers must therefore send the *sum* of
+    ///      what the applied submissions spend; the batch is atomic, so a shortfall anywhere
+    ///      reverts all of it. A skipped (already-settled) submission spends nothing, so a
+    ///      front-run leaves its share unspent — and unspent value is not refunded.
     /// @param submissions The transitions to apply, in order.
-    function verifyAndUpdateBatch(SchnorrTaskSubmission[] calldata submissions) external;
+    function verifyAndUpdateBatch(SchnorrTaskSubmission[] calldata submissions) external payable;
 
     /// @notice True while a state transition (or batch) is being applied — external
     ///         readers should treat mid-transition state as unsigned and fail closed.
