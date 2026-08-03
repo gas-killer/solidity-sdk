@@ -179,9 +179,7 @@ contract SchnorrNonceRegistry is ISchnorrNonceRegistry {
         returns (bytes32)
     {
         return keccak256(
-            abi.encodePacked(
-                BATCH_TAG, block.chainid, address(this), operatorId, batchIndex, startSlot, count, root
-            )
+            abi.encodePacked(BATCH_TAG, block.chainid, address(this), operatorId, batchIndex, startSlot, count, root)
         );
     }
 
@@ -213,11 +211,9 @@ contract SchnorrNonceRegistry is ISchnorrNonceRegistry {
         uint64 startSlot = _coverage(list);
         if (startSlot > type(uint64).max - count) revert CoverageOverflow();
 
-        if (
-            !SchnorrVerify.verify(
+        if (!SchnorrVerify.verify(
                 x, uint8(y & 1), batchMessage(operatorId, batchIndex, startSlot, count, root), sigS, sigR
-            )
-        ) {
+            )) {
             revert InvalidRegistrationSignature();
         }
 
