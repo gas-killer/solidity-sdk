@@ -356,11 +356,11 @@ contract GasKillerSlasherTest is Test {
         assertEq(address(slasher.INSTANT_SLASHER()), address(instantSlasher));
         assertEq(address(slasher.ALLOCATION_MANAGER()), address(allocationManager));
         assertEq(slasher.AVS(), avs);
-        assertEq(slasher.PROGRAM_V_KEY(), PROGRAM_VKEY);
         assertTrue(slasher.acceptedChainConfigHash(CHAIN_CONFIG_HASH));
         assertEq(slasher.owner(), address(this));
-        assertEq(slasher.CHALLENGE_WINDOW(), CHALLENGE_WINDOW);
         assertEq(slasher.OPERATOR_SET_ID(), OPERATOR_SET_ID);
+        // The challenge window and program key are read through the interface, which is their
+        // only external accessor.
         assertEq(slasher.challengeWindow(), CHALLENGE_WINDOW);
         assertEq(slasher.programVKey(), PROGRAM_VKEY);
     }

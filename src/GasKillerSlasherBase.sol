@@ -51,10 +51,13 @@ abstract contract GasKillerSlasherBase is IGasKillerSlasher, Ownable {
     IHeliosLightClient public immutable HELIOS;
 
     /// @notice The SP1 verification key of the Gas Killer challenger program
-    bytes32 public immutable PROGRAM_V_KEY;
+    /// @dev Internal: `programVKey()` is the external accessor, so the interface stays the single
+    ///      documented surface rather than shipping two getters for one value.
+    bytes32 internal immutable PROGRAM_V_KEY;
 
     /// @notice The challenge window duration in seconds
-    uint256 public immutable CHALLENGE_WINDOW;
+    /// @dev Internal for the same reason as [`PROGRAM_V_KEY`]; read it via `challengeWindow()`.
+    uint256 internal immutable CHALLENGE_WINDOW;
 
     // ============ Storage ============
 
@@ -78,7 +81,12 @@ abstract contract GasKillerSlasherBase is IGasKillerSlasher, Ownable {
 
     /// @notice Initialize the scheme-agnostic slasher state
     /// @param _sp1Verifier The SP1 verifier contract address
-    /// @param _helios The Helios light client contract address (0 to rely on recording only)
+    /// @param _helios The Helios light client contract address. Zero deploys a
+    ///        **recording-only** slasher: `recordCommitment` still starts challenge windows, but
+    ///        every `slash` reverts `UnverifiedBlock`, because an anchor hash can only be
+    ///        confirmed against a light client. This is immutable — a slasher deployed with zero
+    ///        can never slash, and enabling slashing later means deploying a new one and
+    ///        re-pointing the SDKs at it.
     /// @param _programVKey The SP1 verification key of the challenger program
     /// @param _chainConfigHash The initial accepted chain config hash of challenger proofs
     ///        (the owner accepts additional hashes as the network hardforks)
@@ -228,6 +236,9 @@ abstract contract GasKillerSlasherBase is IGasKillerSlasher, Ownable {
     }
 
     /// @notice Verify an anchor block hash using the Helios light client
+    /// @dev Fails closed on an unset light client: without one there is no way to establish that
+    ///      the anchor is a real block on this chain, and accepting an unverifiable anchor would
+    ///      let a challenger slash against a fabricated execution context.
     /// @param anchorHash The block hash to verify
     function _verifyAnchorHash(bytes32 anchorHash) internal view {
         if (address(HELIOS) != address(0) && HELIOS.isBlockHashValid(anchorHash)) {
