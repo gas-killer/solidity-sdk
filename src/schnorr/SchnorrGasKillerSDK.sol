@@ -28,6 +28,10 @@ import {IGasKillerSlasher} from "../interface/IGasKillerSlasher.sol";
 ///      `verifyAndUpdate` with the *next* transition's valid signature would otherwise
 ///      interleave two signed transitions. The same transient flag is queryable as
 ///      `inTransition()` so external readers can reject mid-transition state.
+///
+///      Both entrypoints are also `payable`, so a caller can fund value-bearing state
+///      updates out of `msg.value` — see the per-function docs for the funding rules, which
+///      mirror the BLS `GasKillerSDK.verifyAndUpdate`.
 abstract contract SchnorrGasKillerSDK is
     StateTracker,
     TransitionGuard,
@@ -56,6 +60,15 @@ abstract contract SchnorrGasKillerSDK is
     error BlockStaleMeasureOverflow();
 
     /// @notice Verify an aggregate Schnorr quorum signature and apply the state updates.
+    /// @dev Payable so a caller can fund value-bearing `CALL`/`CREATE`/`CREATE2` state updates
+    ///      out of `msg.value`. The value each update moves is fixed inside the quorum-signed
+    ///      `storageUpdates`, so `msg.value` only tops up this contract's balance — it cannot
+    ///      redirect value anywhere the quorum did not sign. Under-funding reverts the whole
+    ///      transition (`RevertingContext` for a CALL, `DeploymentFailed` for a CREATE/CREATE2).
+    ///      Over-funding is NOT refunded: whatever the updates do not consume simply stays in
+    ///      this contract. Inheriting contracts whose callers may over-send must provide their
+    ///      own recovery path (e.g. a withdrawal function, or a refund executed as a signed
+    ///      CALL update in a later transition).
     /// @param msgHash             the task digest (recomputed and checked below).
     /// @param referenceBlockNumber block at which stake/keys are evaluated by the registry.
     /// @param storageUpdates      ABI-encoded `(StateUpdateType[], bytes[])`.
@@ -77,7 +90,7 @@ abstract contract SchnorrGasKillerSDK is
         uint256 s,
         address Raddr,
         address[] calldata nonSigners
-    ) external guardTransition {
+    ) external payable guardTransition {
         _verifyAndUpdateOne(
             msgHash,
             referenceBlockNumber,
@@ -115,8 +128,16 @@ abstract contract SchnorrGasKillerSDK is
     ///      sub-transition can therefore starve every later one in the same batch, reverting
     ///      the whole (atomic) batch — no partial-state hazard, but it does nullify the
     ///      amortization this function exists for.
+    ///
+    ///      Payable on the same terms as `verifyAndUpdate`, with one batch-specific wrinkle:
+    ///      `msg.value` tops up this contract's balance **once for the whole batch** and is
+    ///      pooled across every applied sub-transition rather than partitioned per submission.
+    ///      Assemblers must send the *sum* of what the applied submissions spend; since the
+    ///      batch is atomic, a shortfall anywhere reverts all of it. A skipped (already-settled)
+    ///      submission spends nothing, so a front-run leaves its share unspent — and, as with
+    ///      the standalone entrypoint, unspent value is not refunded.
     /// @param submissions The transitions to apply, in order of ascending transition index.
-    function verifyAndUpdateBatch(SchnorrTaskSubmission[] calldata submissions) external guardTransition {
+    function verifyAndUpdateBatch(SchnorrTaskSubmission[] calldata submissions) external payable guardTransition {
         uint256 len = submissions.length;
         require(len != 0, EmptyBatch());
         for (uint256 i = 0; i < len; ++i) {

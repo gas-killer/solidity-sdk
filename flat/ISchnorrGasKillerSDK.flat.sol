@@ -27,6 +27,18 @@ interface IERC165 {
 interface ISchnorrGasKillerSDK is IERC165 {
     /// @notice Verify the operators' aggregate Schnorr quorum signature and apply the
     ///         encoded state updates
+    /// @dev Payable so a caller can fund value-bearing `CALL`/`CREATE`/`CREATE2` state updates
+    ///      out of `msg.value`. The value each update moves is fixed inside the quorum-signed
+    ///      `storageUpdates`, so `msg.value` only tops up the contract's balance — it cannot
+    ///      redirect value anywhere the quorum did not sign. Under-funding reverts the whole
+    ///      transition. Over-funding is NOT refunded: whatever the updates do not consume stays
+    ///      in the contract, and recovering it is the responsibility of the inheriting contract
+    ///      (e.g. a withdrawal function, or a refund executed as a signed CALL update in a
+    ///      later transition).
+    ///
+    ///      `payable` does not change the function selector, so
+    ///      `type(ISchnorrGasKillerSDK).interfaceId` — which the router's ERC-165 preflight
+    ///      probes — is unaffected.
     /// @param msgHash The hash of the message to verify (sha256 of the encoded task)
     /// @param referenceBlockNumber The block number at which operator keys and stake
     ///        weights are evaluated by the stake registry
@@ -49,5 +61,5 @@ interface ISchnorrGasKillerSDK is IERC165 {
         uint256 s,
         address Raddr,
         address[] calldata nonSigners
-    ) external;
+    ) external payable;
 }
