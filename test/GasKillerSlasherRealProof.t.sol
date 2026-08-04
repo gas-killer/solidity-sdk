@@ -7,7 +7,7 @@ import {stdJson} from "forge-std/StdJson.sol";
 import {GasKillerBLSSlasher} from "../src/GasKillerBLSSlasher.sol";
 import {IGasKillerSlasher} from "../src/interface/IGasKillerSlasher.sol";
 import {IHeliosLightClient} from "../src/interface/IHeliosLightClient.sol";
-import {SP1Verifier} from "./vendor/sp1/SP1VerifierGroth16.sol";
+import {SP1Verifier} from "@sp1-contracts/v5.0.0/SP1VerifierGroth16.sol";
 import {IBLSSignatureCheckerTypes} from "@eigenlayer-middleware/interfaces/IBLSSignatureChecker.sol";
 import {IAllocationManagerTypes} from "eigenlayer-contracts/src/contracts/interfaces/IAllocationManager.sol";
 import {IStrategy} from "eigenlayer-contracts/src/contracts/interfaces/IStrategy.sol";
