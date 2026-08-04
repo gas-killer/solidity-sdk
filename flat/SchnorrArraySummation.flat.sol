@@ -1,6 +1,45 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity >=0.6.2 ^0.8.0 ^0.8.27;
 
+// src/CommitmentDigestLib.sol
+
+/// @title CommitmentDigestLib
+/// @notice The Gas Killer commitment digest: the exact bytes operators sign to authorize a state
+///         transition.
+/// @dev One definition, four consumers that must agree byte-for-byte:
+///      - `GasKillerSDK` and `SchnorrGasKillerSDK` reconstruct it to admit a settlement,
+///      - `GasKillerSlasherBase` reconstructs it to identify the commitment being challenged,
+///      - the off-chain operator signer in `gas-killer/service` builds the same preimage in Rust.
+///
+///      Disagreement is silent and total in either direction: a settlement whose digest the
+///      slasher cannot reproduce is unslashable, and operators signing a digest the SDK does not
+///      reconstruct can never reach quorum. The Rust side is pinned by a golden vector and by the
+///      e2e parity check against `getMessageHash`; the three on-chain sites are pinned here, by
+///      construction, and cross-checked in `GasKillerSlashingParity.t.sol`.
+///
+///      `target` is passed explicitly rather than read as `address(this)` because the slasher
+///      computes digests on behalf of the contract that settled them, not itself.
+library CommitmentDigestLib {
+    /// @notice Compute the commitment digest for one state transition
+    /// @param target The Gas Killer contract the transition applies to
+    /// @param transitionIndex The transition index
+    /// @param anchorHash The hash of the block the off-chain execution was anchored to
+    /// @param callerAddress The msg.sender of the original call
+    /// @param contractCalldata The full calldata of the original call
+    /// @param storageUpdates The ABI-encoded storage updates
+    /// @return The SHA-256 digest operators sign
+    function commitmentHash(
+        address target,
+        uint256 transitionIndex,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
+        bytes calldata storageUpdates
+    ) internal pure returns (bytes32) {
+        return sha256(abi.encode(transitionIndex, target, anchorHash, callerAddress, contractCalldata, storageUpdates));
+    }
+}
+
 // lib/forge-std/src/interfaces/IERC165.sol
 
 interface IERC165 {
@@ -758,10 +797,11 @@ abstract contract SchnorrGasKillerSDK is
         require((uint256(referenceBlockNumber) + _getBlockStaleMeasure()) >= block.number, StaleBlockNumber());
 
         require(transitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
-        bytes32 expectedHash = sha256(
-            abi.encode(transitionIndex, address(this), anchorHash, callerAddress, contractCalldata, storageUpdates)
+        require(
+            _computeMessageHash(transitionIndex, anchorHash, callerAddress, contractCalldata, storageUpdates)
+                == msgHash,
+            InvalidSignature()
         );
-        require(expectedHash == msgHash, InvalidSignature());
 
         _verifyQuorum(msgHash, s, Raddr, nonSigners, referenceBlockNumber);
 
@@ -808,7 +848,7 @@ abstract contract SchnorrGasKillerSDK is
     }
 
     /// @notice Compute the expected message hash for a given transition and execution context
-    /// @dev Exact mirror of the ECDSA `GasKillerSDK.getMessageHash` — the digest is
+    /// @dev Exact mirror of the BLS `GasKillerSDK.getMessageHash` — the digest is
     ///      scheme-agnostic, so off-chain parity checks work unchanged.
     /// @param transitionIndex The transition index
     /// @param anchorHash The hash of the block the off-chain execution was anchored to
@@ -823,8 +863,29 @@ abstract contract SchnorrGasKillerSDK is
         bytes calldata contractCalldata,
         bytes calldata storageUpdates
     ) external view returns (bytes32) {
-        return sha256(
-            abi.encode(transitionIndex, address(this), anchorHash, callerAddress, contractCalldata, storageUpdates)
+        return _computeMessageHash(transitionIndex, anchorHash, callerAddress, contractCalldata, storageUpdates);
+    }
+
+    /// @notice The task digest operators sign, binding the execution context to this contract
+    /// @dev Single definition shared by settlement and `getMessageHash`, so the hash a
+    ///      submission is checked against is by construction the one integrators can precompute.
+    ///      Byte-identical to `GasKillerSDK._computeMessageHash`; `GasKillerSlashingParity.t.sol`
+    ///      pins both against the slasher's `computeCommitmentHash`.
+    /// @param transitionIndex The transition index
+    /// @param anchorHash The hash of the block the off-chain execution was anchored to
+    /// @param callerAddress The msg.sender of the original call
+    /// @param contractCalldata The full calldata of the original call
+    /// @param storageUpdates The ABI-encoded storage updates
+    /// @return The expected SHA-256 hash
+    function _computeMessageHash(
+        uint256 transitionIndex,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
+        bytes calldata storageUpdates
+    ) internal view returns (bytes32) {
+        return CommitmentDigestLib.commitmentHash(
+            address(this), transitionIndex, anchorHash, callerAddress, contractCalldata, storageUpdates
         );
     }
 

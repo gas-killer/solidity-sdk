@@ -8,6 +8,7 @@ import {
 import {IERC165} from "forge-std/interfaces/IERC165.sol";
 
 import {BLSQuorumLib} from "./BLSQuorumLib.sol";
+import {CommitmentDigestLib} from "./CommitmentDigestLib.sol";
 import {IGasKillerSDK} from "./interface/IGasKillerSDK.sol";
 import {IGasKillerSlasher} from "./interface/IGasKillerSlasher.sol";
 import {StateTracker} from "./StateTracker.sol";
@@ -216,8 +217,8 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, IGasKillerSDK {
         bytes calldata contractCalldata,
         bytes calldata storageUpdates
     ) internal view returns (bytes32) {
-        return sha256(
-            abi.encode(transitionIndex, address(this), anchorHash, callerAddress, contractCalldata, storageUpdates)
+        return CommitmentDigestLib.commitmentHash(
+            address(this), transitionIndex, anchorHash, callerAddress, contractCalldata, storageUpdates
         );
     }
 

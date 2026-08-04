@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.27;
 
+import {CommitmentDigestLib} from "./CommitmentDigestLib.sol";
 import {IGasKillerSlasher} from "./interface/IGasKillerSlasher.sol";
 import {ISP1Verifier} from "./interface/ISP1Verifier.sol";
 import {IHeliosLightClient} from "./interface/IHeliosLightClient.sol";
@@ -135,15 +136,13 @@ abstract contract GasKillerSlasherBase is IGasKillerSlasher, Ownable {
 
     /// @inheritdoc IGasKillerSlasher
     function computeCommitmentHash(SignedCommitment calldata commitment) public pure returns (bytes32) {
-        return sha256(
-            abi.encode(
-                commitment.transitionIndex,
-                commitment.contractAddress,
-                commitment.anchorHash,
-                commitment.callerAddress,
-                commitment.contractCalldata,
-                commitment.storageUpdates
-            )
+        return CommitmentDigestLib.commitmentHash(
+            commitment.contractAddress,
+            commitment.transitionIndex,
+            commitment.anchorHash,
+            commitment.callerAddress,
+            commitment.contractCalldata,
+            commitment.storageUpdates
         );
     }
 
