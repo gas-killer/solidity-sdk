@@ -6251,23 +6251,32 @@ contract GasKillerBLSSlasher is GasKillerSlasherBase, IGasKillerBLSSlasher {
             nonSignerIds[i] = nonSignerStakesAndSignature.nonSignerPubkeys[i].hashG1Point();
         }
 
-        // Collect operator ids over all quorums, skipping non-signers and duplicates.
+        // Read each quorum's operator list once: the collection loop below needs both its
+        // length (to size the buffer) and its contents.
+        uint256 quorumCount = quorumNumbers.length;
+        bytes32[][] memory operatorIdsPerQuorum = new bytes32[][](quorumCount);
         uint256 totalOperators = 0;
-        for (uint256 q = 0; q < quorumNumbers.length; q++) {
-            totalOperators += INDEX_REGISTRY.getOperatorListAtBlockNumber(uint8(quorumNumbers[q]), referenceBlockNumber)
-            .length;
+        for (uint256 q = 0; q < quorumCount; q++) {
+            operatorIdsPerQuorum[q] =
+                INDEX_REGISTRY.getOperatorListAtBlockNumber(uint8(quorumNumbers[q]), referenceBlockNumber);
+            totalOperators += operatorIdsPerQuorum[q].length;
         }
 
+        // An operator appears at most once in a given quorum's list, so the same id can only
+        // recur across quorums. With a single quorum the dedup scan can never fire, and skipping
+        // it takes the common case from quadratic to linear.
+        bool dedupeAcrossQuorums = quorumCount > 1;
+
+        // Collect operator ids over all quorums, skipping non-signers and duplicates.
         bytes32[] memory signerIds = new bytes32[](totalOperators);
         uint256 signerCount = 0;
-        for (uint256 q = 0; q < quorumNumbers.length; q++) {
-            bytes32[] memory operatorIds =
-                INDEX_REGISTRY.getOperatorListAtBlockNumber(uint8(quorumNumbers[q]), referenceBlockNumber);
+        for (uint256 q = 0; q < quorumCount; q++) {
+            bytes32[] memory operatorIds = operatorIdsPerQuorum[q];
             for (uint256 i = 0; i < operatorIds.length; i++) {
                 if (_contains(nonSignerIds, operatorIds[i], nonSignerCount)) {
                     continue;
                 }
-                if (_contains(signerIds, operatorIds[i], signerCount)) {
+                if (dedupeAcrossQuorums && _contains(signerIds, operatorIds[i], signerCount)) {
                     continue;
                 }
                 signerIds[signerCount++] = operatorIds[i];
