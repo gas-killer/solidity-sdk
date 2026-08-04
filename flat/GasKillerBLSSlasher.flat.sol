@@ -2509,6 +2509,49 @@ library SafeCastUpgradeable {
     }
 }
 
+// lib/openzeppelin-contracts/contracts/utils/math/SignedMath.sol
+
+// OpenZeppelin Contracts (last updated v4.8.0) (utils/math/SignedMath.sol)
+
+/**
+ * @dev Standard signed math utilities missing in the Solidity language.
+ */
+library SignedMath {
+    /**
+     * @dev Returns the largest of two signed numbers.
+     */
+    function max(int256 a, int256 b) internal pure returns (int256) {
+        return a > b ? a : b;
+    }
+
+    /**
+     * @dev Returns the smallest of two signed numbers.
+     */
+    function min(int256 a, int256 b) internal pure returns (int256) {
+        return a < b ? a : b;
+    }
+
+    /**
+     * @dev Returns the average of two signed numbers without overflow.
+     * The result is rounded towards zero.
+     */
+    function average(int256 a, int256 b) internal pure returns (int256) {
+        // Formula from the book "Hacker's Delight"
+        int256 x = (a & b) + ((a ^ b) >> 1);
+        return x + (int256(uint256(x) >> 255) & (a ^ b));
+    }
+
+    /**
+     * @dev Returns the absolute unsigned value of a signed value.
+     */
+    function abs(int256 n) internal pure returns (uint256) {
+        unchecked {
+            // must be unchecked in order to support `n = type(int256).min`
+            return uint256(n >= 0 ? n : -n);
+        }
+    }
+}
+
 // lib/eigenlayer-middleware/src/interfaces/IBLSApkRegistry.sol
 
 interface IBLSApkRegistryErrors {
@@ -3123,6 +3166,88 @@ library SlashingLib {
     ) internal pure returns (uint256) {
         // round up mulDiv so we don't overslash
         return operatorShares - operatorShares.mulDiv(newMaxMagnitude, prevMaxMagnitude, Math.Rounding.Up);
+    }
+}
+
+// lib/openzeppelin-contracts/contracts/utils/Strings.sol
+
+// OpenZeppelin Contracts (last updated v4.9.0) (utils/Strings.sol)
+
+/**
+ * @dev String operations.
+ */
+library Strings {
+    bytes16 private constant _SYMBOLS = "0123456789abcdef";
+    uint8 private constant _ADDRESS_LENGTH = 20;
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` decimal representation.
+     */
+    function toString(uint256 value) internal pure returns (string memory) {
+        unchecked {
+            uint256 length = Math.log10(value) + 1;
+            string memory buffer = new string(length);
+            uint256 ptr;
+            /// @solidity memory-safe-assembly
+            assembly {
+                ptr := add(buffer, add(32, length))
+            }
+            while (true) {
+                ptr--;
+                /// @solidity memory-safe-assembly
+                assembly {
+                    mstore8(ptr, byte(mod(value, 10), _SYMBOLS))
+                }
+                value /= 10;
+                if (value == 0) break;
+            }
+            return buffer;
+        }
+    }
+
+    /**
+     * @dev Converts a `int256` to its ASCII `string` decimal representation.
+     */
+    function toString(int256 value) internal pure returns (string memory) {
+        return string(abi.encodePacked(value < 0 ? "-" : "", toString(SignedMath.abs(value))));
+    }
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` hexadecimal representation.
+     */
+    function toHexString(uint256 value) internal pure returns (string memory) {
+        unchecked {
+            return toHexString(value, Math.log256(value) + 1);
+        }
+    }
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` hexadecimal representation with fixed length.
+     */
+    function toHexString(uint256 value, uint256 length) internal pure returns (string memory) {
+        bytes memory buffer = new bytes(2 * length + 2);
+        buffer[0] = "0";
+        buffer[1] = "x";
+        for (uint256 i = 2 * length + 1; i > 1; --i) {
+            buffer[i] = _SYMBOLS[value & 0xf];
+            value >>= 4;
+        }
+        require(value == 0, "Strings: hex length insufficient");
+        return string(buffer);
+    }
+
+    /**
+     * @dev Converts an `address` with fixed length of 20 bytes to its not checksummed ASCII `string` hexadecimal representation.
+     */
+    function toHexString(address addr) internal pure returns (string memory) {
+        return toHexString(uint256(uint160(addr)), _ADDRESS_LENGTH);
+    }
+
+    /**
+     * @dev Returns true if the two strings are equal.
+     */
+    function equal(string memory a, string memory b) internal pure returns (bool) {
+        return keccak256(bytes(a)) == keccak256(bytes(b));
     }
 }
 
@@ -6177,8 +6302,9 @@ contract GasKillerBLSSlasher is GasKillerSlasherBase, IGasKillerBLSSlasher {
             wadsToSlash[i] = FULL_SLASH_WAD;
         }
 
-        string memory description =
-            string(abi.encodePacked("Gas Killer fraud detected for commitment: ", _bytes32ToHexString(commitmentHash)));
+        string memory description = string.concat(
+            "Gas Killer fraud detected for commitment: ", Strings.toHexString(uint256(commitmentHash), 32)
+        );
 
         for (uint256 i = 0; i < signers.length; i++) {
             if (ALLOCATION_MANAGER.isOperatorSlashable(signers[i], operatorSet)) {
@@ -6193,18 +6319,5 @@ contract GasKillerBLSSlasher is GasKillerSlasherBase, IGasKillerBLSSlasher {
                 INSTANT_SLASHER.fulfillSlashingRequest(slashingParams);
             }
         }
-    }
-
-    /// @notice Convert bytes32 to a 0x-prefixed hex string
-    function _bytes32ToHexString(bytes32 value) internal pure returns (string memory) {
-        bytes memory alphabet = "0123456789abcdef";
-        bytes memory str = new bytes(66);
-        str[0] = "0";
-        str[1] = "x";
-        for (uint256 i = 0; i < 32; i++) {
-            str[2 + i * 2] = alphabet[uint8(value[i] >> 4)];
-            str[3 + i * 2] = alphabet[uint8(value[i] & 0x0f)];
-        }
-        return string(str);
     }
 }

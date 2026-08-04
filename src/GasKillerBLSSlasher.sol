@@ -18,6 +18,7 @@ import {
 } from "eigenlayer-contracts/src/contracts/interfaces/IAllocationManager.sol";
 import {IStrategy} from "eigenlayer-contracts/src/contracts/interfaces/IStrategy.sol";
 import {OperatorSet} from "eigenlayer-contracts/src/contracts/libraries/OperatorSetLib.sol";
+import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 /// @title GasKillerBLSSlasher
 /// @notice Detects fraudulent Gas Killer commitments signed by the BLS AVS and slashes the signers
@@ -200,8 +201,9 @@ contract GasKillerBLSSlasher is GasKillerSlasherBase, IGasKillerBLSSlasher {
             wadsToSlash[i] = FULL_SLASH_WAD;
         }
 
-        string memory description =
-            string(abi.encodePacked("Gas Killer fraud detected for commitment: ", _bytes32ToHexString(commitmentHash)));
+        string memory description = string.concat(
+            "Gas Killer fraud detected for commitment: ", Strings.toHexString(uint256(commitmentHash), 32)
+        );
 
         for (uint256 i = 0; i < signers.length; i++) {
             if (ALLOCATION_MANAGER.isOperatorSlashable(signers[i], operatorSet)) {
@@ -216,18 +218,5 @@ contract GasKillerBLSSlasher is GasKillerSlasherBase, IGasKillerBLSSlasher {
                 INSTANT_SLASHER.fulfillSlashingRequest(slashingParams);
             }
         }
-    }
-
-    /// @notice Convert bytes32 to a 0x-prefixed hex string
-    function _bytes32ToHexString(bytes32 value) internal pure returns (string memory) {
-        bytes memory alphabet = "0123456789abcdef";
-        bytes memory str = new bytes(66);
-        str[0] = "0";
-        str[1] = "x";
-        for (uint256 i = 0; i < 32; i++) {
-            str[2 + i * 2] = alphabet[uint8(value[i] >> 4)];
-            str[3 + i * 2] = alphabet[uint8(value[i] & 0x0f)];
-        }
-        return string(str);
     }
 }
