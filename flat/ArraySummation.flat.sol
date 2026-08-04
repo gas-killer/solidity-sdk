@@ -5741,6 +5741,59 @@ interface IBLSSignatureChecker is IBLSSignatureCheckerErrors, IBLSSignatureCheck
     ) external view returns (bool pairingSuccessful, bool siganatureIsValid);
 }
 
+// src/BLSQuorumLib.sol
+
+/// @title BLSQuorumLib
+/// @notice The BLS quorum admission rule: which aggregate signatures the Gas Killer network
+///         treats as authorizing a state transition.
+/// @dev Shared by `GasKillerSDK.verifyAndUpdate` (which applies a transition) and
+///      `GasKillerBLSSlasher.slash` (which attributes a fraudulent one). These two must agree
+///      exactly. If the slasher accepted a weaker quorum than the SDK, it would slash operators
+///      for a commitment that could never have settled; if it accepted a stronger one, a
+///      commitment that did settle would be unslashable. Keeping the rule — the `checkSignatures`
+///      call, the threshold, and the comparison — in one place makes that agreement structural
+///      rather than a convention two contracts are each expected to honour.
+library BLSQuorumLib {
+    /// @notice Denominator used when evaluating stake percentage thresholds (representing 100%)
+    uint8 internal constant THRESHOLD_DENOMINATOR = 100;
+
+    /// @notice Minimum percentage of quorum stake that must have signed
+    ///         (QUORUM_THRESHOLD/THRESHOLD_DENOMINATOR)
+    uint8 internal constant QUORUM_THRESHOLD = 66;
+
+    /// @notice Thrown when signatories hold less than `QUORUM_THRESHOLD`% of stake for any quorum
+    error InsufficientQuorumThreshold();
+
+    /// @notice Verify an aggregate BLS signature and require the quorum stake threshold on every
+    ///         quorum it covers
+    /// @dev Reverts via `checkSignatures` if the aggregate signature itself is invalid, then
+    ///      requires each quorum's signed stake to meet the threshold.
+    /// @param checker The BLS signature checker to verify against
+    /// @param msgHash The signed message hash
+    /// @param quorumNumbers The quorum numbers the message was signed for
+    /// @param referenceBlockNumber The block number at which the operator set is evaluated
+    /// @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
+    function verifyQuorum(
+        IBLSSignatureChecker checker,
+        bytes32 msgHash,
+        bytes calldata quorumNumbers,
+        uint32 referenceBlockNumber,
+        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
+    ) internal view {
+        (IBLSSignatureCheckerTypes.QuorumStakeTotals memory stakeTotals,) =
+            checker.checkSignatures(msgHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
+
+        uint256 quorumCount = quorumNumbers.length;
+        for (uint256 i = 0; i < quorumCount; ++i) {
+            require(
+                stakeTotals.signedStakeForQuorum[i] * THRESHOLD_DENOMINATOR
+                    >= stakeTotals.totalStakeForQuorum[i] * QUORUM_THRESHOLD,
+                InsufficientQuorumThreshold()
+            );
+        }
+    }
+}
+
 // src/interface/IGasKillerSDK.sol
 
 /// @title IGasKillerSDK
@@ -5832,10 +5885,13 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, IGasKillerSDK {
         0x321ebf629ed2e1e368f0890e8fdd95cf9a2ae5961b66a1805f0b2ec84e21d000;
 
     /// @notice Denominator used when evaluating stake percentage thresholds (representing 100%)
-    uint8 public constant THRESHOLD_DENOMINATOR = 100;
+    /// @dev Exposed for integrators; the value itself lives in `BLSQuorumLib`, which owns the
+    ///      admission rule shared with `GasKillerBLSSlasher`.
+    uint8 public constant THRESHOLD_DENOMINATOR = BLSQuorumLib.THRESHOLD_DENOMINATOR;
 
     /// @notice Minimum percentage of quorum stake that must have signed to approve a state update (QUORUM_THRESHOLD/THRESHOLD_DENOMINATOR)
-    uint8 public constant QUORUM_THRESHOLD = 66;
+    /// @dev See [`THRESHOLD_DENOMINATOR`] on where the value is defined.
+    uint8 public constant QUORUM_THRESHOLD = BLSQuorumLib.QUORUM_THRESHOLD;
 
     /// @notice Default maximum age (in blocks) a reference block is considered valid when none is configured
     uint256 private constant DEFAULT_BLOCK_STALE_MEASURE = 300;
@@ -5897,6 +5953,8 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, IGasKillerSDK {
     }
 
     /// @notice Verify the aggregate BLS signature and require the quorum threshold on every quorum
+    /// @dev Delegates to `BLSQuorumLib` so the admission rule here is the exact one
+    ///      `GasKillerBLSSlasher` re-checks when attributing a fraudulent commitment.
     /// @param msgHash The signed message hash
     /// @param quorumNumbers The quorum numbers to check signatures for
     /// @param referenceBlockNumber The block number to use as reference for operator set
@@ -5906,21 +5964,14 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, IGasKillerSDK {
         bytes calldata quorumNumbers,
         uint32 referenceBlockNumber,
         IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
-    ) internal {
-        // Verify the signatures using checkSignatures
-        (IBLSSignatureCheckerTypes.QuorumStakeTotals memory stakeTotals,) = _getGasKillerSDKStorage()
-            .blsSignatureChecker
-            .checkSignatures(msgHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
-
-        // Check that signatories own at least 66% of each quorum
-        uint256 quorumCount = quorumNumbers.length;
-        for (uint256 i = 0; i < quorumCount; ++i) {
-            require(
-                stakeTotals.signedStakeForQuorum[i] * THRESHOLD_DENOMINATOR
-                    >= stakeTotals.totalStakeForQuorum[i] * QUORUM_THRESHOLD,
-                InsufficientQuorumThreshold()
-            );
-        }
+    ) internal view {
+        BLSQuorumLib.verifyQuorum(
+            _getGasKillerSDKStorage().blsSignatureChecker,
+            msgHash,
+            quorumNumbers,
+            referenceBlockNumber,
+            nonSignerStakesAndSignature
+        );
     }
 
     /// @notice Record an applied commitment with the configured slasher, if any

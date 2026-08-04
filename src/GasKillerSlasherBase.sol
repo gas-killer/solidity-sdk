@@ -35,14 +35,6 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 abstract contract GasKillerSlasherBase is IGasKillerSlasher, Ownable {
     // ============ Constants ============
 
-    /// @notice Denominator used when evaluating stake percentage thresholds (representing 100%)
-    uint8 public constant THRESHOLD_DENOMINATOR = 100;
-
-    /// @notice Minimum percentage of quorum stake that must have signed the commitment
-    /// @dev Matches `GasKillerSDK.QUORUM_THRESHOLD`: a commitment below this threshold could
-    ///      never have been applied on-chain
-    uint8 public constant QUORUM_THRESHOLD = 66;
-
     /// @notice `AnchorType.BlockHash` as committed by the challenger program
     uint8 public constant ANCHOR_TYPE_BLOCK_HASH = 0;
 

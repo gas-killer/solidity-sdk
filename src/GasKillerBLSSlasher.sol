@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.27;
 
+import {BLSQuorumLib} from "./BLSQuorumLib.sol";
 import {GasKillerSlasherBase} from "./GasKillerSlasherBase.sol";
 import {IGasKillerBLSSlasher} from "./interface/IGasKillerBLSSlasher.sol";
 import {
@@ -111,9 +112,13 @@ contract GasKillerBLSSlasher is GasKillerSlasherBase, IGasKillerBLSSlasher {
     ) external {
         bytes32 commitmentHash = _beginSlash(commitment);
 
-        // Verify the aggregate network actually signed this commitment, with the same quorum
-        // threshold `verifyAndUpdate` enforces.
-        _verifyQuorumSignatures(commitmentHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
+        // Verify the aggregate network actually signed this commitment. `BLSQuorumLib` is the
+        // same admission rule `GasKillerSDK.verifyAndUpdate` applies, so a commitment that could
+        // never have settled cannot be used to slash, and one that did settle is always
+        // attributable.
+        BLSQuorumLib.verifyQuorum(
+            BLS_SIGNATURE_CHECKER, commitmentHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature
+        );
 
         // Derive every operator that signed the commitment: all operators registered for the
         // signed quorums at the reference block, minus the declared non-signers.
@@ -124,31 +129,6 @@ contract GasKillerBLSSlasher is GasKillerSlasherBase, IGasKillerBLSSlasher {
     }
 
     // ============ Internal Functions ============
-
-    /// @notice Verify the aggregate BLS signature over the commitment and the quorum threshold
-    /// @dev `checkSignatures` reverts on an invalid aggregate signature; the loop then requires
-    ///      the same 66% stake threshold `GasKillerSDK.verifyAndUpdate` enforces.
-    /// @param commitmentHash The signed commitment hash
-    /// @param quorumNumbers The quorum numbers the commitment was signed for
-    /// @param referenceBlockNumber The reference block used for the operator set
-    /// @param nonSignerStakesAndSignature The aggregate BLS signature and non-signer data
-    function _verifyQuorumSignatures(
-        bytes32 commitmentHash,
-        bytes calldata quorumNumbers,
-        uint32 referenceBlockNumber,
-        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
-    ) internal view {
-        (IBLSSignatureCheckerTypes.QuorumStakeTotals memory stakeTotals,) = BLS_SIGNATURE_CHECKER.checkSignatures(
-            commitmentHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature
-        );
-        for (uint256 i = 0; i < quorumNumbers.length; i++) {
-            require(
-                stakeTotals.signedStakeForQuorum[i] * THRESHOLD_DENOMINATOR
-                    >= stakeTotals.totalStakeForQuorum[i] * QUORUM_THRESHOLD,
-                InsufficientQuorumThreshold()
-            );
-        }
-    }
 
     /// @notice Derive the set of operators that signed: all operators registered for the given
     ///         quorums at the reference block, minus the declared non-signers

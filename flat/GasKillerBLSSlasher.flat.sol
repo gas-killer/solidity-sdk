@@ -3118,14 +3118,6 @@ library SlashingLib {
 abstract contract GasKillerSlasherBase is IGasKillerSlasher, Ownable {
     // ============ Constants ============
 
-    /// @notice Denominator used when evaluating stake percentage thresholds (representing 100%)
-    uint8 public constant THRESHOLD_DENOMINATOR = 100;
-
-    /// @notice Minimum percentage of quorum stake that must have signed the commitment
-    /// @dev Matches `GasKillerSDK.QUORUM_THRESHOLD`: a commitment below this threshold could
-    ///      never have been applied on-chain
-    uint8 public constant QUORUM_THRESHOLD = 66;
-
     /// @notice `AnchorType.BlockHash` as committed by the challenger program
     uint8 public constant ANCHOR_TYPE_BLOCK_HASH = 0;
 
@@ -5882,6 +5874,59 @@ interface IBLSSignatureChecker is IBLSSignatureCheckerErrors, IBLSSignatureCheck
     ) external view returns (bool pairingSuccessful, bool siganatureIsValid);
 }
 
+// src/BLSQuorumLib.sol
+
+/// @title BLSQuorumLib
+/// @notice The BLS quorum admission rule: which aggregate signatures the Gas Killer network
+///         treats as authorizing a state transition.
+/// @dev Shared by `GasKillerSDK.verifyAndUpdate` (which applies a transition) and
+///      `GasKillerBLSSlasher.slash` (which attributes a fraudulent one). These two must agree
+///      exactly. If the slasher accepted a weaker quorum than the SDK, it would slash operators
+///      for a commitment that could never have settled; if it accepted a stronger one, a
+///      commitment that did settle would be unslashable. Keeping the rule — the `checkSignatures`
+///      call, the threshold, and the comparison — in one place makes that agreement structural
+///      rather than a convention two contracts are each expected to honour.
+library BLSQuorumLib {
+    /// @notice Denominator used when evaluating stake percentage thresholds (representing 100%)
+    uint8 internal constant THRESHOLD_DENOMINATOR = 100;
+
+    /// @notice Minimum percentage of quorum stake that must have signed
+    ///         (QUORUM_THRESHOLD/THRESHOLD_DENOMINATOR)
+    uint8 internal constant QUORUM_THRESHOLD = 66;
+
+    /// @notice Thrown when signatories hold less than `QUORUM_THRESHOLD`% of stake for any quorum
+    error InsufficientQuorumThreshold();
+
+    /// @notice Verify an aggregate BLS signature and require the quorum stake threshold on every
+    ///         quorum it covers
+    /// @dev Reverts via `checkSignatures` if the aggregate signature itself is invalid, then
+    ///      requires each quorum's signed stake to meet the threshold.
+    /// @param checker The BLS signature checker to verify against
+    /// @param msgHash The signed message hash
+    /// @param quorumNumbers The quorum numbers the message was signed for
+    /// @param referenceBlockNumber The block number at which the operator set is evaluated
+    /// @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
+    function verifyQuorum(
+        IBLSSignatureChecker checker,
+        bytes32 msgHash,
+        bytes calldata quorumNumbers,
+        uint32 referenceBlockNumber,
+        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
+    ) internal view {
+        (IBLSSignatureCheckerTypes.QuorumStakeTotals memory stakeTotals,) =
+            checker.checkSignatures(msgHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
+
+        uint256 quorumCount = quorumNumbers.length;
+        for (uint256 i = 0; i < quorumCount; ++i) {
+            require(
+                stakeTotals.signedStakeForQuorum[i] * THRESHOLD_DENOMINATOR
+                    >= stakeTotals.totalStakeForQuorum[i] * QUORUM_THRESHOLD,
+                InsufficientQuorumThreshold()
+            );
+        }
+    }
+}
+
 // src/interface/IGasKillerBLSSlasher.sol
 
 /// @title IGasKillerBLSSlasher
@@ -6007,9 +6052,13 @@ contract GasKillerBLSSlasher is GasKillerSlasherBase, IGasKillerBLSSlasher {
     ) external {
         bytes32 commitmentHash = _beginSlash(commitment);
 
-        // Verify the aggregate network actually signed this commitment, with the same quorum
-        // threshold `verifyAndUpdate` enforces.
-        _verifyQuorumSignatures(commitmentHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
+        // Verify the aggregate network actually signed this commitment. `BLSQuorumLib` is the
+        // same admission rule `GasKillerSDK.verifyAndUpdate` applies, so a commitment that could
+        // never have settled cannot be used to slash, and one that did settle is always
+        // attributable.
+        BLSQuorumLib.verifyQuorum(
+            BLS_SIGNATURE_CHECKER, commitmentHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature
+        );
 
         // Derive every operator that signed the commitment: all operators registered for the
         // signed quorums at the reference block, minus the declared non-signers.
@@ -6020,31 +6069,6 @@ contract GasKillerBLSSlasher is GasKillerSlasherBase, IGasKillerBLSSlasher {
     }
 
     // ============ Internal Functions ============
-
-    /// @notice Verify the aggregate BLS signature over the commitment and the quorum threshold
-    /// @dev `checkSignatures` reverts on an invalid aggregate signature; the loop then requires
-    ///      the same 66% stake threshold `GasKillerSDK.verifyAndUpdate` enforces.
-    /// @param commitmentHash The signed commitment hash
-    /// @param quorumNumbers The quorum numbers the commitment was signed for
-    /// @param referenceBlockNumber The reference block used for the operator set
-    /// @param nonSignerStakesAndSignature The aggregate BLS signature and non-signer data
-    function _verifyQuorumSignatures(
-        bytes32 commitmentHash,
-        bytes calldata quorumNumbers,
-        uint32 referenceBlockNumber,
-        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
-    ) internal view {
-        (IBLSSignatureCheckerTypes.QuorumStakeTotals memory stakeTotals,) = BLS_SIGNATURE_CHECKER.checkSignatures(
-            commitmentHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature
-        );
-        for (uint256 i = 0; i < quorumNumbers.length; i++) {
-            require(
-                stakeTotals.signedStakeForQuorum[i] * THRESHOLD_DENOMINATOR
-                    >= stakeTotals.totalStakeForQuorum[i] * QUORUM_THRESHOLD,
-                InsufficientQuorumThreshold()
-            );
-        }
-    }
 
     /// @notice Derive the set of operators that signed: all operators registered for the given
     ///         quorums at the reference block, minus the declared non-signers
