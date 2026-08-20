@@ -1,6 +1,66 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.27;
 
+// src/commitments/interfaces/ICommitmentsMinimal.sol
+
+// Minimal vendored surfaces of the Commitments protocol (AInima-Collective/commitments,
+// MIT). Signatures are copied verbatim from the upstream interfaces so the SDK does not
+// take the whole repo as a build dependency; integration tests pin the real contracts.
+// Upstream sources:
+//   src/core/interfaces/ICommitmentManager.sol
+//   src/extensions/services/interfaces/IOperatorRegistry.sol
+//   src/shared/arbitration/interfaces/IArbiter.sol
+
+/// @notice The forfeit surface of the Commitments `CommitmentManager` an arbiter drives.
+///         Forfeiture is two-phase: `initiateForfeit` (arbiter-only) opens a proposal,
+///         the commitment's challenge window (>= 1 day) elapses, then `executeForfeit`
+///         is permissionless.
+interface ICommitmentManagerMinimal {
+    function initiateForfeit(uint256 commitmentId, uint16 penaltyBps) external;
+    function cancelForfeit(uint256 commitmentId) external;
+    function executeForfeit(uint256 commitmentId) external;
+}
+
+/// @notice The read surface of the Commitments `OperatorRegistry` the Gas Killer
+///         adapter and arbiter consume. Operator identity is an address; stake is the
+///         aggregate of live commitments (self-stake + delegations) naming the registry
+///         as counterparty.
+interface IOperatorRegistryMinimal {
+    function isOperator(address operator) external view returns (bool);
+    function getOperatorStake(address operator) external view returns (uint256);
+    function minOperatorStake() external view returns (uint256);
+    /// @notice The operator a tracked commitment supports (covers both an operator's
+    ///         self-stake and delegations to it); `address(0)` for untracked ids.
+    function operatorForCommitment(uint256 commitmentId) external view returns (address);
+}
+
+/// @notice Capability interface for contracts named as the `arbiter` on a commitment
+///         (verbatim from upstream `IArbiter`; ERC-165 id is the xor of the three
+///         selectors below). The manager authenticates arbiters purely by `msg.sender`
+///         equality — this surface exists so counterparties can introspect an arbiter
+///         before opting in.
+interface IArbiter {
+    function commitmentManager() external view returns (address);
+    function arbiterCapabilities() external view returns (uint256);
+    function arbiterMetadataURI() external view returns (string memory);
+    function supportsInterface(bytes4 interfaceId) external view returns (bool);
+}
+
+/// @notice Named bits for `IArbiter.arbiterCapabilities()` (upstream
+///         `ArbiterCapabilities`; bits are stable and append-only).
+library ArbiterCapabilities {
+    uint256 internal constant INITIATE_FORFEIT = 1 << 0;
+    uint256 internal constant CANCEL_FORFEIT = 1 << 1;
+    uint256 internal constant RELEASE_COMMITMENT = 1 << 2;
+}
+
+/// @notice Succinct SP1 verifier gateway surface (reverts on invalid proofs).
+interface ISP1Verifier {
+    function verifyProof(bytes32 programVKey, bytes calldata publicValues, bytes calldata proofBytes)
+        external
+        view;
+}
+
 // src/schnorr/interface/ISchnorrStakeRegistry.sol
 
 /// @title ISchnorrStakeRegistry
@@ -728,5 +788,658 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
         if (xAgg == 0 && yAgg == 0) return false;
 
         return SchnorrVerify.verify(xAgg, uint8(yAgg & 1), message, s, Raddr);
+    }
+}
+
+// src/commitments/SchnorrCommitmentsAdapter.sol
+
+/// @title SchnorrCommitmentsAdapter
+/// @notice The operator-lifecycle authority for a `SchnorrStakeRegistry`, backed by the
+///         Commitments protocol instead of EigenLayer. The registry's NatSpec anticipated
+///         exactly this layer: "production would layer the operator/AVS registration
+///         lifecycle on top, exactly as `ECDSAStakeRegistry` does" — this contract is that
+///         layer, with Commitments `OperatorRegistry` stake as the source of truth.
+///
+///         The adapter is the registry's immutable `owner()`, so it must be deployed
+///         BEFORE the registry (the registry's constructor takes the owner address) and
+///         pointed at it with the one-shot `setRegistry`.
+///
+///         Responsibilities:
+///           - `join` — a Commitments-registered operator publishes its Schnorr pubkey
+///             (with proof of possession, validated by the registry), its BN254 p2p
+///             identity, and its socket; the adapter mirrors it into the Schnorr registry
+///             with a weight quantized from live Commitments stake.
+///           - `syncWeight` — permissionless crank keeping registry weights equal to
+///             quantized Commitments stake; drops operators whose stake fell below the
+///             registry-side floor.
+///           - `eject` — arbiter-only immediate removal (forced path, no notice window):
+///             a proven-equivocating key leaves the signer set in the slash transaction,
+///             so the >= 1-day forfeit challenge window delays money, not signing power.
+///           - `leave` — operator-initiated exit, respecting the notice window when one
+///             is configured.
+///           - `getOperatorSet` — the single read the off-chain stack bootstraps from
+///             (replaces the EigenLayer `EigenStakingClient` event scan).
+///
+/// @dev Weight quantization: `weight = stake / weightScale`, floored. Deployments that
+///      want today's uniform-weight behavior set `weightScale = minOperatorStake` so every
+///      minimum-staked operator maps to weight 1. Threshold math on the registry is
+///      fractional (`signedWeight/totalWeight >= num/den`), so the scale cancels; only
+///      sub-scale dust is uncounted.
+///
+///      Every registry mutation the adapter performs advances the registry's
+///      `effectiveBlock`, transiently fail-closing settlements assembled against earlier
+///      reference blocks. Cranks should therefore be driven off material stake changes
+///      (delegation created/released/forfeited, `OperatorBelowMinStake`), not per block.
+contract SchnorrCommitmentsAdapter {
+    /// @notice The Commitments operator registry that is the stake source of truth.
+    IOperatorRegistryMinimal public immutable operatorRegistry;
+
+    /// @notice Divisor quantizing raw Commitments stake units into registry `uint96` weight.
+    uint256 public immutable weightScale;
+
+    /// @notice Bootstrap/emergency authority: wires the registry and arbiter, and can drive
+    ///         the registry's owner surface directly if the mirror ever needs manual repair
+    ///         (the registry's `owner` is immutable, so there is no ownership handoff to
+    ///         fall back to).
+    address public immutable admin;
+
+    /// @notice The `SchnorrStakeRegistry` this adapter owns. One-shot.
+    SchnorrStakeRegistry public registry;
+
+    /// @notice The slashing arbiter allowed to call `eject`. One-shot.
+    address public arbiter;
+
+    /// @notice Off-chain node identity published at `join` time. The BN254 G2 key is the
+    ///         commonware p2p identity; G1 accompanies it for engine-level verification;
+    ///         `socket` is the dialable address. None of this is consulted on-chain — it is
+    ///         the sidecar the off-chain bootstrap reads in one `eth_call`.
+    struct NodeInfo {
+        uint256 secpX;
+        uint256 secpY;
+        uint256[2] blsG1;
+        uint256[4] blsG2;
+        string socket;
+    }
+
+    struct OperatorView {
+        address operator;
+        uint256 weight; // live registry weight (0 when pending under a notice window)
+        NodeInfo info;
+    }
+
+    mapping(address => NodeInfo) internal nodeInfo;
+    /// Enumerable set of operators the adapter has joined (swap-and-pop on removal).
+    address[] internal operatorList;
+    /// One-based index into `operatorList`; zero means "not present".
+    mapping(address => uint256) internal operatorIndex;
+
+    error NotAdmin();
+    error NotArbiter();
+    error AlreadyWired();
+    error NotWired();
+    error ZeroAddress();
+    error NotCommitmentsOperator(address operator);
+    error KeyIsNotSender(address keyAddress, address sender);
+    error StakeBelowScale(uint256 stake, uint256 scale);
+    error NotJoined(address operator);
+
+    event RegistryWired(address indexed registry);
+    event ArbiterWired(address indexed arbiter);
+    event OperatorJoined(address indexed operator, uint256 weight, bool announced);
+    event OperatorLeft(address indexed operator, bool announced);
+    event OperatorEjected(address indexed operator);
+    event WeightSynced(address indexed operator, uint256 oldWeight, uint256 newWeight);
+    event OperatorDropped(address indexed operator, uint256 stake);
+    event NodeInfoUpdated(address indexed operator);
+
+    modifier onlyAdmin() {
+        if (msg.sender != admin) revert NotAdmin();
+        _;
+    }
+
+    modifier whenWired() {
+        if (address(registry) == address(0)) revert NotWired();
+        _;
+    }
+
+    constructor(address _operatorRegistry, uint256 _weightScale, address _admin) {
+        if (_operatorRegistry == address(0) || _admin == address(0)) revert ZeroAddress();
+        require(_weightScale != 0, "zero scale");
+        operatorRegistry = IOperatorRegistryMinimal(_operatorRegistry);
+        weightScale = _weightScale;
+        admin = _admin;
+    }
+
+    /// @notice Point the adapter at the registry it owns. One-shot: the registry is
+    ///         constructed with this adapter as its immutable owner, so the deploy order is
+    ///         adapter -> registry(owner = adapter) -> `setRegistry`.
+    function setRegistry(address _registry) external onlyAdmin {
+        if (address(registry) != address(0)) revert AlreadyWired();
+        if (_registry == address(0)) revert ZeroAddress();
+        registry = SchnorrStakeRegistry(_registry);
+        emit RegistryWired(_registry);
+    }
+
+    /// @notice Wire the slashing arbiter allowed to `eject`. One-shot.
+    function setArbiter(address _arbiter) external onlyAdmin {
+        if (arbiter != address(0)) revert AlreadyWired();
+        if (_arbiter == address(0)) revert ZeroAddress();
+        arbiter = _arbiter;
+        emit ArbiterWired(_arbiter);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Operator lifecycle
+    // ---------------------------------------------------------------------------------------
+
+    /// @notice Join the Schnorr signer set. Caller must be a registered Commitments operator
+    ///         whose address IS the Ethereum address of the submitted Schnorr key (the same
+    ///         identity invariant the off-chain node asserts at startup), with quantized
+    ///         stake >= 1. Uses the immediate path when the registry has no notice window,
+    ///         the announce queue otherwise (commit via `commitNext` once eligible).
+    /// @param x       Schnorr (secp256k1) pubkey x-coordinate.
+    /// @param y       Schnorr pubkey y-coordinate.
+    /// @param popS    proof-of-possession scalar `s` over `registry.popMessage(operator)`.
+    /// @param popR    proof-of-possession nonce address `address(R)`.
+    /// @param blsG1   BN254 G1 public key (p2p/engine identity), affine coordinates.
+    /// @param blsG2   BN254 G2 public key, affine coordinates (x.c1, x.c0, y.c1, y.c0 as
+    ///                the commonware string-coordinate order expects).
+    /// @param socket  dialable p2p socket, e.g. "node-1:3001".
+    function join(
+        uint256 x,
+        uint256 y,
+        uint256 popS,
+        address popR,
+        uint256[2] calldata blsG1,
+        uint256[4] calldata blsG2,
+        string calldata socket
+    ) external whenWired {
+        if (!operatorRegistry.isOperator(msg.sender)) revert NotCommitmentsOperator(msg.sender);
+        address id = registry.pointAddress(x, y);
+        if (id != msg.sender) revert KeyIsNotSender(id, msg.sender);
+
+        uint256 weight = _quantizedStake(msg.sender);
+        if (weight == 0) revert StakeBelowScale(operatorRegistry.getOperatorStake(msg.sender), weightScale);
+
+        bool announced = registry.noticeWindow() != 0;
+        if (announced) {
+            registry.announceRegister(x, y, weight, popS, popR);
+        } else {
+            registry.registerOperator(x, y, weight, popS, popR);
+        }
+
+        nodeInfo[msg.sender] =
+            NodeInfo({secpX: x, secpY: y, blsG1: blsG1, blsG2: blsG2, socket: socket});
+        if (operatorIndex[msg.sender] == 0) {
+            operatorList.push(msg.sender);
+            operatorIndex[msg.sender] = operatorList.length;
+        }
+
+        emit OperatorJoined(msg.sender, weight, announced);
+    }
+
+    /// @notice Refresh the published p2p sidecar (socket move, key rotation happens via
+    ///         leave + rejoin since the Schnorr key is the identity).
+    function updateNodeInfo(uint256[2] calldata blsG1, uint256[4] calldata blsG2, string calldata socket)
+        external
+    {
+        if (operatorIndex[msg.sender] == 0) revert NotJoined(msg.sender);
+        NodeInfo storage info = nodeInfo[msg.sender];
+        info.blsG1 = blsG1;
+        info.blsG2 = blsG2;
+        info.socket = socket;
+        emit NodeInfoUpdated(msg.sender);
+    }
+
+    /// @notice Voluntary exit from the signer set. Respects the notice window when one is
+    ///         configured (capital exit is separate: `requestUnbond` on the manager).
+    function leave() external whenWired {
+        if (operatorIndex[msg.sender] == 0) revert NotJoined(msg.sender);
+
+        bool announced = registry.noticeWindow() != 0 && _isRegistered(msg.sender);
+        if (announced) {
+            registry.announceDeregister(msg.sender);
+            // Sidecar is kept until the change commits; `syncWeight` cleans up after.
+        } else {
+            _forceRemove(msg.sender);
+        }
+        emit OperatorLeft(msg.sender, announced);
+    }
+
+    /// @notice Apply the oldest announced registry change once eligible. Permissionless
+    ///         passthrough of `commitNextChange`; cleans the sidecar up when the committed
+    ///         change was a deregistration.
+    function commitNext() external whenWired {
+        registry.commitNextChange();
+        // A committed deregistration leaves a joined-but-unregistered operator; sweep it.
+        uint256 n = operatorList.length;
+        for (uint256 i = 0; i < n;) {
+            address op = operatorList[i];
+            if (!_isRegistered(op) && registry.pendingChangeIndex(op) == 0) {
+                _removeFromList(op);
+                n--;
+                continue; // swapped element now occupies slot i
+            }
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    /// @notice Immediate forced removal of a proven-misbehaving operator — arbiter-only.
+    ///         Clears any queued change first (targeted cancel), then force-deregisters,
+    ///         with no time gate between them. Idempotent for already-removed operators so
+    ///         a slash transaction can never fail on the ejection leg.
+    function eject(address operator) external whenWired {
+        if (msg.sender != arbiter && msg.sender != admin) revert NotArbiter();
+        _forceRemove(operator);
+        emit OperatorEjected(operator);
+    }
+
+    /// @notice Permissionless crank reconciling one operator's registry weight with its
+    ///         live Commitments stake. Deregisters operators that stopped being
+    ///         Commitments-registered or whose quantized stake hit zero.
+    function syncWeight(address operator) external whenWired {
+        if (!_isRegistered(operator)) {
+            // Nothing mirrored (or pending under notice window) — only sweep the sidecar
+            // if Commitments no longer recognizes the operator and nothing is queued.
+            if (
+                operatorIndex[operator] != 0 && !operatorRegistry.isOperator(operator)
+                    && registry.pendingChangeIndex(operator) == 0
+            ) {
+                _removeFromList(operator);
+                emit OperatorDropped(operator, 0);
+            }
+            return;
+        }
+
+        if (!operatorRegistry.isOperator(operator)) {
+            _forceRemove(operator);
+            emit OperatorDropped(operator, 0);
+            return;
+        }
+
+        uint256 stake = operatorRegistry.getOperatorStake(operator);
+        uint256 newWeight = stake / weightScale;
+        if (newWeight == 0) {
+            _forceRemove(operator);
+            emit OperatorDropped(operator, stake);
+            return;
+        }
+
+        (,, uint96 current,,) = registry.operators(operator);
+        if (newWeight != current) {
+            registry.updateOperatorWeight(operator, newWeight);
+            emit WeightSynced(operator, current, newWeight);
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Admin escape hatch
+    //
+    // The registry's `owner` is immutable, so if the mirror logic is ever wrong the fix
+    // cannot be "hand ownership back to an EOA". Instead the admin can drive the owner
+    // surface directly. Bootstrap flows may also use these before Commitments state exists.
+    // ---------------------------------------------------------------------------------------
+
+    function adminRegister(uint256 x, uint256 y, uint256 weight, uint256 popS, address popR)
+        external
+        onlyAdmin
+        whenWired
+    {
+        registry.registerOperator(x, y, weight, popS, popR);
+    }
+
+    function adminDeregister(address operator) external onlyAdmin whenWired {
+        registry.deregisterOperator(operator);
+        if (operatorIndex[operator] != 0) _removeFromList(operator);
+    }
+
+    function adminCancelChange(address operator) external onlyAdmin whenWired {
+        registry.cancelChange(operator);
+    }
+
+    function adminUpdateWeight(address operator, uint256 weight) external onlyAdmin whenWired {
+        registry.updateOperatorWeight(operator, weight);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Views
+    // ---------------------------------------------------------------------------------------
+
+    /// @notice The full operator set with p2p sidecar and live registry weights — the one
+    ///         read the off-chain bootstrap needs. Operators queued behind a notice window
+    ///         report weight 0 until their registration commits.
+    function getOperatorSet() external view returns (OperatorView[] memory set) {
+        uint256 n = operatorList.length;
+        set = new OperatorView[](n);
+        for (uint256 i = 0; i < n; ++i) {
+            address op = operatorList[i];
+            uint256 weight = 0;
+            if (address(registry) != address(0)) {
+                (,, uint96 w, bool reg,) = registry.operators(op);
+                weight = reg ? w : 0;
+            }
+            set[i] = OperatorView({operator: op, weight: weight, info: nodeInfo[op]});
+        }
+    }
+
+    function getOperatorCount() external view returns (uint256) {
+        return operatorList.length;
+    }
+
+    function getNodeInfo(address operator) external view returns (NodeInfo memory) {
+        return nodeInfo[operator];
+    }
+
+    /// @notice Quantized live Commitments stake for `operator` (the weight `syncWeight`
+    ///         would mirror).
+    function quantizedStake(address operator) external view returns (uint256) {
+        return _quantizedStake(operator);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Internals
+    // ---------------------------------------------------------------------------------------
+
+    function _quantizedStake(address operator) internal view returns (uint256) {
+        return operatorRegistry.getOperatorStake(operator) / weightScale;
+    }
+
+    function _isRegistered(address operator) internal view returns (bool) {
+        (,,, bool reg,) = registry.operators(operator);
+        return reg;
+    }
+
+    /// @dev Forced removal: clear any queued change (the forced paths refuse to act on an
+    ///      identity with one), deregister if currently in the set, and drop the sidecar.
+    ///      Never reverts for an operator that is already gone.
+    function _forceRemove(address operator) internal {
+        if (registry.pendingChangeIndex(operator) != 0) {
+            registry.cancelChange(operator);
+        }
+        if (_isRegistered(operator)) {
+            registry.deregisterOperator(operator);
+        }
+        if (operatorIndex[operator] != 0) {
+            _removeFromList(operator);
+        }
+    }
+
+    function _removeFromList(address operator) internal {
+        uint256 oneBased = operatorIndex[operator];
+        uint256 last = operatorList.length;
+        if (oneBased != last) {
+            address moved = operatorList[last - 1];
+            operatorList[oneBased - 1] = moved;
+            operatorIndex[moved] = oneBased;
+        }
+        operatorList.pop();
+        delete operatorIndex[operator];
+        delete nodeInfo[operator];
+    }
+}
+
+// src/commitments/GasKillerSP1Arbiter.sol
+
+/// @title GasKillerSP1Arbiter
+/// @notice The Commitments arbiter for Gas Killer slashing: an SP1 fraud proof (an operator
+///         signed a task result that faithful re-execution contradicts) authorizes opening
+///         two-phase forfeits against the operator's stake commitments, and ejects the
+///         operator's key from the Schnorr signer set in the same transaction. The
+///         >= 1-day forfeit challenge window therefore delays only the capital slash —
+///         a proven-equivocating key stops counting toward quorums immediately.
+///
+///         The contract is a non-upgradeable shell per Commitments arbiter doctrine, with
+///         one deliberate mutable slot: the SP1 program vkey, behind a guardian-proposed
+///         timelock at least as long as the unbonding path, so every operator can observe
+///         a hostile vkey proposal and fully exit before it could slash them. This is the
+///         escape from `OperatorRegistry.requiredArbiter` being immutable while the SP1
+///         guest program evolves.
+///
+/// @dev Deploy order (the registry bakes this address in immutably): deploy the arbiter
+///      first with `operatorRegistry`/`adapter` unset, initialize the Commitments
+///      `OperatorRegistry` with this address as `requiredArbiter`, then `wireService`.
+contract GasKillerSP1Arbiter is IArbiter {
+    /// @notice The CommitmentManager this arbiter dispatches forfeits to (IArbiter).
+    address public immutable override commitmentManager;
+
+    /// @notice Succinct SP1 verifier gateway.
+    ISP1Verifier public immutable sp1Verifier;
+
+    /// @notice Governance for vkey rotation, forfeit cancellation, and metadata.
+    address public immutable guardian;
+
+    /// @notice Seconds a proposed vkey must wait before activation. Size it >= the
+    ///         operator exit path (unbonding period + Schnorr notice window) so no key can
+    ///         be slashed by a program it never had the chance to exit ahead of.
+    uint256 public immutable vkeyDelay;
+
+    /// @notice Penalty applied per proven offense, in basis points of each commitment.
+    uint16 public immutable slashPenaltyBps;
+
+    /// @notice Active SP1 program vkey.
+    bytes32 public vkey;
+
+    /// @notice Pending vkey rotation (zero when none).
+    bytes32 public pendingVkey;
+    uint256 public pendingVkeyActiveAt;
+
+    /// @notice Commitments operator registry (one-shot wire; see deploy order above).
+    IOperatorRegistryMinimal public operatorRegistry;
+
+    /// @notice Schnorr lifecycle adapter used for immediate ejection (one-shot wire).
+    SchnorrCommitmentsAdapter public adapter;
+
+    /// @notice Offense ledger: `offenseKey = keccak256(operator, faultDigest)` records that
+    ///         a valid proof was consumed for that (operator, offense) pair. Follow-up
+    ///         forfeits for commitments missed in the first submission (e.g. delegations
+    ///         indexed late) go through `slashMore` without re-verifying the proof.
+    struct Offense {
+        address operator;
+        uint64 recordedAt;
+        bool recorded;
+    }
+
+    mapping(bytes32 => Offense) public offenses;
+
+    string internal metadataURI;
+
+    error NotGuardian();
+    error AlreadyWired();
+    error NotWired();
+    error ZeroAddress();
+    error OffenseAlreadyRecorded(bytes32 offenseKey);
+    error OffenseNotRecorded(bytes32 offenseKey);
+    error CommitmentNotOperators(uint256 commitmentId, address operator);
+    error NoForfeitsInitiated();
+    error NoPendingVkey();
+    error VkeyTimelockActive(uint256 activeAt);
+
+    event ServiceWired(address indexed operatorRegistry, address indexed adapter);
+    event OffenseRecorded(bytes32 indexed offenseKey, address indexed operator, bytes32 faultDigest);
+    event ForfeitOpened(bytes32 indexed offenseKey, uint256 indexed commitmentId, uint16 penaltyBps);
+    event ForfeitAttemptFailed(bytes32 indexed offenseKey, uint256 indexed commitmentId, bytes reason);
+    event ForfeitCancelled(uint256 indexed commitmentId);
+    event ForfeitExecuted(uint256 indexed commitmentId);
+    event ForfeitExecutionFailed(uint256 indexed commitmentId, bytes reason);
+    event VkeyProposed(bytes32 indexed newVkey, uint256 activeAt);
+    event VkeyActivated(bytes32 indexed newVkey);
+    event VkeyProposalCancelled(bytes32 indexed cancelledVkey);
+    event MetadataURIUpdated(string uri);
+
+    modifier onlyGuardian() {
+        if (msg.sender != guardian) revert NotGuardian();
+        _;
+    }
+
+    constructor(
+        address _commitmentManager,
+        address _sp1Verifier,
+        bytes32 _vkey,
+        address _guardian,
+        uint256 _vkeyDelay,
+        uint16 _slashPenaltyBps
+    ) {
+        if (_commitmentManager == address(0) || _sp1Verifier == address(0) || _guardian == address(0)) {
+            revert ZeroAddress();
+        }
+        require(_slashPenaltyBps > 0 && _slashPenaltyBps <= 10_000, "bad penalty");
+        commitmentManager = _commitmentManager;
+        sp1Verifier = ISP1Verifier(_sp1Verifier);
+        vkey = _vkey;
+        guardian = _guardian;
+        vkeyDelay = _vkeyDelay;
+        slashPenaltyBps = _slashPenaltyBps;
+    }
+
+    /// @notice One-shot wiring of the Commitments registry and the Schnorr adapter,
+    ///         breaking the deploy cycle around the registry's immutable `requiredArbiter`.
+    function wireService(address _operatorRegistry, address _adapter) external onlyGuardian {
+        if (address(operatorRegistry) != address(0)) revert AlreadyWired();
+        if (_operatorRegistry == address(0) || _adapter == address(0)) revert ZeroAddress();
+        operatorRegistry = IOperatorRegistryMinimal(_operatorRegistry);
+        adapter = SchnorrCommitmentsAdapter(_adapter);
+        emit ServiceWired(_operatorRegistry, _adapter);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Slashing
+    // ---------------------------------------------------------------------------------------
+
+    /// @notice Slash on a verified SP1 fraud proof. Permissionless: the proof is the
+    ///         authority. Opens a forfeit on every supplied commitment bound to the accused
+    ///         operator (self-stake and delegations — the caller enumerates ids off-chain
+    ///         from registry events; `operatorForCommitment` makes the list trustless) and
+    ///         ejects the operator's Schnorr key immediately.
+    /// @dev Public-values layout (v1, must match the challenger guest):
+    ///      `abi.encode(address operator, bytes32 faultDigest)` where `faultDigest`
+    ///      uniquely identifies the offense (e.g. keccak of the equivocating task digest
+    ///      and the faithful output hash). Kept in one decode site for guest evolution.
+    /// @param publicValues   SP1 public values (see layout above).
+    /// @param proofBytes     SP1 proof for the active `vkey`.
+    /// @param commitmentIds  commitments to open forfeits on; each must be bound to the
+    ///                       accused operator. Individual failures (e.g. an already-pending
+    ///                       forfeit) are skipped and surfaced as events, but at least one
+    ///                       forfeit must open.
+    function slash(bytes calldata publicValues, bytes calldata proofBytes, uint256[] calldata commitmentIds)
+        external
+    {
+        if (address(operatorRegistry) == address(0)) revert NotWired();
+        sp1Verifier.verifyProof(vkey, publicValues, proofBytes);
+
+        (address operator, bytes32 faultDigest) = abi.decode(publicValues, (address, bytes32));
+        bytes32 offenseKey = keccak256(abi.encodePacked(operator, faultDigest));
+        if (offenses[offenseKey].recorded) revert OffenseAlreadyRecorded(offenseKey);
+        offenses[offenseKey] =
+            Offense({operator: operator, recordedAt: uint64(block.timestamp), recorded: true});
+        emit OffenseRecorded(offenseKey, operator, faultDigest);
+
+        uint256 opened = _openForfeits(offenseKey, operator, commitmentIds);
+        if (commitmentIds.length > 0 && opened == 0) revert NoForfeitsInitiated();
+
+        // Ejection is idempotent and must not be blockable by forfeit-side failures.
+        adapter.eject(operator);
+    }
+
+    /// @notice Open forfeits for additional commitments under an already-recorded offense
+    ///         (delegations discovered after the original slash). Permissionless.
+    function slashMore(bytes32 offenseKey, uint256[] calldata commitmentIds) external {
+        Offense storage offense = offenses[offenseKey];
+        if (!offense.recorded) revert OffenseNotRecorded(offenseKey);
+        uint256 opened = _openForfeits(offenseKey, offense.operator, commitmentIds);
+        if (opened == 0) revert NoForfeitsInitiated();
+    }
+
+    function _openForfeits(bytes32 offenseKey, address operator, uint256[] calldata commitmentIds)
+        internal
+        returns (uint256 opened)
+    {
+        uint256 idsLength = commitmentIds.length;
+        for (uint256 i = 0; i < idsLength; ++i) {
+            uint256 id = commitmentIds[i];
+            if (operatorRegistry.operatorForCommitment(id) != operator) {
+                revert CommitmentNotOperators(id, operator);
+            }
+            try ICommitmentManagerMinimal(commitmentManager).initiateForfeit(id, slashPenaltyBps) {
+                ++opened;
+                emit ForfeitOpened(offenseKey, id, slashPenaltyBps);
+            } catch (bytes memory reason) {
+                emit ForfeitAttemptFailed(offenseKey, id, reason);
+            }
+        }
+    }
+
+    /// @notice Crank `executeForfeit` for elapsed challenge windows. Permissionless
+    ///         convenience over the manager's own permissionless entry point.
+    function crankExecute(uint256[] calldata commitmentIds) external {
+        uint256 idsLength = commitmentIds.length;
+        for (uint256 i = 0; i < idsLength; ++i) {
+            uint256 id = commitmentIds[i];
+            try ICommitmentManagerMinimal(commitmentManager).executeForfeit(id) {
+                emit ForfeitExecuted(id);
+            } catch (bytes memory reason) {
+                emit ForfeitExecutionFailed(id, reason);
+            }
+        }
+    }
+
+    /// @notice Guardian veto for a pending forfeit — proof-bug insurance; proofs are
+    ///         objective so this should never fire in normal operation.
+    function cancelForfeit(uint256 commitmentId) external onlyGuardian {
+        ICommitmentManagerMinimal(commitmentManager).cancelForfeit(commitmentId);
+        emit ForfeitCancelled(commitmentId);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Vkey rotation (timelocked)
+    // ---------------------------------------------------------------------------------------
+
+    function proposeVkey(bytes32 newVkey) external onlyGuardian {
+        pendingVkey = newVkey;
+        pendingVkeyActiveAt = block.timestamp + vkeyDelay;
+        emit VkeyProposed(newVkey, pendingVkeyActiveAt);
+    }
+
+    function cancelVkeyProposal() external onlyGuardian {
+        if (pendingVkeyActiveAt == 0) revert NoPendingVkey();
+        emit VkeyProposalCancelled(pendingVkey);
+        pendingVkey = bytes32(0);
+        pendingVkeyActiveAt = 0;
+    }
+
+    /// @notice Activate a proposed vkey after its timelock. Permissionless: activation is
+    ///         mechanical once the delay every operator could exit within has elapsed.
+    function activateVkey() external {
+        if (pendingVkeyActiveAt == 0) revert NoPendingVkey();
+        if (block.timestamp < pendingVkeyActiveAt) revert VkeyTimelockActive(pendingVkeyActiveAt);
+        vkey = pendingVkey;
+        emit VkeyActivated(pendingVkey);
+        pendingVkey = bytes32(0);
+        pendingVkeyActiveAt = 0;
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // IArbiter
+    // ---------------------------------------------------------------------------------------
+
+    function arbiterCapabilities() external pure override returns (uint256) {
+        return ArbiterCapabilities.INITIATE_FORFEIT | ArbiterCapabilities.CANCEL_FORFEIT;
+    }
+
+    function arbiterMetadataURI() external view override returns (string memory) {
+        return metadataURI;
+    }
+
+    function setMetadataURI(string calldata uri) external onlyGuardian {
+        metadataURI = uri;
+        emit MetadataURIUpdated(uri);
+    }
+
+    function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
+        // IArbiter id per upstream convention: xor of its three selectors.
+        bytes4 arbiterId = IArbiter.commitmentManager.selector ^ IArbiter.arbiterCapabilities.selector
+            ^ IArbiter.arbiterMetadataURI.selector;
+        return interfaceId == arbiterId || interfaceId == 0x01ffc9a7; // ERC-165
     }
 }
