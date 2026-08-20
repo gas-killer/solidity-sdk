@@ -153,6 +153,7 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
 
     event OperatorRegistered(address indexed operator, uint256 weight);
     event OperatorDeregistered(address indexed operator, uint256 weight);
+    event OperatorWeightUpdated(address indexed operator, uint256 oldWeight, uint256 newWeight);
     event ChangeAnnounced(uint256 indexed index, ChangeKind kind, address indexed operator, uint256 eligibleBlock);
     event ChangeCancelled(uint256 indexed index, address indexed operator);
     /// Emitted when a change bypasses the notice window via the forced path.
@@ -351,6 +352,36 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
         _requireNoScheduledChange(operator);
         emit ForcedMutation(operator);
         _applyDeregister(operator);
+    }
+
+    /// @notice Adjust a registered operator's stake weight in place, effective immediately.
+    /// @dev Additive surface for stake-mirroring lifecycles (the Commitments adapter): a weight
+    ///      change alters what counts as a quorum but leaves `X_all` intact, so an in-flight
+    ///      round's signature stays *cryptographically* verifiable — the watermark still
+    ///      advances, fail-closing settlements pinned to earlier reference blocks, because the
+    ///      threshold denominator they were assembled against is no longer the one in force.
+    ///      Bypasses the notice window like the forced paths and emits `ForcedMutation` so
+    ///      consumers re-snapshot. A pending *deregistration* is compatible (its commit reads
+    ///      the live weight); a pending registration is unreachable here since the identity is
+    ///      not yet `registered`.
+    /// @param operator   the operator identity (`pointAddress(x, y)`).
+    /// @param newWeight  replacement stake weight; must be non-zero and fit `uint96` (use
+    ///                   `deregisterOperator` to remove an operator, not a zero weight).
+    function updateOperatorWeight(address operator, uint256 newWeight) external onlyOwner {
+        if (newWeight == 0) revert ZeroWeight();
+        if (newWeight > type(uint96).max) revert WeightOverflow();
+        Operator storage op = operators[operator];
+        if (!op.registered) revert NotRegistered(operator);
+
+        uint256 oldWeight = op.weight;
+        totalWeight = totalWeight - oldWeight + newWeight;
+        // casting to 'uint96' is safe: bounds-checked against type(uint96).max above
+        // forge-lint: disable-next-line(unsafe-typecast)
+        op.weight = uint96(newWeight);
+        effectiveBlock = block.number;
+
+        emit ForcedMutation(operator);
+        emit OperatorWeightUpdated(operator, oldWeight, newWeight);
     }
 
     // ---------------------------------------------------------------------------------------
