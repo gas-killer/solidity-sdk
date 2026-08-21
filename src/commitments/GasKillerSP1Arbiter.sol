@@ -81,6 +81,7 @@ contract GasKillerSP1Arbiter is IArbiter {
     error OffenseNotRecorded(bytes32 offenseKey);
     error CommitmentNotOperators(uint256 commitmentId, address operator);
     error NoForfeitsInitiated();
+    error NoForfeitsExecuted();
     error NoPendingVkey();
     error VkeyTimelockActive(uint256 activeAt);
 
@@ -200,16 +201,24 @@ contract GasKillerSP1Arbiter is IArbiter {
 
     /// @notice Crank `executeForfeit` for elapsed challenge windows. Permissionless
     ///         convenience over the manager's own permissionless entry point.
+    /// @dev Reverts when the batch is non-empty and NOTHING executed. Without that,
+    ///      gas estimation converges on an amount where every inner call gas-starves
+    ///      inside the try/catch while the outer transaction "succeeds" — the revert
+    ///      forces estimators to find a gas limit under which at least one forfeit
+    ///      actually lands (found live in the anvil integration run).
     function crankExecute(uint256[] calldata commitmentIds) external {
+        uint256 executed = 0;
         uint256 idsLength = commitmentIds.length;
         for (uint256 i = 0; i < idsLength; ++i) {
             uint256 id = commitmentIds[i];
             try ICommitmentManagerMinimal(commitmentManager).executeForfeit(id) {
+                ++executed;
                 emit ForfeitExecuted(id);
             } catch (bytes memory reason) {
                 emit ForfeitExecutionFailed(id, reason);
             }
         }
+        if (idsLength > 0 && executed == 0) revert NoForfeitsExecuted();
     }
 
     /// @notice Guardian veto for a pending forfeit — proof-bug insurance; proofs are

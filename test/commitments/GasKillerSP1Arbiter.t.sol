@@ -275,6 +275,19 @@ contract GasKillerSP1ArbiterTest is Test {
         assertEq(manager.executeCallCount(), 1, "only the surviving execute recorded");
     }
 
+    // A batch where NOTHING executes must revert — otherwise gas estimators converge
+    // on a limit that starves every inner call inside the try/catch while the outer
+    // transaction still "succeeds" (observed live on anvil).
+    function test_crankExecute_revertsWhenNothingExecutes() public {
+        manager.setRevertOnExecute(1, true);
+        manager.setRevertOnExecute(2, true);
+        vm.expectRevert(GasKillerSP1Arbiter.NoForfeitsExecuted.selector);
+        arbiter.crankExecute(_ids(1, 2));
+
+        // An empty batch stays a no-op rather than a revert.
+        arbiter.crankExecute(new uint256[](0));
+    }
+
     // ---- cancelForfeit ----
 
     function test_cancelForfeit_guardianOnly() public {
