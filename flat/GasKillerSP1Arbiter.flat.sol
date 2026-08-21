@@ -942,8 +942,8 @@ contract SchnorrCommitmentsAdapter {
     /// @param popS    proof-of-possession scalar `s` over `registry.popMessage(operator)`.
     /// @param popR    proof-of-possession nonce address `address(R)`.
     /// @param blsG1   BN254 G1 public key (p2p/engine identity), affine coordinates.
-    /// @param blsG2   BN254 G2 public key, affine coordinates (x.c1, x.c0, y.c1, y.c0 as
-    ///                the commonware string-coordinate order expects).
+    /// @param blsG2   BN254 G2 public key, affine coordinates [x.c0, x.c1, y.c0, y.c1] —
+    ///                the order `CommonwarePublicKeys::from_string_coordinates` consumes.
     /// @param socket  dialable p2p socket, e.g. "node-1:3001".
     function join(
         uint256 x,
