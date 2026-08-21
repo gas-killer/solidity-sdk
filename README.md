@@ -8,6 +8,12 @@
 
 Solidity SDK for integrating Gas Killer functionality into EigenLayer AVS contracts. Inherit from `GasKillerSDK` to let off-chain operators propose and verify state updates via BLS signature aggregation instead of running expensive computations on-chain.
 
+> 📖 **Integrating this into your own contract?** Start with the
+> [Solidity Reference](https://gaskiller.xyz/docs/solidity/integrate) in the Gas Killer docs — it covers
+> installation, the live addresses to configure, `trackState` semantics and storage-layout rules, and a
+> revert-selector lookup table. This README is the SDK's own reference: verification schemes, chain
+> requirements, operator-set mechanics, and the code-level contract.
+
 ## Overview
 
 Contracts that inherit GasKillerSDK expose a public `verifyAndUpdate` function, which enables expensive state-changing computations to be performed off-chain. Operators sign a payload describing the resulting state updates, the router aggregates the BLS signatures once a quorum threshold is reached, and the result is submitted on-chain through `verifyAndUpdate`.
@@ -158,6 +164,10 @@ described above — spends nothing, so its share simply lands in the retained-su
 
 ## Usage
 
+The [Solidity Reference](https://gaskiller.xyz/docs/solidity/integrate) is the full integration guide —
+a complete minimal target, the addresses to wire and how to verify them, what keeps a tracked function
+extractable, and the whole API surface. This section is the short version.
+
 ### Installation
 
 ```bash
@@ -172,58 +182,53 @@ gas-killer-sdk/=lib/solidity-sdk/src/
 
 ### Integrating the SDK
 
-1. Inherit from `GasKillerSDK` and configure it in your constructor:
+Inherit `GasKillerSDK`, configure it in the constructor, and mark each state-changing function
+`trackState`:
 
 ```solidity
 import {GasKillerSDK} from "gas-killer-sdk/GasKillerSDK.sol";
 
 contract MyContract is GasKillerSDK {
+    uint256 public storedValue;
+
     constructor(address _avsAddress, address _blsSigChecker) {
         _setAvsAddress(_avsAddress);
         _setBlsSignatureChecker(_blsSigChecker);
     }
+
+    function updateValue(uint256 newValue) external trackState {
+        storedValue = newValue;
+    }
 }
 ```
 
-2. Mark state-changing functions with the `trackState` modifier:
+Operators then settle a transition through `verifyAndUpdate`, which requires that:
 
-```solidity
-function updateValue(uint256 newValue) external trackState {
-    storedValue = newValue;
-}
-```
+- the reference block is below the current block and within `blockStaleMeasure` blocks of it,
+- `transitionIndex + 1` matches the current `stateTransitionCount`,
+- the recomputed message hash matches the one signed,
+- at least `QUORUM_THRESHOLD` (66%) of **each** quorum's stake signed.
 
-3. Off-chain, compute the state update payload and submit it via `verifyAndUpdate`:
-
-```solidity
-contract.verifyAndUpdate(
-    msgHash,
-    quorumNumbers,
-    referenceBlockNumber,
-    storageUpdates,   // ABI-encoded (StateUpdateType[], bytes[])
-    transitionIndex,
-    targetFunction,
-    nonSignerStakesAndSignature
-);
-```
-
-`verifyAndUpdate` checks that:
-- The reference block is within `blockStaleMeasure` blocks of the current block
-- `transitionIndex + 1` matches the current `stateTransitionCount`
-- The message hash matches the expected hash for the given transition, function, and updates
-- At least `QUORUM_THRESHOLD` (66%) of quorum stake has signed
+**The AVS and `BLSSignatureChecker` addresses to configure live in
+[Configuration](https://gaskiller.xyz/docs/solidity/configuration).** They are properties of a
+particular AVS deployment rather than constants of the protocol, so they are maintained there and
+deliberately not repeated in this repo.
 
 ### State Update Types
 
-The `storageUpdates` payload is an ABI-encoded `(StateUpdateType[], bytes[])` pair. Each entry can be one of:
+The `storageUpdates` payload is an ABI-encoded `(StateUpdateType[], bytes[])` pair. Each entry is one
+of the following, applied in order:
 
 | Type | Effect | Encoded args |
 |------|--------|--------------|
 | `STORE` | Write to a storage slot | `(bytes32 slot, bytes32 value)` |
 | `CALL` | External call with optional ETH | `(address target, uint256 value, bytes calldata)` |
 | `LOG0`–`LOG4` | Emit a log with 0–4 topics | `(bytes data[, bytes32 topic1, ...])` |
+| `CREATE` | Deploy via `CREATE` | `(uint256 value, bytes initcode)` |
+| `CREATE2` | Deploy via `CREATE2` | `(bytes32 salt, uint256 value, bytes initcode)` |
 
-> **Unsupported opcodes:** `CREATE` and `CREATE2` are not yet implemented as update types.
+See [Funding value-bearing state updates](#funding-value-bearing-state-updates) for how `CALL`,
+`CREATE` and `CREATE2` are paid for.
 
 ## Development
 
