@@ -117,6 +117,34 @@ Consequences for integrators:
   mutation timing and each consumer's staleness bound, so keeping the two consistent is
   deployment discipline rather than a contract guarantee.
 
+## Pre-committed nonce batches (Schnorr)
+
+`SchnorrNonceRegistry` is an authenticated bulletin board of **nonce-batch commitments**. It
+exists so aggregate-Schnorr signing can drop its interactive nonce round: operators commit a
+Merkle root over a batch of MuSig2 nonce *points* ahead of time, the full points travel p2p,
+and peers verify what they receive against the committed root. The chain never stores, opens,
+or verifies a nonce point — this contract is pure commitment bookkeeping, and the settlement
+path (`SchnorrGasKillerSDK` → `SchnorrStakeRegistry.isValidSignature`) is untouched by it.
+
+Two properties matter to integrators:
+
+- **Append-only and contiguous.** Batch `k` covers `[end(k-1), end(k-1) + count)`, batch 0
+  starting at slot 0. Committed coverage is immutable, so `coverage`/`batchAt` answer stably at
+  any block and no `effectiveBlock`-style watermark is needed here (the one on the stake
+  registry still governs the operator *set*).
+- **Authenticated by key, not by `msg.sender`.** A registration carries a single-key Schnorr
+  signature over `batchMessage(...)`, which binds chain id, registry address, operator identity,
+  batch index, start slot, count and root. Anyone may relay the transaction; the same
+  registration cannot be replayed at another position, registry, or chain. Only keys registered
+  in `SchnorrStakeRegistry` — where the proof of possession is enforced — may commit, and an
+  exit tombstone (`registered == false`) can no longer extend coverage.
+
+Gating reads only `operators`, so the dependency is expressed as the narrow
+`ISchnorrOperatorRegistry` rather than the full `ISchnorrStakeRegistry` verification surface.
+The off-chain half of the design — slot assignment, nonce derivation, the spend journal that
+enforces one partial per slot, and batch gossip — lives in the `gas-killer/service` repo under
+`docs/schnorr-nonce-registry.md`.
+
 ## Funding value-bearing state updates
 
 A `CALL`, `CREATE` or `CREATE2` state update can move ETH, and it is paid out of the settling
@@ -156,7 +184,8 @@ described above — spends nothing, so its share simply lands in the retained-su
 - **`src/schnorr/`** — Aggregate-Schnorr scheme
   - `SchnorrGasKillerSDK.sol` — Abstract base; inherit this for the Schnorr scheme
   - `SchnorrStakeRegistry.sol` — Aggregate-key registry with proof-of-possession registration and non-signer subtraction
-  - `interface/` — `ISchnorrGasKillerSDK` and `ISchnorrStakeRegistry`
+  - `SchnorrNonceRegistry.sol` — Append-only commitment registry for pre-committed MuSig2 nonce batches, making aggregate-Schnorr signing non-interactive
+  - `interface/` — `ISchnorrGasKillerSDK`, `ISchnorrStakeRegistry`, `ISchnorrOperatorRegistry` and `ISchnorrNonceRegistry`
   - `libraries/` — `Secp256k1` (affine point math) and `SchnorrVerify` (constant-gas `ecrecover`-trick verify)
 - **`src/examples/array-summation/`** — Demo apps: `ArraySummation`(`Factory`) (BLS) and `SchnorrArraySummation`(`Factory`) (Schnorr)
 - **`script/`** — Deployment scripts

@@ -4,6 +4,7 @@ pragma solidity ^0.8.27;
 import {Secp256k1} from "./libraries/Secp256k1.sol";
 import {SchnorrVerify} from "./libraries/SchnorrVerify.sol";
 import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
+import {ISchnorrOperatorRegistry} from "./interface/ISchnorrOperatorRegistry.sol";
 
 /// @title SchnorrStakeRegistry
 /// @notice Stake registry for the **aggregate Schnorr** quorum scheme — the Schnorr
@@ -49,7 +50,7 @@ import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
 ///      key that signed), not the watermark: advancing `effectiveBlock` does not restrict which
 ///      quorums are acceptable, it guarantees the cached aggregate and weights are the ones in
 ///      force at `refBlock` so the registry never answers for a snapshot it no longer holds.
-contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
+contract SchnorrStakeRegistry is ISchnorrStakeRegistry, ISchnorrOperatorRegistry {
     /// Domain tag for the proof-of-possession message — must equal the Rust `POP_TAG`.
     bytes internal constant POP_TAG = "gas-killer/schnorr/pop/v1";
 
@@ -71,7 +72,7 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
     ///      governs membership, so a tombstone is inert for verification — it is not in `X_all`,
     ///      not counted in `totalWeight`, and rejected as a non-signer. Re-registration
     ///      overwrites the record wholesale, clearing `exitBlock`.
-    mapping(address => Operator) public operators;
+    mapping(address => Operator) public override operators;
 
     /// A scheduled operator-set change: announced now, applicable from `eligibleBlock`.
     struct PendingChange {
