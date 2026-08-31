@@ -7,7 +7,10 @@ import {
 } from "@eigenlayer-middleware/interfaces/IBLSSignatureChecker.sol";
 import {IERC165} from "forge-std/interfaces/IERC165.sol";
 
+import {BLSQuorumLib} from "./BLSQuorumLib.sol";
+import {CommitmentDigestLib} from "./CommitmentDigestLib.sol";
 import {IGasKillerSDK} from "./interface/IGasKillerSDK.sol";
+import {IGasKillerSlasher} from "./interface/IGasKillerSlasher.sol";
 import {StateTracker} from "./StateTracker.sol";
 import {TransitionGuard} from "./TransitionGuard.sol";
 import {StateChangeHandlerLib, StateUpdateType} from "./StateChangeHandlerLib.sol";
@@ -32,6 +35,8 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, IGasKillerSDK {
         IBLSSignatureChecker blsSignatureChecker;
         /// @notice Maximum number of blocks a reference block may lag behind the current block
         uint256 blockStaleMeasure;
+        /// @notice Optional Gas Killer slasher; when set, applied commitments are recorded for challenge-window tracking
+        IGasKillerSlasher slasher;
     }
 
     // keccak256(abi.encode(uint256(keccak256("gaskiller.GasKillerSDK.storage")) - 1)) & ~bytes32(uint256(0xff));
@@ -39,16 +44,23 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, IGasKillerSDK {
         0x321ebf629ed2e1e368f0890e8fdd95cf9a2ae5961b66a1805f0b2ec84e21d000;
 
     /// @notice Denominator used when evaluating stake percentage thresholds (representing 100%)
-    uint8 public constant THRESHOLD_DENOMINATOR = 100;
+    /// @dev Exposed for integrators; the value itself lives in `BLSQuorumLib`, which owns the
+    ///      admission rule shared with `GasKillerBLSSlasher`.
+    uint8 public constant THRESHOLD_DENOMINATOR = BLSQuorumLib.THRESHOLD_DENOMINATOR;
 
     /// @notice Minimum percentage of quorum stake that must have signed to approve a state update (QUORUM_THRESHOLD/THRESHOLD_DENOMINATOR)
-    uint8 public constant QUORUM_THRESHOLD = 66;
+    /// @dev See [`THRESHOLD_DENOMINATOR`] on where the value is defined.
+    uint8 public constant QUORUM_THRESHOLD = BLSQuorumLib.QUORUM_THRESHOLD;
 
     /// @notice Default maximum age (in blocks) a reference block is considered valid when none is configured
     uint256 private constant DEFAULT_BLOCK_STALE_MEASURE = 300;
 
     /// @notice Verify BLS quorum signatures and apply the encoded state updates
-    /// @dev Payable so a caller can fund value-bearing `CALL`/`CREATE`/`CREATE2` state updates
+    /// @dev The signed message binds the full execution context (anchor block, caller, calldata)
+    ///      so that incorrect storage updates are provable — and slashable — after the fact via
+    ///      an SP1 execution proof (see `GasKillerSlasher`)
+    ///
+    ///      Payable so a caller can fund value-bearing `CALL`/`CREATE`/`CREATE2` state updates
     ///      out of `msg.value`. The value each update moves is fixed inside the quorum-signed
     ///      `storageUpdates`, so `msg.value` only tops up this contract's balance — it cannot
     ///      redirect value anywhere the quorum did not sign. Under-funding reverts the whole
@@ -62,7 +74,9 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, IGasKillerSDK {
     /// @param referenceBlockNumber The block number to use as reference for operator set
     /// @param storageUpdates The storage updates to verify
     /// @param transitionIndex The transition index
-    /// @param targetFunction The target function selector
+    /// @param anchorHash The hash of the block the off-chain execution was anchored to
+    /// @param callerAddress The msg.sender of the original call
+    /// @param contractCalldata The full calldata of the original call
     /// @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
     function verifyAndUpdate(
         bytes32 msgHash,
@@ -70,36 +84,62 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, IGasKillerSDK {
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
-        bytes4 targetFunction,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
         IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
     ) external payable guardTransition trackState {
-        GasKillerSDKStorage storage $ = _getGasKillerSDKStorage();
-
         // Check block number validity
         require(referenceBlockNumber < block.number, FutureBlockNumber());
         require((uint256(referenceBlockNumber) + _getBlockStaleMeasure()) >= block.number, StaleBlockNumber());
 
         // Verify transition index and message hash
         require(transitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
-        bytes32 expectedHash = sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
-        require(expectedHash == msgHash, InvalidSignature());
+        require(
+            _computeMessageHash(transitionIndex, anchorHash, callerAddress, contractCalldata, storageUpdates)
+                == msgHash,
+            InvalidSignature()
+        );
 
-        // Verify the signatures using checkSignatures
-        (IBLSSignatureCheckerTypes.QuorumStakeTotals memory stakeTotals,) = $.blsSignatureChecker
-            .checkSignatures(msgHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
+        // Verify the signatures and the quorum threshold
+        _verifyQuorumSignatures(msgHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
 
-        // Check that signatories own at least 66% of each quorum
-        uint256 quorumCount = quorumNumbers.length;
-        for (uint256 i = 0; i < quorumCount; ++i) {
-            require(
-                stakeTotals.signedStakeForQuorum[i] * THRESHOLD_DENOMINATOR
-                    >= stakeTotals.totalStakeForQuorum[i] * QUORUM_THRESHOLD,
-                InsufficientQuorumThreshold()
-            );
-        }
+        // Record the commitment for challenge-window tracking when a slasher is configured
+        _recordCommitment(msgHash);
 
         // Apply the state changes
         _stateChangeHandler(storageUpdates);
+    }
+
+    /// @notice Verify the aggregate BLS signature and require the quorum threshold on every quorum
+    /// @dev Delegates to `BLSQuorumLib` so the admission rule here is the exact one
+    ///      `GasKillerBLSSlasher` re-checks when attributing a fraudulent commitment.
+    /// @param msgHash The signed message hash
+    /// @param quorumNumbers The quorum numbers to check signatures for
+    /// @param referenceBlockNumber The block number to use as reference for operator set
+    /// @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
+    function _verifyQuorumSignatures(
+        bytes32 msgHash,
+        bytes calldata quorumNumbers,
+        uint32 referenceBlockNumber,
+        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
+    ) internal view {
+        BLSQuorumLib.verifyQuorum(
+            _getGasKillerSDKStorage().blsSignatureChecker,
+            msgHash,
+            quorumNumbers,
+            referenceBlockNumber,
+            nonSignerStakesAndSignature
+        );
+    }
+
+    /// @notice Record an applied commitment with the configured slasher, if any
+    /// @param commitmentHash The verified message hash
+    function _recordCommitment(bytes32 commitmentHash) internal {
+        IGasKillerSlasher gasKillerSlasher = _getGasKillerSDKStorage().slasher;
+        if (address(gasKillerSlasher) != address(0)) {
+            gasKillerSlasher.recordCommitment(commitmentHash);
+        }
     }
 
     /// @notice Query if a contract implements an interface
@@ -110,17 +150,21 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, IGasKillerSDK {
         return interfaceId == type(IERC165).interfaceId || interfaceId == type(IGasKillerSDK).interfaceId;
     }
 
-    /// @notice Compute the expected message hash for a given transition, function, and storage updates
+    /// @notice Compute the expected message hash for a given transition and execution context
     /// @param transitionIndex The transition index
-    /// @param targetFunction The target function selector
+    /// @param anchorHash The hash of the block the off-chain execution was anchored to
+    /// @param callerAddress The msg.sender of the original call
+    /// @param contractCalldata The full calldata of the original call
     /// @param storageUpdates The ABI-encoded storage updates
     /// @return The expected SHA-256 hash
-    function getMessageHash(uint256 transitionIndex, bytes4 targetFunction, bytes calldata storageUpdates)
-        external
-        view
-        returns (bytes32)
-    {
-        return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
+    function getMessageHash(
+        uint256 transitionIndex,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
+        bytes calldata storageUpdates
+    ) external view returns (bytes32) {
+        return _computeMessageHash(transitionIndex, anchorHash, callerAddress, contractCalldata, storageUpdates);
     }
 
     /// @notice Return the configured AVS service manager address
@@ -153,6 +197,31 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, IGasKillerSDK {
         return _getBlockStaleMeasure();
     }
 
+    /// @notice Return the configured Gas Killer slasher address (zero when unset)
+    /// @return The slasher address
+    function slasher() external view returns (address) {
+        return address(_getGasKillerSDKStorage().slasher);
+    }
+
+    /// @notice Compute the signed message hash for a transition and its execution context
+    /// @param transitionIndex The transition index
+    /// @param anchorHash The hash of the block the off-chain execution was anchored to
+    /// @param callerAddress The msg.sender of the original call
+    /// @param contractCalldata The full calldata of the original call
+    /// @param storageUpdates The ABI-encoded storage updates
+    /// @return The expected SHA-256 hash
+    function _computeMessageHash(
+        uint256 transitionIndex,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
+        bytes calldata storageUpdates
+    ) internal view returns (bytes32) {
+        return CommitmentDigestLib.commitmentHash(
+            address(this), transitionIndex, anchorHash, callerAddress, contractCalldata, storageUpdates
+        );
+    }
+
     /// @notice Decode and execute ABI-encoded storage updates
     /// @param storageUpdates ABI-encoded `(StateUpdateType[], bytes[])` pair
     function _stateChangeHandler(bytes calldata storageUpdates) internal {
@@ -178,6 +247,12 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, IGasKillerSDK {
     /// @param _blockStaleMeasure The new block stale measure value
     function _setBlockStaleMeasure(uint256 _blockStaleMeasure) internal {
         _getGasKillerSDKStorage().blockStaleMeasure = _blockStaleMeasure;
+    }
+
+    /// @notice Set the Gas Killer slasher used for challenge-window recording (zero to disable)
+    /// @param _slasher The new slasher address
+    function _setSlasher(address _slasher) internal {
+        _getGasKillerSDKStorage().slasher = IGasKillerSlasher(_slasher);
     }
 
     /// @notice Return the block stale measure, falling back to the default when unset

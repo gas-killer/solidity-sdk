@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: UNLICENSED
-pragma solidity >=0.5.0 >=0.6.2 ^0.8.0 ^0.8.13 ^0.8.27;
+// SPDX-License-Identifier: AGPL-3.0-only
+pragma solidity >=0.5.0 ^0.8.0 ^0.8.27;
 
 // lib/eigenlayer-middleware/src/libraries/BN254.sol
 
@@ -418,6 +418,30 @@ library CommitmentDigestLib {
     }
 }
 
+// lib/openzeppelin-contracts/contracts/utils/Context.sol
+
+// OpenZeppelin Contracts v4.4.1 (utils/Context.sol)
+
+/**
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+}
+
 // lib/eigenlayer-middleware/lib/eigenlayer-contracts/src/contracts/interfaces/IAVSRegistrar.sol
 
 interface IAVSRegistrar {
@@ -454,18 +478,6 @@ interface IAVSRegistrar {
     function supportsAVS(
         address avs
     ) external view returns (bool);
-}
-
-// lib/forge-std/src/interfaces/IERC165.sol
-
-interface IERC165 {
-    /// @notice Query if a contract implements an interface
-    /// @param interfaceID The interface identifier, as specified in ERC-165
-    /// @dev Interface identification is specified in ERC-165. This function
-    /// uses less than 30,000 gas.
-    /// @return `true` if the contract implements `interfaceID` and
-    /// `interfaceID` is not 0xffffffff, `false` otherwise
-    function supportsInterface(bytes4 interfaceID) external view returns (bool);
 }
 
 // lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol
@@ -695,6 +707,29 @@ interface IGasKillerSlasher {
     function computeCommitmentHash(SignedCommitment calldata commitment) external pure returns (bytes32);
 }
 
+// src/interface/IHeliosLightClient.sol
+
+/**
+ * @title IHeliosLightClient
+ * @notice Interface for Helios Ethereum light client
+ * @dev Used for trustless block hash verification
+ */
+interface IHeliosLightClient {
+    /**
+     * @notice Check if a block hash is valid and verified by the light client
+     * @param blockHash The block hash to verify
+     * @return True if the block hash is valid
+     */
+    function isBlockHashValid(bytes32 blockHash) external view returns (bool);
+
+    /**
+     * @notice Get the block hash for a given block number
+     * @param blockNumber The block number to query
+     * @return The block hash for the given block number
+     */
+    function getBlockHash(uint256 blockNumber) external view returns (bytes32);
+}
+
 // lib/eigenlayer-middleware/src/interfaces/IIndexRegistry.sol
 
 interface IIndexRegistryErrors {
@@ -906,6 +941,28 @@ interface IPauserRegistry {
 
     /// @notice Unique address that holds the unpauser role. Capable of changing *both* the pauser and unpauser addresses.
     function unpauser() external view returns (address);
+}
+
+// src/interface/ISP1Verifier.sol
+
+/**
+ * @title ISP1Verifier
+ * @notice Interface for SP1 proof verification
+ * @dev The verification surface of Succinct's SP1 verifier, redeclared here so the SDK does not
+ *      take a source dependency on `sp1-contracts` for one function signature. Proof-system
+ *      agnostic on purpose: `verifyProof` is identical across Succinct's Groth16 and PLONK
+ *      verifiers and their gateway, so a slasher can be pointed at whichever one a chain has
+ *      deployed. `GasKillerSlasherBase` holds only this interface; the concrete verifier is
+ *      supplied by address at construction.
+ */
+interface ISP1Verifier {
+    /**
+     * @notice Verify an SP1 proof, reverting if it does not hold
+     * @param programVKey The verification key for the SP1 program
+     * @param publicValues The public values from the proof
+     * @param proofBytes The proof bytes, prefixed with the target verifier's 4-byte selector
+     */
+    function verifyProof(bytes32 programVKey, bytes calldata publicValues, bytes calldata proofBytes) external view;
 }
 
 // lib/eigenlayer-middleware/lib/eigenlayer-contracts/src/contracts/interfaces/ISemVerMixin.sol
@@ -2452,292 +2509,45 @@ library SafeCastUpgradeable {
     }
 }
 
-// src/StateChangeHandlerLib.sol
+// lib/openzeppelin-contracts/contracts/utils/math/SignedMath.sol
 
-/// @notice Discriminator enum for the type of state update operation to execute
-/// @dev Each variant maps to a different EVM operation: storage writes, external calls, log emissions, or contract deployment
-enum StateUpdateType {
-    /// @notice Write a 32-byte value directly to a storage slot
-    STORE,
-    /// @notice Execute an external call with optional ETH value transfer
-    CALL,
-    /// @notice Emit a log with no indexed topics
-    LOG0,
-    /// @notice Emit a log with one indexed topic
-    LOG1,
-    /// @notice Emit a log with two indexed topics
-    LOG2,
-    /// @notice Emit a log with three indexed topics
-    LOG3,
-    /// @notice Emit a log with four indexed topics
-    LOG4,
-    /// @notice Deploy a contract using CREATE (nonce-derived address)
-    CREATE,
-    /// @notice Deploy a contract using CREATE2 (salt-derived deterministic address)
-    CREATE2
-}
+// OpenZeppelin Contracts (last updated v4.8.0) (utils/math/SignedMath.sol)
 
-/// @title StateChangeHandlerLib
-/// @notice Library for decoding and executing batched state update operations
-/// @dev Processes ABI-encoded arrays of typed state updates; supports STORE, CALL, LOG0-LOG4, CREATE, and CREATE2
-library StateChangeHandlerLib {
-    /// @notice Decodes and executes a series of state updates
-    /// @dev This function processes an array of state updates, executing them in sequence. Each update can be one of:
-    ///      - STORE: Direct storage writes using assembly
-    ///      - CALL: External contract calls with value transfer
-    ///      - LOG0-LOG4: Event emission with 0-4 indexed topics
-    ///      - CREATE: Contract deployment via CREATE opcode
-    ///      - CREATE2: Deterministic contract deployment via CREATE2 opcode
-    /// @param types Array of StateUpdateType enums indicating the type of each state update operation
-    /// @param args Array of ABI-encoded arguments corresponding to each operation type
-    /// @dev types and args arrays must be equal length, with args[i] containing the encoded parameters for types[i]
-    function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args) internal {
-        uint256 length = types.length;
-        require(length == args.length, InvalidArguments());
-        for (uint256 i = 0; i < length; ++i) {
-            StateUpdateType stateUpdateType = types[i];
-            bytes memory arg = args[i];
-
-            if (stateUpdateType == StateUpdateType.STORE) {
-                (bytes32 slot, bytes32 value) = abi.decode(arg, (bytes32, bytes32));
-                assembly {
-                    sstore(slot, value)
-                }
-            } else if (stateUpdateType == StateUpdateType.CALL) {
-                // Forwards all remaining gas (no stipend cap). In a batched settlement
-                // (e.g. SchnorrGasKillerSDK.verifyAndUpdateBatch) this is amplified: a
-                // greedy or griefing target in an earlier sub-transition's CALL can consume
-                // enough gas to starve every later sub-transition in the same batch,
-                // reverting the whole (atomic) batch. No partial-state hazard — it's all or
-                // nothing — but it does nullify the batch's cost amortization. See
-                // ISchnorrGasKillerSDKBatch for the batch-assembly-side note.
-                (address target, uint256 value, bytes memory callargs) = abi.decode(arg, (address, uint256, bytes));
-                bool success;
-                assembly {
-                    success := call(gas(), target, value, add(callargs, 0x20), mload(callargs), 0, 0)
-                }
-                // TODO: this section needs heavy testing
-                if (!success) {
-                    uint256 _returndatasize;
-                    assembly {
-                        _returndatasize := returndatasize()
-                    }
-                    bytes memory revertData = new bytes(_returndatasize);
-                    assembly {
-                        returndatacopy(add(revertData, 0x20), 0, _returndatasize)
-                    }
-                    revert RevertingContext(i, target, revertData, callargs);
-                }
-            } else if (stateUpdateType == StateUpdateType.LOG0) {
-                // `_validateLogArg` checks that `arg` is a canonical, in-bounds encoding before this reads
-                // directly out of its buffer. The `data` length word sits at `base + canonicalOffset`, and
-                // any topics sit inline in the head at `base + 0x20*k`.
-                _validateLogArg(arg, 0x20);
-                assembly {
-                    let dataPtr := add(add(arg, 0x20), 0x20)
-                    log0(add(dataPtr, 0x20), mload(dataPtr))
-                }
-            } else if (stateUpdateType == StateUpdateType.LOG1) {
-                _validateLogArg(arg, 0x40);
-                assembly {
-                    let base := add(arg, 0x20)
-                    let dataPtr := add(base, 0x40)
-                    log1(add(dataPtr, 0x20), mload(dataPtr), mload(add(base, 0x20)))
-                }
-            } else if (stateUpdateType == StateUpdateType.LOG2) {
-                _validateLogArg(arg, 0x60);
-                assembly {
-                    let base := add(arg, 0x20)
-                    let dataPtr := add(base, 0x60)
-                    log2(add(dataPtr, 0x20), mload(dataPtr), mload(add(base, 0x20)), mload(add(base, 0x40)))
-                }
-            } else if (stateUpdateType == StateUpdateType.LOG3) {
-                _validateLogArg(arg, 0x80);
-                assembly {
-                    let base := add(arg, 0x20)
-                    let dataPtr := add(base, 0x80)
-                    log3(
-                        add(dataPtr, 0x20),
-                        mload(dataPtr),
-                        mload(add(base, 0x20)),
-                        mload(add(base, 0x40)),
-                        mload(add(base, 0x60))
-                    )
-                }
-            } else if (stateUpdateType == StateUpdateType.LOG4) {
-                _validateLogArg(arg, 0xa0);
-                assembly {
-                    let base := add(arg, 0x20)
-                    let dataPtr := add(base, 0xa0)
-                    log4(
-                        add(dataPtr, 0x20),
-                        mload(dataPtr),
-                        mload(add(base, 0x20)),
-                        mload(add(base, 0x40)),
-                        mload(add(base, 0x60)),
-                        mload(add(base, 0x80))
-                    )
-                }
-            } else if (stateUpdateType == StateUpdateType.CREATE) {
-                (uint256 value, bytes memory initcode) = abi.decode(arg, (uint256, bytes));
-                address deployed;
-                assembly {
-                    deployed := create(value, add(initcode, 0x20), mload(initcode))
-                }
-                require(deployed != address(0), DeploymentFailed());
-            } else if (stateUpdateType == StateUpdateType.CREATE2) {
-                (bytes32 salt, uint256 value, bytes memory initcode) = abi.decode(arg, (bytes32, uint256, bytes));
-                address deployed;
-                assembly {
-                    deployed := create2(value, add(initcode, 0x20), mload(initcode), salt)
-                }
-                require(deployed != address(0), DeploymentFailed());
-            }
-        }
+/**
+ * @dev Standard signed math utilities missing in the Solidity language.
+ */
+library SignedMath {
+    /**
+     * @dev Returns the largest of two signed numbers.
+     */
+    function max(int256 a, int256 b) internal pure returns (int256) {
+        return a > b ? a : b;
     }
 
-    /// @notice Validate that `arg` is a canonical, in-bounds ABI encoding of a LOG payload
-    /// @dev Reverts with `MalformedLogPayload` on a truncated head, a non-canonical `data` offset, or a
-    ///      `data` length that runs past the end of `arg`. `canonicalOffset` is the encoding's head size
-    ///      `0x20 * (numTopics + 1)` (0x20 for LOG0, 0x40 for LOG1, ... 0xa0 for LOG4); it is also where the
-    ///      `data` length word lives, and every fixed `bytes32` topic sits within the head before it.
-    /// @param arg The ABI-encoded LOG payload to validate
-    /// @param canonicalOffset The expected offset of the `data` field (equals the encoding's head size)
-    function _validateLogArg(bytes memory arg, uint256 canonicalOffset) private pure {
-        uint256 len = arg.length;
-        // The head (offset word + topics) and the `data` length word must both be readable.
-        if (len < canonicalOffset + 0x20) revert MalformedLogPayload();
-        uint256 off;
-        uint256 dataLen;
-        assembly {
-            let base := add(arg, 0x20)
-            off := mload(base)
-            dataLen := mload(add(base, canonicalOffset))
-        }
-        // Offset must match what abi.encode produces, and the data bytes must fit inside `arg`.
-        // `len >= canonicalOffset + 0x20` above makes the subtraction below safe.
-        if (off != canonicalOffset) revert MalformedLogPayload();
-        if (dataLen > len - canonicalOffset - 0x20) revert MalformedLogPayload();
+    /**
+     * @dev Returns the smallest of two signed numbers.
+     */
+    function min(int256 a, int256 b) internal pure returns (int256) {
+        return a < b ? a : b;
     }
 
-    /// @notice Thrown when `types` and `args` arrays have different lengths
-    error InvalidArguments();
-
-    /// @notice Thrown when a LOG operation's payload is not a canonical, in-bounds ABI encoding
-    error MalformedLogPayload();
-
-    /// @notice Thrown when a CALL operation's external call reverts
-    /// @param index The zero-based position of the failing operation in the batch
-    /// @param target The contract address that was called
-    /// @param revertData The raw revert data returned by the failed call
-    /// @param callargs The calldata that was passed to the failed call
-    error RevertingContext(uint256 index, address target, bytes revertData, bytes callargs);
-
-    /// @notice Thrown when a CREATE or CREATE2 operation returns address(0)
-    error DeploymentFailed();
-}
-
-// src/StateTracker.sol
-
-/// @title StateTracker
-/// @notice Tracks the number of state transitions that have occurred in a contract
-/// @dev Uses a precomputed ERC-7201-style storage slot to store the transition counter.
-///      The slot is computed as: `keccak256("gasKiller.stateTracker") - 1`
-///
-///      Inherit this contract to enable Gas Killer state-transition tracking.
-contract StateTracker {
-    /// @notice Precomputed storage slot for the state transition counter
-    /// @dev Computed as `keccak256("gasKiller.stateTracker") - 1`
-    bytes32 internal constant STATE_TRACKER_STORAGE_LOCATION =
-        0xdebfdfd5a50ad117c10898d68b5ccf0893c6b40d4f443f902e2e7646601bdeaf;
-
-    /// @notice Increment the state transition counter before executing the modified function
-    /// @dev Apply this modifier to any function that constitutes a tracked state transition.
-    ///      Steps: load current count → increment by 1 → store → execute function body.
-    modifier trackState() {
-        assembly {
-            let count := sload(STATE_TRACKER_STORAGE_LOCATION)
-            sstore(STATE_TRACKER_STORAGE_LOCATION, add(0x01, count))
-        }
-        _;
+    /**
+     * @dev Returns the average of two signed numbers without overflow.
+     * The result is rounded towards zero.
+     */
+    function average(int256 a, int256 b) internal pure returns (int256) {
+        // Formula from the book "Hacker's Delight"
+        int256 x = (a & b) + ((a ^ b) >> 1);
+        return x + (int256(uint256(x) >> 255) & (a ^ b));
     }
 
-    /// @notice Return the current number of state transitions that have occurred
-    /// @return count The total number of tracked state transitions
-    function stateTransitionCount() public view returns (uint256 count) {
-        assembly {
-            count := sload(STATE_TRACKER_STORAGE_LOCATION)
-        }
-    }
-}
-
-// src/TransitionGuard.sol
-
-/// @title TransitionGuard
-/// @notice EIP-1153 transient-storage reentrancy guard that doubles as an
-///         "in transition" latch external contracts can query.
-/// @dev Two holes in the unguarded settlement path, one mechanism:
-///
-///      1. **Reentrancy.** `StateChangeHandlerLib`'s `CALL` update forwards all remaining
-///         gas to an arbitrary target *mid-transition* — after `trackState` has already
-///         bumped the counter and before the transition's later updates have executed. A
-///         re-entrant `verifyAndUpdate` carrying transition N+1's valid quorum signature
-///         would pass the transition-index check and interleave N+1's updates inside N.
-///         `guardTransition` makes the re-entrant call revert instead.
-///
-///      2. **Midway state.** During a `CALL` update the called contract observes storage
-///         that never existed per the signed semantics: the transition counter already
-///         shows N+1 while only a prefix of transition N's updates have landed. The quorum
-///         signed the *final* post-transition state, not this intermediate one. The same
-///         transient flag is exposed as `inTransition()`, so integrators reading a Gas
-///         Killer contract can fail closed (revert or fall back) while a transition is
-///         being applied, for one warm TLOAD (~100 gas) paid by the reader.
-///
-///      Transient storage clears automatically at the end of the transaction, so the
-///      guard costs ~3 transient ops (~300 gas) per guarded call and never leaves a
-///      dirty storage slot behind. Requires an EVM with EIP-1153 (Cancun or later).
-abstract contract TransitionGuard {
-    /// @notice Precomputed transient-storage slot for the guard flag
-    /// @dev Computed as `keccak256("gasKiller.transitionGuard") - 1`, mirroring
-    ///      `StateTracker`'s slot-derivation convention.
-    bytes32 internal constant TRANSITION_GUARD_SLOT =
-        0x577f51c71236185614d2425ce0aefc41d4e67f3a91a20821f72674b76f8d3ec0;
-
-    /// @notice Thrown when a guarded function is re-entered while a transition is applying
-    error ReentrantTransition();
-
-    /// @notice Reverts on re-entry and holds the in-transition latch for the duration of
-    ///         the function body (a batch entrypoint holds it across the whole batch).
-    modifier guardTransition() {
-        _enterTransition();
-        _;
-        _exitTransition();
-    }
-
-    /// @notice True while a state transition (or batch of transitions) is being applied
-    /// @dev External contracts that read Gas Killer state and can be called mid-transition
-    ///      (directly or transitively via a `CALL` update) should check this and fail
-    ///      closed — mid-transition storage is not a quorum-signed state.
-    function inTransition() public view virtual returns (bool locked) {
-        assembly {
-            locked := tload(TRANSITION_GUARD_SLOT)
-        }
-    }
-
-    function _enterTransition() private {
-        bool locked;
-        assembly {
-            locked := tload(TRANSITION_GUARD_SLOT)
-        }
-        if (locked) revert ReentrantTransition();
-        assembly {
-            tstore(TRANSITION_GUARD_SLOT, 1)
-        }
-    }
-
-    function _exitTransition() private {
-        assembly {
-            tstore(TRANSITION_GUARD_SLOT, 0)
+    /**
+     * @dev Returns the absolute unsigned value of a signed value.
+     */
+    function abs(int256 n) internal pure returns (uint256) {
+        unchecked {
+            // must be unchecked in order to support `n = type(int256).min`
+            return uint256(n >= 0 ? n : -n);
         }
     }
 }
@@ -3097,6 +2907,87 @@ interface ISignatureUtilsMixin is ISignatureUtilsMixinErrors, ISignatureUtilsMix
     function domainSeparator() external view returns (bytes32);
 }
 
+// lib/openzeppelin-contracts/contracts/access/Ownable.sol
+
+// OpenZeppelin Contracts (last updated v4.9.0) (access/Ownable.sol)
+
+/**
+ * @dev Contract module which provides a basic access control mechanism, where
+ * there is an account (an owner) that can be granted exclusive access to
+ * specific functions.
+ *
+ * By default, the owner account will be the one that deploys the contract. This
+ * can later be changed with {transferOwnership}.
+ *
+ * This module is used through inheritance. It will make available the modifier
+ * `onlyOwner`, which can be applied to your functions to restrict their use to
+ * the owner.
+ */
+abstract contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    /**
+     * @dev Initializes the contract setting the deployer as the initial owner.
+     */
+    constructor() {
+        _transferOwnership(_msgSender());
+    }
+
+    /**
+     * @dev Throws if called by any account other than the owner.
+     */
+    modifier onlyOwner() {
+        _checkOwner();
+        _;
+    }
+
+    /**
+     * @dev Returns the address of the current owner.
+     */
+    function owner() public view virtual returns (address) {
+        return _owner;
+    }
+
+    /**
+     * @dev Throws if the sender is not the owner.
+     */
+    function _checkOwner() internal view virtual {
+        require(owner() == _msgSender(), "Ownable: caller is not the owner");
+    }
+
+    /**
+     * @dev Leaves the contract without owner. It will not be possible to call
+     * `onlyOwner` functions. Can only be called by the current owner.
+     *
+     * NOTE: Renouncing ownership will leave the contract without an owner,
+     * thereby disabling any functionality that is only available to the owner.
+     */
+    function renounceOwnership() public virtual onlyOwner {
+        _transferOwnership(address(0));
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Can only be called by the current owner.
+     */
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        _transferOwnership(newOwner);
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Internal function without access restriction.
+     */
+    function _transferOwnership(address newOwner) internal virtual {
+        address oldOwner = _owner;
+        _owner = newOwner;
+        emit OwnershipTransferred(oldOwner, newOwner);
+    }
+}
+
 // lib/eigenlayer-middleware/lib/eigenlayer-contracts/src/contracts/libraries/SlashingLib.sol
 
 /// @dev All scaling factors have `1e18` as an initial/default value. This value is represented
@@ -3278,6 +3169,88 @@ library SlashingLib {
     }
 }
 
+// lib/openzeppelin-contracts/contracts/utils/Strings.sol
+
+// OpenZeppelin Contracts (last updated v4.9.0) (utils/Strings.sol)
+
+/**
+ * @dev String operations.
+ */
+library Strings {
+    bytes16 private constant _SYMBOLS = "0123456789abcdef";
+    uint8 private constant _ADDRESS_LENGTH = 20;
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` decimal representation.
+     */
+    function toString(uint256 value) internal pure returns (string memory) {
+        unchecked {
+            uint256 length = Math.log10(value) + 1;
+            string memory buffer = new string(length);
+            uint256 ptr;
+            /// @solidity memory-safe-assembly
+            assembly {
+                ptr := add(buffer, add(32, length))
+            }
+            while (true) {
+                ptr--;
+                /// @solidity memory-safe-assembly
+                assembly {
+                    mstore8(ptr, byte(mod(value, 10), _SYMBOLS))
+                }
+                value /= 10;
+                if (value == 0) break;
+            }
+            return buffer;
+        }
+    }
+
+    /**
+     * @dev Converts a `int256` to its ASCII `string` decimal representation.
+     */
+    function toString(int256 value) internal pure returns (string memory) {
+        return string(abi.encodePacked(value < 0 ? "-" : "", toString(SignedMath.abs(value))));
+    }
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` hexadecimal representation.
+     */
+    function toHexString(uint256 value) internal pure returns (string memory) {
+        unchecked {
+            return toHexString(value, Math.log256(value) + 1);
+        }
+    }
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` hexadecimal representation with fixed length.
+     */
+    function toHexString(uint256 value, uint256 length) internal pure returns (string memory) {
+        bytes memory buffer = new bytes(2 * length + 2);
+        buffer[0] = "0";
+        buffer[1] = "x";
+        for (uint256 i = 2 * length + 1; i > 1; --i) {
+            buffer[i] = _SYMBOLS[value & 0xf];
+            value >>= 4;
+        }
+        require(value == 0, "Strings: hex length insufficient");
+        return string(buffer);
+    }
+
+    /**
+     * @dev Converts an `address` with fixed length of 20 bytes to its not checksummed ASCII `string` hexadecimal representation.
+     */
+    function toHexString(address addr) internal pure returns (string memory) {
+        return toHexString(uint256(uint160(addr)), _ADDRESS_LENGTH);
+    }
+
+    /**
+     * @dev Returns true if the two strings are equal.
+     */
+    function equal(string memory a, string memory b) internal pure returns (bool) {
+        return keccak256(bytes(a)) == keccak256(bytes(b));
+    }
+}
+
 // lib/eigenlayer-middleware/lib/eigenlayer-contracts/src/contracts/interfaces/IStrategy.sol
 
 interface IStrategyErrors {
@@ -3426,6 +3399,250 @@ interface IStrategy is IStrategyErrors, IStrategyEvents, ISemVerMixin {
 
     /// @notice Returns either a brief string explaining the strategy's goal & purpose, or a link to metadata that explains in more detail.
     function explanation() external view returns (string memory);
+}
+
+// src/GasKillerSlasherBase.sol
+
+/// @title GasKillerSlasherBase
+/// @notice Scheme-agnostic core of the Gas Killer fraud-proof slashers
+/// @dev A commitment is fraudulent when the aggregate network signed storage updates that differ
+///      from the ones produced by actually executing the committed call. A challenger proves the
+///      correct execution with the Gas Killer challenger SP1 program (see the sp1-contract-call
+///      `examples/gas-killer` guest), which re-executes `contractCalldata` from `callerAddress`
+///      against `contractAddress` at the state anchored by `anchorHash` and commits the resulting
+///      canonical storage updates.
+///
+///      This base owns everything that does not depend on the signature scheme: the challenge
+///      window, the chain-config allowlist, SP1 proof verification, the anchor-hash check, the
+///      fraud comparison, and the slashed/recorded bookkeeping. A concrete slasher wires in the
+///      two scheme-specific steps around it:
+///      1. re-checking that the aggregate network actually signed the commitment (before calling
+///         `_completeSlash`), and
+///      2. deriving and slashing the operators who signed (`_executeSlashing`).
+///
+///      Concrete flow (see `GasKillerBLSSlasher`):
+///      1. `_beginSlash` computes the commitment hash and enforces not-already-slashed + window
+///      2. the concrete verifies the aggregate signature and derives the signer set
+///      3. `_completeSlash` verifies the SP1 proof + anchor hash, confirms fraud, marks the
+///         commitment slashed, invokes `_executeSlashing`, and emits `SlashingExecuted`
+///
+///      A Schnorr concrete is intentionally not provided yet — the Schnorr staking system has no
+///      economic stake to seize and no on-chain signer enumeration. Tracked in
+///      https://github.com/gas-killer/solidity-sdk/issues/65.
+abstract contract GasKillerSlasherBase is IGasKillerSlasher, Ownable {
+    // ============ Constants ============
+
+    /// @notice `AnchorType.BlockHash` as committed by the challenger program
+    uint8 public constant ANCHOR_TYPE_BLOCK_HASH = 0;
+
+    /// @notice Wad amount for full slash (100%)
+    uint256 public constant FULL_SLASH_WAD = 1e18;
+
+    // ============ Immutables ============
+
+    /// @notice The SP1 verifier contract (Groth16 or PLONK gateway)
+    ISP1Verifier public immutable SP1_VERIFIER;
+
+    /// @notice The Helios light client contract used to verify anchor block hashes
+    IHeliosLightClient public immutable HELIOS;
+
+    /// @notice The SP1 verification key of the Gas Killer challenger program
+    /// @dev Internal: `programVKey()` is the external accessor, so the interface stays the single
+    ///      documented surface rather than shipping two getters for one value.
+    bytes32 internal immutable PROGRAM_V_KEY;
+
+    /// @notice The challenge window duration in seconds
+    /// @dev Internal for the same reason as [`PROGRAM_V_KEY`]; read it via `challengeWindow()`.
+    uint256 internal immutable CHALLENGE_WINDOW;
+
+    // ============ Storage ============
+
+    /// @notice Mapping of commitment hash to slashed status
+    mapping(bytes32 => bool) private _slashed;
+
+    /// @notice Mapping of (target contract, commitment hash) to application timestamp
+    /// @dev Keyed by the recording contract so third parties cannot start the challenge
+    ///      window for commitments they did not apply
+    mapping(address => mapping(bytes32 => uint256)) private _commitmentTimestamp;
+
+    /// @notice Chain config hashes (chain id + active hardfork) accepted for proofs
+    /// @dev The challenger program commits `keccak256(chainId ++ activeForkName)` where
+    ///      `activeForkName` is the hardfork active at the anchor block; that value changes
+    ///      the moment a network hardfork activates. The owner must accept the new fork's
+    ///      hash so commitments anchored to post-fork blocks stay challengeable. Requiring an
+    ///      explicit allowlist still blocks proofs generated against a wrong chain/fork.
+    mapping(bytes32 => bool) public acceptedChainConfigHash;
+
+    // ============ Constructor ============
+
+    /// @notice Initialize the scheme-agnostic slasher state
+    /// @param _sp1Verifier The SP1 verifier contract address
+    /// @param _helios The Helios light client contract address. Zero deploys a
+    ///        **recording-only** slasher: `recordCommitment` still starts challenge windows, but
+    ///        every `slash` reverts `UnverifiedBlock`, because an anchor hash can only be
+    ///        confirmed against a light client. This is immutable — a slasher deployed with zero
+    ///        can never slash, and enabling slashing later means deploying a new one and
+    ///        re-pointing the SDKs at it.
+    /// @param _programVKey The SP1 verification key of the challenger program
+    /// @param _chainConfigHash The initial accepted chain config hash of challenger proofs
+    ///        (the owner accepts additional hashes as the network hardforks)
+    /// @param _challengeWindow The challenge window duration in seconds
+    constructor(
+        address _sp1Verifier,
+        address _helios,
+        bytes32 _programVKey,
+        bytes32 _chainConfigHash,
+        uint256 _challengeWindow
+    ) {
+        SP1_VERIFIER = ISP1Verifier(_sp1Verifier);
+        HELIOS = IHeliosLightClient(_helios);
+        PROGRAM_V_KEY = _programVKey;
+        acceptedChainConfigHash[_chainConfigHash] = true;
+        CHALLENGE_WINDOW = _challengeWindow;
+        emit ChainConfigHashSet(_chainConfigHash, true);
+    }
+
+    // ============ External Functions ============
+
+    /// @inheritdoc IGasKillerSlasher
+    function setChainConfigHashAccepted(bytes32 chainConfigHash, bool accepted) external onlyOwner {
+        acceptedChainConfigHash[chainConfigHash] = accepted;
+        emit ChainConfigHashSet(chainConfigHash, accepted);
+    }
+
+    /// @inheritdoc IGasKillerSlasher
+    function recordCommitment(bytes32 commitmentHash) external {
+        if (_commitmentTimestamp[msg.sender][commitmentHash] == 0) {
+            _commitmentTimestamp[msg.sender][commitmentHash] = block.timestamp;
+            emit CommitmentRecorded(msg.sender, commitmentHash);
+        }
+    }
+
+    /// @inheritdoc IGasKillerSlasher
+    function isSlashed(bytes32 commitmentHash) external view returns (bool) {
+        return _slashed[commitmentHash];
+    }
+
+    /// @inheritdoc IGasKillerSlasher
+    function getCommitmentTimestamp(address targetContract, bytes32 commitmentHash) external view returns (uint256) {
+        return _commitmentTimestamp[targetContract][commitmentHash];
+    }
+
+    /// @inheritdoc IGasKillerSlasher
+    function challengeWindow() external view returns (uint256) {
+        return CHALLENGE_WINDOW;
+    }
+
+    /// @inheritdoc IGasKillerSlasher
+    function programVKey() external view returns (bytes32) {
+        return PROGRAM_V_KEY;
+    }
+
+    /// @inheritdoc IGasKillerSlasher
+    function computeCommitmentHash(SignedCommitment calldata commitment) public pure returns (bytes32) {
+        return CommitmentDigestLib.commitmentHash(
+            commitment.contractAddress,
+            commitment.transitionIndex,
+            commitment.anchorHash,
+            commitment.callerAddress,
+            commitment.contractCalldata,
+            commitment.storageUpdates
+        );
+    }
+
+    // ============ Internal Functions ============
+
+    /// @notice Begin a slashing challenge: compute the commitment hash and enforce the
+    ///         not-already-slashed and challenge-window preconditions
+    /// @dev Unrecorded commitments remain challengeable indefinitely: signing a fraudulent
+    ///      commitment is an offense even if it was never applied on-chain.
+    /// @param commitment The signed commitment being challenged
+    /// @return commitmentHash The computed commitment hash
+    function _beginSlash(SignedCommitment calldata commitment) internal view returns (bytes32 commitmentHash) {
+        commitmentHash = computeCommitmentHash(commitment);
+
+        require(!_slashed[commitmentHash], AlreadySlashed());
+
+        uint256 timestamp = _commitmentTimestamp[commitment.contractAddress][commitmentHash];
+        require(timestamp == 0 || block.timestamp <= timestamp + CHALLENGE_WINDOW, ChallengeExpired());
+    }
+
+    /// @notice Verify the fraud proof and, on confirmed fraud, mark the commitment slashed and
+    ///         slash the given signers
+    /// @dev The caller (a concrete slasher) must have already verified the aggregate signature
+    ///      over `commitmentHash` and derived `signers` from exactly that signed set.
+    /// @param commitment The signed commitment being challenged
+    /// @param commitmentHash The commitment hash returned by `_beginSlash`
+    /// @param sp1Proof The SP1 proof bytes
+    /// @param sp1PublicValues The ABI-encoded `GasKillerPublicValues`
+    /// @param signers The operators that signed the commitment, to be slashed on confirmed fraud
+    function _completeSlash(
+        SignedCommitment calldata commitment,
+        bytes32 commitmentHash,
+        bytes calldata sp1Proof,
+        bytes calldata sp1PublicValues,
+        address[] memory signers
+    ) internal {
+        // Verify the SP1 proof of the correct execution.
+        _verifyProof(sp1Proof, sp1PublicValues);
+
+        // Compare the proven execution with the signed commitment.
+        GasKillerPublicValues memory proven = abi.decode(sp1PublicValues, (GasKillerPublicValues));
+        _checkInputs(commitment, proven);
+
+        // Verify the anchor block hash is a real block on this chain.
+        _verifyAnchorHash(proven.anchorHash);
+
+        // Fraud iff the proven storage updates differ from the signed ones.
+        require(keccak256(proven.storageUpdates) != keccak256(commitment.storageUpdates), NoFraudDetected());
+
+        _slashed[commitmentHash] = true;
+
+        _executeSlashing(signers, commitmentHash);
+
+        emit SlashingExecuted(commitmentHash, msg.sender, signers, FULL_SLASH_WAD);
+    }
+
+    /// @notice Slash the operators who signed a commitment proven fraudulent
+    /// @dev Implemented per scheme: the BLS concrete slashes through EigenLayer's InstantSlasher.
+    /// @param signers Operator addresses to slash
+    /// @param commitmentHash The commitment hash, referenced in the slashing description
+    function _executeSlashing(address[] memory signers, bytes32 commitmentHash) internal virtual;
+
+    /// @notice Verify the SP1 proof
+    /// @param proofBytes The SP1 proof bytes
+    /// @param publicValues The ABI-encoded public values
+    function _verifyProof(bytes calldata proofBytes, bytes calldata publicValues) internal view {
+        try SP1_VERIFIER.verifyProof(PROGRAM_V_KEY, publicValues, proofBytes) {}
+        catch {
+            revert InvalidProof();
+        }
+    }
+
+    /// @notice Require the proven execution inputs to match the signed commitment
+    /// @param commitment The signed commitment
+    /// @param proven The proof's public values
+    function _checkInputs(SignedCommitment calldata commitment, GasKillerPublicValues memory proven) internal view {
+        require(acceptedChainConfigHash[proven.chainConfigHash], InvalidChainConfig());
+        require(proven.anchorType == ANCHOR_TYPE_BLOCK_HASH, InputMismatch());
+        require(proven.anchorHash == commitment.anchorHash, InputMismatch());
+        require(proven.callerAddress == commitment.callerAddress, InputMismatch());
+        require(proven.contractAddress == commitment.contractAddress, InputMismatch());
+        require(keccak256(proven.contractCalldata) == keccak256(commitment.contractCalldata), InputMismatch());
+    }
+
+    /// @notice Verify an anchor block hash using the Helios light client
+    /// @dev Fails closed on an unset light client: without one there is no way to establish that
+    ///      the anchor is a real block on this chain, and accepting an unverifiable anchor would
+    ///      let a challenger slash against a fabricated execution context.
+    /// @param anchorHash The block hash to verify
+    function _verifyAnchorHash(bytes32 anchorHash) internal view {
+        if (address(HELIOS) != address(0) && HELIOS.isBlockHashValid(anchorHash)) {
+            return;
+        }
+
+        revert UnverifiedBlock();
+    }
 }
 
 // lib/eigenlayer-middleware/lib/eigenlayer-contracts/src/contracts/interfaces/IDelegationManager.sol
@@ -5035,6 +5252,56 @@ interface IStakeRegistry is IStakeRegistryErrors, IStakeRegistryEvents {
     ) external view returns (uint96);
 }
 
+// lib/eigenlayer-middleware/src/interfaces/ISlasher.sol
+
+interface ISlasherErrors {
+    /// @notice Thrown when a caller without slasher privileges attempts a restricted operation
+    error OnlySlasher();
+}
+
+interface ISlasherTypes {
+    /// @notice Structure containing details about a slashing request
+    struct SlashingRequest {
+        IAllocationManagerTypes.SlashingParams params;
+        uint256 requestTimestamp;
+    }
+}
+
+interface ISlasherEvents is ISlasherTypes {
+    /// @notice Emitted when an operator is successfully slashed
+    event OperatorSlashed(
+        uint256 indexed slashingRequestId,
+        address indexed operator,
+        uint32 indexed operatorSetId,
+        uint256[] wadsToSlash,
+        string description
+    );
+}
+
+/// @title ISlasher
+/// @notice Base interface containing shared functionality for all slasher implementations
+interface ISlasher is ISlasherErrors, ISlasherEvents {
+    /// @notice Returns the address authorized to create and fulfill slashing requests
+    function slasher() external view returns (address);
+
+    /// @notice Returns the next slashing request ID
+    function nextRequestId() external view returns (uint256);
+}
+
+// lib/eigenlayer-middleware/src/interfaces/IInstantSlasher.sol
+
+/// @title IInstantSlasher
+/// @notice A slashing contract that immediately executes slashing requests without any delay or veto period
+/// @dev Extends base interfaces to provide access controlled slashing functionality
+interface IInstantSlasher is ISlasher {
+    /// @notice Immediately executes a slashing request
+    /// @param _slashingParams Parameters defining the slashing request including operator and amount
+    /// @dev Can only be called by the authorized slasher
+    function fulfillSlashingRequest(
+        IAllocationManagerTypes.SlashingParams memory _slashingParams
+    ) external;
+}
+
 // lib/eigenlayer-middleware/src/interfaces/ISlashingRegistryCoordinator.sol
 
 interface ISlashingRegistryCoordinatorErrors {
@@ -5833,621 +6100,244 @@ library BLSQuorumLib {
     }
 }
 
-// src/interface/IGasKillerSDK.sol
+// src/interface/IGasKillerBLSSlasher.sol
 
-/// @title IGasKillerSDK
-/// @notice Interface for GasKillerSDK contracts
-/// @dev Defines the core functionality that GasKillerSDK implementations must provide
-interface IGasKillerSDK is IERC165 {
-    // Custom errors
-
-    /// @notice Thrown when `transitionIndex + 1` does not equal the current `stateTransitionCount`
-    error InvalidTransitionIndex();
-
-    /// @notice Thrown when the reconstructed message hash does not match `msgHash`
-    error InvalidSignature();
-
-    /// @notice Thrown when the provided storage updates cannot be decoded or applied
-    error InvalidStorageUpdates();
-
-    /// @notice Thrown when an unrecognised state update operation type is encountered
-    error InvalidOperation();
-
-    /// @notice Thrown when signatories hold less than `QUORUM_THRESHOLD`% of stake for any quorum
-    error InsufficientQuorumThreshold();
-
-    /// @notice Thrown when `referenceBlockNumber` is older than `blockStaleMeasure` blocks ago
-    error StaleBlockNumber();
-
-    /// @notice Thrown when `referenceBlockNumber` is greater than or equal to the current block number
-    error FutureBlockNumber();
-
-    /// @notice Verify BLS quorum signatures and apply the encoded state updates
-    /// @dev Payable so a caller can fund value-bearing `CALL`/`CREATE`/`CREATE2` state updates
-    ///      out of `msg.value`. The value each update moves is fixed inside the quorum-signed
-    ///      `storageUpdates`, so `msg.value` only tops up the contract's balance — it cannot
-    ///      redirect value anywhere the quorum did not sign. Under-funding reverts the whole
-    ///      transition. Over-funding is NOT refunded: whatever the updates do not consume stays
-    ///      in the contract, and recovering it is the responsibility of the inheriting contract
-    ///      (e.g. a withdrawal function, or a refund executed as a signed CALL update in a
-    ///      later transition).
-    /// @param msgHash The hash of the message to verify
-    /// @param quorumNumbers The quorum numbers to check signatures for
-    /// @param referenceBlockNumber The block number to use as reference for operator set
-    /// @param storageUpdates The storage updates to verify
-    /// @param transitionIndex The transition index
-    /// @param anchorHash The hash of the block the off-chain execution was anchored to
-    /// @param callerAddress The msg.sender of the original call
-    /// @param contractCalldata The full calldata of the original call
-    /// @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
-    function verifyAndUpdate(
-        bytes32 msgHash,
+/// @title IGasKillerBLSSlasher
+/// @notice Slashing interface for the BLS-based Gas Killer AVS
+/// @dev Extends the scheme-agnostic `IGasKillerSlasher` with a `slash` entrypoint that carries the
+///      aggregate BLS signature material (`quorumNumbers`, `referenceBlockNumber`,
+///      `NonSignerStakesAndSignature`) verified against the EigenLayer `BLSSignatureChecker`.
+interface IGasKillerBLSSlasher is IGasKillerSlasher {
+    /// @notice Submit a fraud proof for a signed commitment and slash the operators who signed it
+    /// @dev Verifies (1) the aggregate network actually signed the commitment, (2) the SP1 proof
+    ///      of the correct execution, (3) the anchor block hash, and (4) that the proven storage
+    ///      updates differ from the signed ones. On success, every operator that signed the
+    ///      commitment is slashed through EigenLayer.
+    /// @param commitment The signed commitment being challenged
+    /// @param quorumNumbers The quorum numbers the commitment was signed for
+    /// @param referenceBlockNumber The reference block used for the operator set
+    /// @param nonSignerStakesAndSignature The aggregate BLS signature and non-signer data,
+    ///        exactly as submitted to `verifyAndUpdate`
+    /// @param sp1Proof The SP1 proof bytes (Groth16 or PLONK)
+    /// @param sp1PublicValues The ABI-encoded `GasKillerPublicValues`
+    function slash(
+        SignedCommitment calldata commitment,
         bytes calldata quorumNumbers,
         uint32 referenceBlockNumber,
-        bytes calldata storageUpdates,
-        uint256 transitionIndex,
-        bytes32 anchorHash,
-        address callerAddress,
-        bytes calldata contractCalldata,
-        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
-    ) external payable;
+        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature,
+        bytes calldata sp1Proof,
+        bytes calldata sp1PublicValues
+    ) external;
 }
 
-// src/GasKillerSDK.sol
+// src/GasKillerBLSSlasher.sol
 
-/// @title GasKillerSDK
-/// @notice Base SDK for implementing Gas Killer functionality in contracts
-/// @dev Inherit from this contract to add Gas Killer capabilities to your contract.
+/// @title GasKillerBLSSlasher
+/// @notice Detects fraudulent Gas Killer commitments signed by the BLS AVS and slashes the signers
+/// @dev Wires the BLS signature scheme into `GasKillerSlasherBase`. The two scheme-specific steps
+///      are re-checking the aggregate BLS signature (same `checkSignatures` + quorum threshold as
+///      `GasKillerSDK.verifyAndUpdate`) and deriving + slashing the signer set through EigenLayer.
 ///
-///      `verifyAndUpdate` is `guardTransition`-protected (see `TransitionGuard`): a `CALL`
-///      state update runs arbitrary external code mid-transition, so re-entering
-///      `verifyAndUpdate` with the *next* transition's valid quorum signature would
-///      otherwise interleave two signed transitions. The same transient flag is queryable
-///      as `inTransition()` so external readers can reject mid-transition state.
-abstract contract GasKillerSDK is StateTracker, TransitionGuard, IGasKillerSDK {
-    /// @custom:storage-location erc7201:gaskiller.GasKillerSDK.storage
-    struct GasKillerSDKStorage {
-        /// @notice Deprecated. Maintained to preserve storage layout. Now derived on read by `namespace()`
-        bytes __deprecated_namespace;
-        /// @notice The AVS service manager address
-        address avsAddress;
-        /// @notice The BLS signature checker contract used to verify operator signatures
-        IBLSSignatureChecker blsSignatureChecker;
-        /// @notice Maximum number of blocks a reference block may lag behind the current block
-        uint256 blockStaleMeasure;
-        /// @notice Optional Gas Killer slasher; when set, applied commitments are recorded for challenge-window tracking
-        IGasKillerSlasher slasher;
+///      Slashing flow:
+///      1. Challenger calls `slash()` with the signed commitment, the aggregate BLS signature
+///         material, and the SP1 fraud proof
+///      2. The contract checks the aggregate network actually signed the commitment
+///      3. The SP1 proof and the anchor block hash are verified (base)
+///      4. Proven storage updates are compared with the signed ones; a mismatch is fraud (base)
+///      5. Every operator that signed is slashed through `InstantSlasher.fulfillSlashingRequest`
+///
+///      Note: this contract must be set as the authorized `slasher` in the InstantSlasher contract.
+contract GasKillerBLSSlasher is GasKillerSlasherBase, IGasKillerBLSSlasher {
+    using BN254 for BN254.G1Point;
+
+    // ============ Immutables ============
+
+    /// @notice The BLS signature checker of the Gas Killer AVS
+    IBLSSignatureChecker public immutable BLS_SIGNATURE_CHECKER;
+
+    /// @notice The registry coordinator of the Gas Killer AVS
+    ISlashingRegistryCoordinator public immutable REGISTRY_COORDINATOR;
+
+    /// @notice The index registry of the Gas Killer AVS
+    IIndexRegistry public immutable INDEX_REGISTRY;
+
+    /// @notice The EigenLayer InstantSlasher contract
+    IInstantSlasher public immutable INSTANT_SLASHER;
+
+    /// @notice The EigenLayer AllocationManager contract
+    IAllocationManager public immutable ALLOCATION_MANAGER;
+
+    /// @notice The AVS address (Gas Killer service manager)
+    address public immutable AVS;
+
+    /// @notice The operator set ID for Gas Killer
+    uint32 public immutable OPERATOR_SET_ID;
+
+    // ============ Constructor ============
+
+    /// @notice Initialize the BLS slasher contract
+    /// @param _sp1Verifier The SP1 verifier contract address
+    /// @param _helios The Helios light client contract address (0 to rely on recording only)
+    /// @param _blsSignatureChecker The BLS signature checker of the Gas Killer AVS
+    /// @param _registryCoordinator The registry coordinator of the Gas Killer AVS
+    /// @param _indexRegistry The index registry of the Gas Killer AVS
+    /// @param _instantSlasher The EigenLayer InstantSlasher contract address
+    /// @param _allocationManager The EigenLayer AllocationManager contract address
+    /// @param _avs The AVS (Gas Killer service manager) address
+    /// @param _programVKey The SP1 verification key of the challenger program
+    /// @param _chainConfigHash The initial accepted chain config hash of challenger proofs
+    ///        (the owner accepts additional hashes as the network hardforks)
+    /// @param _challengeWindow The challenge window duration in seconds
+    /// @param _operatorSetId The operator set ID for Gas Killer
+    constructor(
+        address _sp1Verifier,
+        address _helios,
+        address _blsSignatureChecker,
+        address _registryCoordinator,
+        address _indexRegistry,
+        address _instantSlasher,
+        address _allocationManager,
+        address _avs,
+        bytes32 _programVKey,
+        bytes32 _chainConfigHash,
+        uint256 _challengeWindow,
+        uint32 _operatorSetId
+    ) GasKillerSlasherBase(_sp1Verifier, _helios, _programVKey, _chainConfigHash, _challengeWindow) {
+        BLS_SIGNATURE_CHECKER = IBLSSignatureChecker(_blsSignatureChecker);
+        REGISTRY_COORDINATOR = ISlashingRegistryCoordinator(_registryCoordinator);
+        INDEX_REGISTRY = IIndexRegistry(_indexRegistry);
+        INSTANT_SLASHER = IInstantSlasher(_instantSlasher);
+        ALLOCATION_MANAGER = IAllocationManager(_allocationManager);
+        AVS = _avs;
+        OPERATOR_SET_ID = _operatorSetId;
     }
 
-    // keccak256(abi.encode(uint256(keccak256("gaskiller.GasKillerSDK.storage")) - 1)) & ~bytes32(uint256(0xff));
-    bytes32 private constant GAS_KILLER_SDK_STORAGE_LOCATION =
-        0x321ebf629ed2e1e368f0890e8fdd95cf9a2ae5961b66a1805f0b2ec84e21d000;
+    // ============ External Functions ============
 
-    /// @notice Denominator used when evaluating stake percentage thresholds (representing 100%)
-    /// @dev Exposed for integrators; the value itself lives in `BLSQuorumLib`, which owns the
-    ///      admission rule shared with `GasKillerBLSSlasher`.
-    uint8 public constant THRESHOLD_DENOMINATOR = BLSQuorumLib.THRESHOLD_DENOMINATOR;
-
-    /// @notice Minimum percentage of quorum stake that must have signed to approve a state update (QUORUM_THRESHOLD/THRESHOLD_DENOMINATOR)
-    /// @dev See [`THRESHOLD_DENOMINATOR`] on where the value is defined.
-    uint8 public constant QUORUM_THRESHOLD = BLSQuorumLib.QUORUM_THRESHOLD;
-
-    /// @notice Default maximum age (in blocks) a reference block is considered valid when none is configured
-    uint256 private constant DEFAULT_BLOCK_STALE_MEASURE = 300;
-
-    /// @notice Verify BLS quorum signatures and apply the encoded state updates
-    /// @dev The signed message binds the full execution context (anchor block, caller, calldata)
-    ///      so that incorrect storage updates are provable — and slashable — after the fact via
-    ///      an SP1 execution proof (see `GasKillerSlasher`)
-    ///
-    ///      Payable so a caller can fund value-bearing `CALL`/`CREATE`/`CREATE2` state updates
-    ///      out of `msg.value`. The value each update moves is fixed inside the quorum-signed
-    ///      `storageUpdates`, so `msg.value` only tops up this contract's balance — it cannot
-    ///      redirect value anywhere the quorum did not sign. Under-funding reverts the whole
-    ///      transition (`RevertingContext` for a CALL, `DeploymentFailed` for a CREATE/CREATE2).
-    ///      Over-funding is NOT refunded: whatever the updates do not consume simply stays in
-    ///      this contract. Inheriting contracts whose callers may over-send must provide their
-    ///      own recovery path (e.g. a withdrawal function, or a refund executed as a signed
-    ///      CALL update in a later transition).
-    /// @param msgHash The hash of the message to verify
-    /// @param quorumNumbers The quorum numbers to check signatures for
-    /// @param referenceBlockNumber The block number to use as reference for operator set
-    /// @param storageUpdates The storage updates to verify
-    /// @param transitionIndex The transition index
-    /// @param anchorHash The hash of the block the off-chain execution was anchored to
-    /// @param callerAddress The msg.sender of the original call
-    /// @param contractCalldata The full calldata of the original call
-    /// @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
-    function verifyAndUpdate(
-        bytes32 msgHash,
+    /// @inheritdoc IGasKillerBLSSlasher
+    function slash(
+        SignedCommitment calldata commitment,
         bytes calldata quorumNumbers,
         uint32 referenceBlockNumber,
-        bytes calldata storageUpdates,
-        uint256 transitionIndex,
-        bytes32 anchorHash,
-        address callerAddress,
-        bytes calldata contractCalldata,
-        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
-    ) external payable guardTransition trackState {
-        // Check block number validity
-        require(referenceBlockNumber < block.number, FutureBlockNumber());
-        require((uint256(referenceBlockNumber) + _getBlockStaleMeasure()) >= block.number, StaleBlockNumber());
+        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature,
+        bytes calldata sp1Proof,
+        bytes calldata sp1PublicValues
+    ) external {
+        bytes32 commitmentHash = _beginSlash(commitment);
 
-        // Verify transition index and message hash
-        require(transitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
-        require(
-            _computeMessageHash(transitionIndex, anchorHash, callerAddress, contractCalldata, storageUpdates)
-                == msgHash,
-            InvalidSignature()
-        );
-
-        // Verify the signatures and the quorum threshold
-        _verifyQuorumSignatures(msgHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
-
-        // Record the commitment for challenge-window tracking when a slasher is configured
-        _recordCommitment(msgHash);
-
-        // Apply the state changes
-        _stateChangeHandler(storageUpdates);
-    }
-
-    /// @notice Verify the aggregate BLS signature and require the quorum threshold on every quorum
-    /// @dev Delegates to `BLSQuorumLib` so the admission rule here is the exact one
-    ///      `GasKillerBLSSlasher` re-checks when attributing a fraudulent commitment.
-    /// @param msgHash The signed message hash
-    /// @param quorumNumbers The quorum numbers to check signatures for
-    /// @param referenceBlockNumber The block number to use as reference for operator set
-    /// @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
-    function _verifyQuorumSignatures(
-        bytes32 msgHash,
-        bytes calldata quorumNumbers,
-        uint32 referenceBlockNumber,
-        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
-    ) internal view {
+        // Verify the aggregate network actually signed this commitment. `BLSQuorumLib` is the
+        // same admission rule `GasKillerSDK.verifyAndUpdate` applies, so a commitment that could
+        // never have settled cannot be used to slash, and one that did settle is always
+        // attributable.
         BLSQuorumLib.verifyQuorum(
-            _getGasKillerSDKStorage().blsSignatureChecker,
-            msgHash,
-            quorumNumbers,
-            referenceBlockNumber,
-            nonSignerStakesAndSignature
+            BLS_SIGNATURE_CHECKER, commitmentHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature
         );
+
+        // Derive every operator that signed the commitment: all operators registered for the
+        // signed quorums at the reference block, minus the declared non-signers.
+        address[] memory signers = _getSigners(quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
+
+        // Verify the SP1 fraud proof and, on confirmed fraud, slash the signers.
+        _completeSlash(commitment, commitmentHash, sp1Proof, sp1PublicValues, signers);
     }
 
-    /// @notice Record an applied commitment with the configured slasher, if any
-    /// @param commitmentHash The verified message hash
-    function _recordCommitment(bytes32 commitmentHash) internal {
-        IGasKillerSlasher gasKillerSlasher = _getGasKillerSDKStorage().slasher;
-        if (address(gasKillerSlasher) != address(0)) {
-            gasKillerSlasher.recordCommitment(commitmentHash);
+    // ============ Internal Functions ============
+
+    /// @notice Derive the set of operators that signed: all operators registered for the given
+    ///         quorums at the reference block, minus the declared non-signers
+    /// @dev The aggregate signature was already verified against exactly this set by
+    ///      `checkSignatures`, so the derived list is the true signer set
+    /// @param quorumNumbers The quorum numbers the commitment was signed for
+    /// @param referenceBlockNumber The reference block used for the operator set
+    /// @param nonSignerStakesAndSignature The non-signer data submitted with the signature
+    /// @return signers The signer addresses (deduplicated across quorums)
+    function _getSigners(
+        bytes calldata quorumNumbers,
+        uint32 referenceBlockNumber,
+        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
+    ) internal view returns (address[] memory signers) {
+        uint256 nonSignerCount = nonSignerStakesAndSignature.nonSignerPubkeys.length;
+        bytes32[] memory nonSignerIds = new bytes32[](nonSignerCount);
+        for (uint256 i = 0; i < nonSignerCount; i++) {
+            nonSignerIds[i] = nonSignerStakesAndSignature.nonSignerPubkeys[i].hashG1Point();
+        }
+
+        // Read each quorum's operator list once: the collection loop below needs both its
+        // length (to size the buffer) and its contents.
+        uint256 quorumCount = quorumNumbers.length;
+        bytes32[][] memory operatorIdsPerQuorum = new bytes32[][](quorumCount);
+        uint256 totalOperators = 0;
+        for (uint256 q = 0; q < quorumCount; q++) {
+            operatorIdsPerQuorum[q] =
+                INDEX_REGISTRY.getOperatorListAtBlockNumber(uint8(quorumNumbers[q]), referenceBlockNumber);
+            totalOperators += operatorIdsPerQuorum[q].length;
+        }
+
+        // An operator appears at most once in a given quorum's list, so the same id can only
+        // recur across quorums. With a single quorum the dedup scan can never fire, and skipping
+        // it takes the common case from quadratic to linear.
+        bool dedupeAcrossQuorums = quorumCount > 1;
+
+        // Collect operator ids over all quorums, skipping non-signers and duplicates.
+        bytes32[] memory signerIds = new bytes32[](totalOperators);
+        uint256 signerCount = 0;
+        for (uint256 q = 0; q < quorumCount; q++) {
+            bytes32[] memory operatorIds = operatorIdsPerQuorum[q];
+            for (uint256 i = 0; i < operatorIds.length; i++) {
+                if (_contains(nonSignerIds, operatorIds[i], nonSignerCount)) {
+                    continue;
+                }
+                if (dedupeAcrossQuorums && _contains(signerIds, operatorIds[i], signerCount)) {
+                    continue;
+                }
+                signerIds[signerCount++] = operatorIds[i];
+            }
+        }
+
+        signers = new address[](signerCount);
+        for (uint256 i = 0; i < signerCount; i++) {
+            signers[i] = REGISTRY_COORDINATOR.getOperatorFromId(signerIds[i]);
         }
     }
 
-    /// @notice Query if a contract implements an interface
-    /// @dev Supports ERC-165 and IGasKillerSDK interface detection
-    /// @param interfaceId The interface identifier, as specified in ERC-165
-    /// @return `true` if the contract implements `interfaceId` and `false` otherwise
-    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
-        return interfaceId == type(IERC165).interfaceId || interfaceId == type(IGasKillerSDK).interfaceId;
-    }
-
-    /// @notice Compute the expected message hash for a given transition and execution context
-    /// @param transitionIndex The transition index
-    /// @param anchorHash The hash of the block the off-chain execution was anchored to
-    /// @param callerAddress The msg.sender of the original call
-    /// @param contractCalldata The full calldata of the original call
-    /// @param storageUpdates The ABI-encoded storage updates
-    /// @return The expected SHA-256 hash
-    function getMessageHash(
-        uint256 transitionIndex,
-        bytes32 anchorHash,
-        address callerAddress,
-        bytes calldata contractCalldata,
-        bytes calldata storageUpdates
-    ) external view returns (bytes32) {
-        return _computeMessageHash(transitionIndex, anchorHash, callerAddress, contractCalldata, storageUpdates);
-    }
-
-    /// @notice Return the configured AVS service manager address
-    /// @return The AVS address
-    function avsAddress() external view returns (address) {
-        return _getGasKillerSDKStorage().avsAddress;
-    }
-
-    /// @notice Return the configured BLS signature checker address
-    /// @return The BLS signature checker address
-    function blsSignatureChecker() external view returns (address) {
-        return address(_getGasKillerSDKStorage().blsSignatureChecker);
-    }
-
-    /// @notice Return the namespace bytes derived from the AVS address
-    /// @dev Computed on read as `abi.encodePacked(avsAddress, "gaskiller")`, avoiding a dynamic-bytes SSTORE
-    ///      at configuration time. Returns empty bytes when the AVS address is unset.
-    /// @return The namespace
-    function namespace() external view returns (bytes memory) {
-        address _avsAddress = _getGasKillerSDKStorage().avsAddress;
-        if (_avsAddress == address(0)) {
-            return "";
+    /// @notice Check whether `value` appears in the first `length` elements of `array`
+    function _contains(bytes32[] memory array, bytes32 value, uint256 length) private pure returns (bool) {
+        for (uint256 i = 0; i < length; i++) {
+            if (array[i] == value) {
+                return true;
+            }
         }
-        return abi.encodePacked(_avsAddress, "gaskiller");
+        return false;
     }
 
-    /// @notice Return the configured block stale measure (or the default if unset)
-    /// @return The block stale measure
-    function blockStaleMeasure() external view returns (uint256) {
-        return _getBlockStaleMeasure();
-    }
+    /// @notice Execute slashing for the given operators via EigenLayer InstantSlasher
+    /// @param signers Operator addresses to slash
+    /// @param commitmentHash The commitment hash, referenced in the slashing description
+    function _executeSlashing(address[] memory signers, bytes32 commitmentHash) internal override {
+        OperatorSet memory operatorSet = OperatorSet({avs: AVS, id: OPERATOR_SET_ID});
+        IStrategy[] memory strategies = ALLOCATION_MANAGER.getStrategiesInOperatorSet(operatorSet);
 
-    /// @notice Return the configured Gas Killer slasher address (zero when unset)
-    /// @return The slasher address
-    function slasher() external view returns (address) {
-        return address(_getGasKillerSDKStorage().slasher);
-    }
+        uint256[] memory wadsToSlash = new uint256[](strategies.length);
+        for (uint256 i = 0; i < strategies.length; i++) {
+            wadsToSlash[i] = FULL_SLASH_WAD;
+        }
 
-    /// @notice Compute the signed message hash for a transition and its execution context
-    /// @param transitionIndex The transition index
-    /// @param anchorHash The hash of the block the off-chain execution was anchored to
-    /// @param callerAddress The msg.sender of the original call
-    /// @param contractCalldata The full calldata of the original call
-    /// @param storageUpdates The ABI-encoded storage updates
-    /// @return The expected SHA-256 hash
-    function _computeMessageHash(
-        uint256 transitionIndex,
-        bytes32 anchorHash,
-        address callerAddress,
-        bytes calldata contractCalldata,
-        bytes calldata storageUpdates
-    ) internal view returns (bytes32) {
-        return CommitmentDigestLib.commitmentHash(
-            address(this), transitionIndex, anchorHash, callerAddress, contractCalldata, storageUpdates
+        string memory description = string.concat(
+            "Gas Killer fraud detected for commitment: ", Strings.toHexString(uint256(commitmentHash), 32)
         );
-    }
 
-    /// @notice Decode and execute ABI-encoded storage updates
-    /// @param storageUpdates ABI-encoded `(StateUpdateType[], bytes[])` pair
-    function _stateChangeHandler(bytes calldata storageUpdates) internal {
-        (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        StateChangeHandlerLib._runStateUpdates(types, args);
-    }
+        for (uint256 i = 0; i < signers.length; i++) {
+            if (ALLOCATION_MANAGER.isOperatorSlashable(signers[i], operatorSet)) {
+                IAllocationManagerTypes.SlashingParams memory slashingParams = IAllocationManagerTypes.SlashingParams({
+                    operator: signers[i],
+                    operatorSetId: OPERATOR_SET_ID,
+                    strategies: strategies,
+                    wadsToSlash: wadsToSlash,
+                    description: description
+                });
 
-    /// @notice Set the AVS address
-    /// @dev `namespace()` derives its value from `avsAddress` on read, so no additional storage write happens here.
-    /// @param _avsAddress The new AVS service manager address
-    function _setAvsAddress(address _avsAddress) internal {
-        _getGasKillerSDKStorage().avsAddress = _avsAddress;
-    }
-
-    /// @notice Set the BLS signature checker contract
-    /// @param _blsSignatureChecker The new BLS signature checker address
-    function _setBlsSignatureChecker(address _blsSignatureChecker) internal {
-        GasKillerSDKStorage storage $ = _getGasKillerSDKStorage();
-        $.blsSignatureChecker = IBLSSignatureChecker(_blsSignatureChecker);
-    }
-
-    /// @notice Set the maximum number of blocks a reference block may lag behind the current block
-    /// @param _blockStaleMeasure The new block stale measure value
-    function _setBlockStaleMeasure(uint256 _blockStaleMeasure) internal {
-        _getGasKillerSDKStorage().blockStaleMeasure = _blockStaleMeasure;
-    }
-
-    /// @notice Set the Gas Killer slasher used for challenge-window recording (zero to disable)
-    /// @param _slasher The new slasher address
-    function _setSlasher(address _slasher) internal {
-        _getGasKillerSDKStorage().slasher = IGasKillerSlasher(_slasher);
-    }
-
-    /// @notice Return the block stale measure, falling back to the default when unset
-    /// @return The effective block stale measure
-    function _getBlockStaleMeasure() internal view returns (uint256) {
-        uint256 value = _getGasKillerSDKStorage().blockStaleMeasure;
-        return value == 0 ? DEFAULT_BLOCK_STALE_MEASURE : value;
-    }
-
-    /// @notice Load the ERC-7201 storage struct for GasKillerSDK
-    /// @return $ The GasKillerSDK storage struct
-    function _getGasKillerSDKStorage() private pure returns (GasKillerSDKStorage storage $) {
-        assembly {
-            $.slot := GAS_KILLER_SDK_STORAGE_LOCATION
-        }
-    }
-}
-
-// src/examples/array-summation/ArraySummation.sol
-
-/// @title ArraySummation
-/// @notice Example Gas Killer SDK consumer that maintains an on-chain array and computes sums off-chain
-/// @dev Demonstrates how to integrate GasKillerSDK: the `sum` and `setArrayElement` functions
-///      are guarded by `trackState` so off-chain operators can propose the state update via
-///      `verifyAndUpdate` rather than running the computation on-chain.
-contract ArraySummation is GasKillerSDK {
-    /// @notice Thrown when constructor arguments would produce an unusable contract
-    error InvalidConfiguration();
-
-    /// @notice Emitted whenever a new sum is computed and stored
-    /// @param newSum The newly computed sum
-    /// @param timestamp The block timestamp at the time of computation
-    event SumCalculated(uint256 newSum, uint256 timestamp);
-
-    /// @notice Emitted once during construction after the array is populated
-    /// @param size The number of elements initialised in the array
-    event ArrayInitialized(uint256 size);
-
-    /// @notice Number of elements in `values`; fixed at construction
-    uint256 public immutable arraySize;
-
-    /// @notice Upper bound (exclusive) for randomly generated array element values
-    uint256 public immutable maxValue;
-
-    /// @notice The most recently computed sum of selected array elements
-    uint256 public currentSum;
-
-    /// @notice The underlying array of pseudorandom values
-    uint256[] public values;
-
-    /// @notice Deploy a new ArraySummation contract and initialise the array
-    /// @param _avsAddress The AVS service manager address used for BLS quorum validation
-    /// @param _blsSigChecker The BLS signature checker contract address
-    /// @param _arraySize Number of elements to generate; must be > 0
-    /// @param _maxValue Exclusive upper bound for element values; must be > 0
-    /// @param _seed Seed for pseudorandom generation; 0 falls back to `block.timestamp`
-    constructor(address _avsAddress, address _blsSigChecker, uint256 _arraySize, uint256 _maxValue, uint256 _seed) {
-        _setAvsAddress(_avsAddress);
-        _setBlsSignatureChecker(_blsSigChecker);
-
-        if (_arraySize == 0 || _maxValue == 0) {
-            revert InvalidConfiguration();
-        }
-
-        arraySize = _arraySize;
-        maxValue = _maxValue;
-
-        _initializeArray(_seed);
-    }
-
-    /// @notice Populate `values` with `arraySize` pseudorandom entries bounded by `maxValue`
-    /// @param _seed Entropy source; falls back to `block.timestamp` when 0
-    function _initializeArray(uint256 _seed) private {
-        if (_seed == 0) {
-            _seed = block.timestamp;
-        }
-
-        uint256 hashedSeed = uint256(keccak256(abi.encode(_seed)));
-        for (uint256 i = 0; i < arraySize; ++i) {
-            values.push(uint256(keccak256(abi.encode(hashedSeed, i))) % maxValue);
-        }
-
-        emit ArrayInitialized(arraySize);
-    }
-
-    /// @notice Calculate the sum of specified array elements and record the state transition
-    /// @dev Pass an empty `indexes` array to sum all elements
-    /// @param indexes Zero-based positions in `values` to include in the sum
-    function sum(uint256[] calldata indexes) public trackState {
-        _calculateSum(indexes);
-    }
-
-    /// @notice Compute the sum of the specified elements and store it in `currentSum`
-    /// @param indexes Zero-based positions to sum; sums the full array when empty
-    function _calculateSum(uint256[] calldata indexes) internal {
-        uint256 total = 0;
-
-        if (indexes.length == 0) {
-            // If no indexes provided, sum all elements
-            uint256 length = values.length;
-            for (uint256 i = 0; i < length; ++i) {
-                total += values[i];
-            }
-        } else {
-            // Sum only specified indexes
-            uint256 valuesLength = values.length;
-            uint256 indexesLength = indexes.length;
-            for (uint256 i = 0; i < indexesLength; ++i) {
-                require(indexes[i] < valuesLength, "Index out of bounds");
-                total += values[indexes[i]];
+                INSTANT_SLASHER.fulfillSlashingRequest(slashingParams);
             }
         }
-
-        currentSum = total;
-        emit SumCalculated(total, block.timestamp);
-    }
-
-    /// @notice Return the value at a specific array index
-    /// @param index Zero-based position in `values`
-    /// @return The element stored at `index`
-    function getArrayElement(uint256 index) public view returns (uint256) {
-        require(index < values.length, "Index out of bounds");
-        return values[index];
-    }
-
-    /// @notice Return the number of elements in `values`
-    /// @return The length of the array
-    function getArrayLength() public view returns (uint256) {
-        return values.length;
-    }
-
-    /// @notice Return a memory copy of the full `values` array
-    /// @return The entire array of stored values
-    function getFullArray() public view returns (uint256[] memory) {
-        return values;
-    }
-
-    /// @notice Overwrite a single array element and record the state transition
-    /// @param index Zero-based position in `values` to update
-    /// @param newValue Replacement value to store at `index`
-    function setArrayElement(uint256 index, uint256 newValue) public trackState {
-        require(index < values.length, "Index out of bounds");
-        values[index] = newValue;
-    }
-
-    /// @notice Clear the array and reinitialise it with a new seed, recording the state transition
-    /// @param _seed Entropy source for regeneration; 0 falls back to `block.timestamp`
-    function resetArray(uint256 _seed) public trackState {
-        delete values;
-        _initializeArray(_seed);
-    }
-}
-
-// src/examples/array-summation/ArraySummationFactory.sol
-
-/// @title ArraySummationFactory
-/// @notice Factory contract for deploying ArraySummation contracts
-/// @dev Allows permissionless deployment of new array summation contracts
-///      and provides tracking functionality for deployed contracts
-contract ArraySummationFactory {
-    /// @notice Emitted when a new ArraySummation contract is deployed via this factory
-    /// @param contractAddress Address of the newly deployed ArraySummation contract
-    /// @param avsAddress The AVS service manager address passed to the contract
-    /// @param blsSigChecker The BLS signature checker address passed to the contract
-    /// @param arraySize Number of elements in the initialised array
-    /// @param maxValue Upper bound used for element generation
-    /// @param seed Entropy seed used for array initialisation
-    /// @param deploymentIndex Zero-based position of this deployment in `deployedContracts`
-    event ArraySummationDeployed(
-        address indexed contractAddress,
-        address indexed avsAddress,
-        address indexed blsSigChecker,
-        uint256 arraySize,
-        uint256 maxValue,
-        uint256 seed,
-        uint256 deploymentIndex
-    );
-
-    /// @notice Ordered list of all ArraySummation contracts deployed through this factory
-    address[] public deployedContracts;
-
-    /// @notice Quick membership check — true if an address was deployed by this factory
-    mapping(address => bool) public isDeployedContract;
-
-    /// @notice Deployment metadata keyed by contract address
-    mapping(address => ContractInfo) public contractInfo;
-
-    /// @notice Metadata recorded at deployment time for each ArraySummation contract
-    struct ContractInfo {
-        /// @notice The AVS service manager address the contract was configured with
-        address avsAddress;
-        /// @notice The BLS signature checker address the contract was configured with
-        address blsSigChecker;
-        /// @notice Number of elements in the contract's array
-        uint256 arraySize;
-        /// @notice Upper bound used for element generation
-        uint256 maxValue;
-        /// @notice Entropy seed used at deployment
-        uint256 seed;
-        /// @notice Zero-based index of this contract in `deployedContracts`
-        uint256 deploymentIndex;
-        /// @notice `block.timestamp` at the time of deployment
-        uint256 deploymentTimestamp;
-    }
-
-    /// @notice Deploy a new ArraySummation contract
-    /// @param _avsAddress The AVS service manager address for the new contract
-    /// @param _blsSigChecker The BLS signature checker address for the new contract
-    /// @param _arraySize The size of the array to initialize
-    /// @param _maxValue The maximum value for array elements
-    /// @param _seed The seed for array initialization
-    /// @return contractAddress The address of the deployed contract
-    function deployArraySummation(
-        address _avsAddress,
-        address _blsSigChecker,
-        uint256 _arraySize,
-        uint256 _maxValue,
-        uint256 _seed
-    ) external returns (address contractAddress) {
-        require(_avsAddress != address(0), "Invalid AVS address");
-
-        // Deploy the new contract
-        ArraySummation newContract = new ArraySummation(_avsAddress, _blsSigChecker, _arraySize, _maxValue, _seed);
-        contractAddress = address(newContract);
-
-        // Track the deployment
-        uint256 deploymentIndex = deployedContracts.length;
-        deployedContracts.push(contractAddress);
-        isDeployedContract[contractAddress] = true;
-
-        contractInfo[contractAddress] = ContractInfo({
-            avsAddress: _avsAddress,
-            blsSigChecker: _blsSigChecker,
-            arraySize: _arraySize,
-            maxValue: _maxValue,
-            seed: _seed,
-            deploymentIndex: deploymentIndex,
-            deploymentTimestamp: block.timestamp
-        });
-
-        emit ArraySummationDeployed(
-            contractAddress, _avsAddress, _blsSigChecker, _arraySize, _maxValue, _seed, deploymentIndex
-        );
-    }
-
-    /// @notice Return the total number of contracts deployed by this factory
-    /// @return count The number of deployed contracts
-    function getDeployedContractCount() external view returns (uint256 count) {
-        return deployedContracts.length;
-    }
-
-    /// @notice Return all contract addresses deployed by this factory
-    /// @return addresses Array of all deployed contract addresses
-    function getAllDeployedContracts() external view returns (address[] memory addresses) {
-        return deployedContracts;
-    }
-
-    /// @notice Return a slice of deployed contract addresses
-    /// @param _startIndex Starting index (inclusive)
-    /// @param _endIndex Ending index (exclusive)
-    /// @return addresses Array of contract addresses in the specified range
-    function getDeployedContractsRange(uint256 _startIndex, uint256 _endIndex)
-        external
-        view
-        returns (address[] memory addresses)
-    {
-        require(_startIndex < deployedContracts.length, "Start index out of bounds");
-        require(_endIndex <= deployedContracts.length, "End index out of bounds");
-        require(_startIndex < _endIndex, "Invalid range");
-
-        uint256 length = _endIndex - _startIndex;
-        addresses = new address[](length);
-
-        for (uint256 i = 0; i < length; ++i) {
-            addresses[i] = deployedContracts[_startIndex + i];
-        }
-    }
-
-    /// @notice Return the deployment metadata for a specific contract
-    /// @param _contractAddress The address of the deployed contract
-    /// @return info The contract information
-    function getContractInfo(address _contractAddress) external view returns (ContractInfo memory info) {
-        require(isDeployedContract[_contractAddress], "Contract not deployed by factory");
-        return contractInfo[_contractAddress];
-    }
-
-    /// @notice Return all contracts deployed for a given AVS address
-    /// @param _avsAddress The AVS address to filter by
-    /// @return addresses Array of contract addresses deployed by the AVS
-    function getContractsByAVS(address _avsAddress) external view returns (address[] memory addresses) {
-        uint256 length = deployedContracts.length;
-        uint256 count = 0;
-
-        // First pass: count matching contracts
-        for (uint256 i = 0; i < length; ++i) {
-            if (contractInfo[deployedContracts[i]].avsAddress == _avsAddress) {
-                count++;
-            }
-        }
-
-        // Second pass: collect addresses
-        addresses = new address[](count);
-        uint256 index = 0;
-        for (uint256 i = 0; i < length; ++i) {
-            if (contractInfo[deployedContracts[i]].avsAddress == _avsAddress) {
-                addresses[index] = deployedContracts[i];
-                index++;
-            }
-        }
-    }
-
-    /// @notice Check whether a contract was deployed by this factory
-    /// @param _contractAddress The address to verify
-    /// @return deployed True if the contract was deployed by this factory
-    function isContractDeployedByFactory(address _contractAddress) external view returns (bool deployed) {
-        return isDeployedContract[_contractAddress];
     }
 }

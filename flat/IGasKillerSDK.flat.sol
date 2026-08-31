@@ -5345,7 +5345,9 @@ interface IGasKillerSDK is IERC165 {
     /// @param referenceBlockNumber The block number to use as reference for operator set
     /// @param storageUpdates The storage updates to verify
     /// @param transitionIndex The transition index
-    /// @param targetFunction The target function selector
+    /// @param anchorHash The hash of the block the off-chain execution was anchored to
+    /// @param callerAddress The msg.sender of the original call
+    /// @param contractCalldata The full calldata of the original call
     /// @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
     function verifyAndUpdate(
         bytes32 msgHash,
@@ -5353,7 +5355,9 @@ interface IGasKillerSDK is IERC165 {
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
-        bytes4 targetFunction,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
         IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
     ) external payable;
 }

@@ -33,6 +33,12 @@ contract ReentrantCheckpointTest is Test {
     bytes32 constant SLOT_COUNTER = bytes32(uint256(0));
     bytes32 constant SLOT_LAST_OBSERVED = bytes32(uint256(1));
 
+    // Fixed execution-context fields bound into the task digest. The mock registry ignores the
+    // signature, so only digest/preimage consistency matters — the values themselves are arbitrary.
+    bytes32 constant ANCHOR = keccak256("anchor-block");
+    address constant CALLER = address(0xCA11E4);
+    bytes constant CALLDATA = hex"deadbeef";
+
     function setUp() public {
         vm.roll(1000);
         registry = new MockSchnorrRegistry();
@@ -64,7 +70,7 @@ contract ReentrantCheckpointTest is Test {
     /// The digest verifyAndUpdate reconstructs. Computed OUTSIDE any expectRevert so the
     /// sha256 precompile staticcall doesn't confuse the cheatcode.
     function _digest(uint256 transitionIndex, bytes memory program) internal view returns (bytes32) {
-        return sha256(abi.encode(transitionIndex, address(checkpoint), ReentrantCheckpoint.advance.selector, program));
+        return sha256(abi.encode(transitionIndex, address(checkpoint), ANCHOR, CALLER, CALLDATA, program));
     }
 
     function _submit(uint256 transitionIndex, bytes memory program) internal {
@@ -74,7 +80,9 @@ contract ReentrantCheckpointTest is Test {
             uint32(block.number - 1),
             program,
             transitionIndex,
-            ReentrantCheckpoint.advance.selector,
+            ANCHOR,
+            CALLER,
+            CALLDATA,
             1,
             address(0x1234),
             none
@@ -132,7 +140,7 @@ contract ReentrantCheckpointTest is Test {
             )
         );
         checkpoint.verifyAndUpdate(
-            h, uint32(block.number - 1), program, 0, ReentrantCheckpoint.advance.selector, 1, address(0x1234), none
+            h, uint32(block.number - 1), program, 0, ANCHOR, CALLER, CALLDATA, 1, address(0x1234), none
         );
         assertEq(checkpoint.stateTransitionCount(), 0, "nothing settled");
         assertEq(observer.confirmations(), 0, "observer rejected the stale read");
@@ -164,7 +172,7 @@ contract ReentrantCheckpointTest is Test {
             )
         );
         checkpoint.verifyAndUpdate(
-            h, uint32(block.number - 1), program, 0, ReentrantCheckpoint.advance.selector, 1, address(0x1234), none
+            h, uint32(block.number - 1), program, 0, ANCHOR, CALLER, CALLDATA, 1, address(0x1234), none
         );
         assertEq(checkpoint.stateTransitionCount(), 0, "nothing settled");
     }

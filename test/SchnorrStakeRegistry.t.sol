@@ -60,11 +60,21 @@ contract SchnorrStakeRegistryTest is Test {
         for (uint256 i = 0; i < 3; i++) {
             registry.registerOperator(opX[i], opY[i], WEIGHT, popS[i], popR[i]);
         }
-        vm.roll(block.number + 10); // refBlock = block.number-1 stays >= effectiveBlock
+        vm.roll(_blockNumber() + 10); // refBlock = _blockNumber()-1 stays >= effectiveBlock
+    }
+
+    /// The current block height, re-read through the VM.
+    ///
+    /// Reading `block.number` directly is unsafe in these tests: `via_ir` treats the NUMBER
+    /// opcode as movable and common-subexpression-eliminates it across `vm.roll`, so a second
+    /// read in the same function silently returns the pre-roll height. Every height read in
+    /// this file goes through the cheatcode, which the optimizer cannot fold away.
+    function _blockNumber() internal view returns (uint256) {
+        return vm.getBlockNumber();
     }
 
     function _refBlock() internal view returns (uint256) {
-        return block.number - 1;
+        return _blockNumber() - 1;
     }
 
     function _nonSigner(uint256 i) internal view returns (address) {
@@ -138,7 +148,7 @@ contract SchnorrStakeRegistryTest is Test {
     // A forged PoP (valid signature but for a different key) is rejected at registration.
     function test_registration_rejectsBadPoP() public {
         // Reuse operator 0's key but operator 1's PoP → mismatch.
-        vm.roll(block.number + 1);
+        vm.roll(_blockNumber() + 1);
         SchnorrStakeRegistry fresh = new SchnorrStakeRegistry(2, 3, address(this), 0);
         vm.expectRevert(SchnorrStakeRegistry.InvalidProofOfPossession.selector);
         fresh.registerOperator(opX[0], opY[0], WEIGHT, popS[1], popR[1]);
@@ -192,7 +202,7 @@ contract SchnorrStakeRegistryTest is Test {
         assertEq(x, opX[1], "tombstone retains x");
         assertEq(y, opY[1], "tombstone retains y");
         assertEq(uint256(w), WEIGHT, "tombstone retains weight");
-        assertEq(uint256(exitBlock), block.number, "tombstone records the exit block");
+        assertEq(uint256(exitBlock), _blockNumber(), "tombstone records the exit block");
     }
 
     // After deregistering operator 1, the on-chain aggregate equals X_all − X_1 — exactly what
@@ -200,7 +210,7 @@ contract SchnorrStakeRegistryTest is Test {
     // with NO non-signers declared: deregistration and non-signer subtraction are equivalent.
     function test_deregister_thenSubsetVerifiesWithNoNonSigners() public {
         registry.deregisterOperator(_nonSigner(1));
-        vm.roll(block.number + 10); // refBlock stays >= the new effectiveBlock
+        vm.roll(_blockNumber() + 10); // refBlock stays >= the new effectiveBlock
 
         address[] memory none = new address[](0);
         assertTrue(registry.isValidSignature(MESSAGE, SUB_S, SUB_R, none, _refBlock()));
@@ -209,7 +219,7 @@ contract SchnorrStakeRegistryTest is Test {
     // Advancing effectiveBlock is fail-closed: a signature valid before the deregistration
     // (referencing a block prior to it) is rejected as stale afterwards.
     function test_deregister_advancesWatermark() public {
-        uint256 preBlock = block.number - 1; // valid refBlock before the mutation
+        uint256 preBlock = _blockNumber() - 1; // valid refBlock before the mutation
         address[] memory none = new address[](0);
         assertTrue(registry.isValidSignature(MESSAGE, FULL_S, FULL_R, none, preBlock), "valid before");
 
@@ -227,7 +237,7 @@ contract SchnorrStakeRegistryTest is Test {
     // because the subset signature *does* match the post-removal aggregate.
     function test_deregister_freshRefBlockRejectsPreMutationSignature() public {
         registry.deregisterOperator(_nonSigner(1));
-        vm.roll(block.number + 10); // refBlock is now at or above the new effectiveBlock
+        vm.roll(_blockNumber() + 10); // refBlock is now at or above the new effectiveBlock
 
         address[] memory none = new address[](0);
         assertFalse(registry.isValidSignature(MESSAGE, FULL_S, FULL_R, none, _refBlock()));
@@ -240,19 +250,19 @@ contract SchnorrStakeRegistryTest is Test {
     function test_register_advancesWatermark() public {
         address id = _nonSigner(1);
         registry.deregisterOperator(id);
-        vm.roll(block.number + 10);
+        vm.roll(_blockNumber() + 10);
 
         address[] memory none = new address[](0);
         assertTrue(registry.isValidSignature(MESSAGE, SUB_S, SUB_R, none, _refBlock()), "valid before");
 
-        uint256 preBlock = block.number - 1; // valid refBlock before the registration
+        uint256 preBlock = _blockNumber() - 1; // valid refBlock before the registration
         registry.registerOperator(opX[1], opY[1], WEIGHT, popS[1], popR[1]);
 
         vm.expectRevert(SchnorrStakeRegistry.StaleSnapshot.selector);
         registry.isValidSignature(MESSAGE, SUB_S, SUB_R, none, preBlock);
 
         // ...and a fresh reference block does not help either: X_all is back to its full value.
-        vm.roll(block.number + 10);
+        vm.roll(_blockNumber() + 10);
         assertFalse(registry.isValidSignature(MESSAGE, SUB_S, SUB_R, none, _refBlock()));
     }
 
@@ -270,7 +280,7 @@ contract SchnorrStakeRegistryTest is Test {
         for (uint256 i = 0; i < 3; i++) {
             r.registerOperator(opX[i], opY[i], w[i], popS[i], popR[i]);
         }
-        vm.roll(block.number + 10);
+        vm.roll(_blockNumber() + 10);
 
         address heavy = r.pointAddress(opX[1], opY[1]);
         address[] memory ns = new address[](1);
@@ -278,7 +288,7 @@ contract SchnorrStakeRegistryTest is Test {
         assertFalse(r.isValidSignature(MESSAGE, SUB_S, SUB_R, ns, _refBlock()), "20/120 is below 2/3");
 
         r.deregisterOperator(heavy);
-        vm.roll(block.number + 10);
+        vm.roll(_blockNumber() + 10);
 
         address[] memory none = new address[](0);
         assertTrue(r.isValidSignature(MESSAGE, SUB_S, SUB_R, none, _refBlock()), "20/20 is a quorum");
@@ -289,7 +299,7 @@ contract SchnorrStakeRegistryTest is Test {
     function test_deregister_nonSignerLookupReverts() public {
         address id = _nonSigner(1);
         registry.deregisterOperator(id);
-        vm.roll(block.number + 10);
+        vm.roll(_blockNumber() + 10);
 
         address[] memory ns = new address[](1);
         ns[0] = id;
@@ -362,7 +372,7 @@ contract SchnorrStakeRegistryTest is Test {
         for (uint256 i = 0; i < 3; i++) {
             r.registerOperator(opX[i], opY[i], WEIGHT, popS[i], popR[i]);
         }
-        vm.roll(block.number + 10);
+        vm.roll(_blockNumber() + 10);
     }
 
     // With nothing announced there is no scheduled mutation, so the horizon is unbounded.
@@ -382,7 +392,7 @@ contract SchnorrStakeRegistryTest is Test {
 
         r.announceDeregister(r.pointAddress(opX[1], opY[1]));
 
-        assertEq(r.nextPossibleMutationBlock(), block.number + NOTICE, "horizon published");
+        assertEq(r.nextPossibleMutationBlock(), _blockNumber() + NOTICE, "horizon published");
         assertEq(r.pendingChangeCount(), 1);
         assertEq(r.aggX(), aggXBefore, "aggregate untouched");
         assertEq(r.totalWeight(), 3 * WEIGHT, "weight untouched");
@@ -421,7 +431,7 @@ contract SchnorrStakeRegistryTest is Test {
         assertEq(r.aggX(), ex, "aggX");
         assertEq(r.aggY(), ey, "aggY");
         assertEq(r.totalWeight(), 2 * WEIGHT, "weight debited");
-        assertEq(r.effectiveBlock(), block.number, "watermark advanced on commit");
+        assertEq(r.effectiveBlock(), _blockNumber(), "watermark advanced on commit");
         assertEq(r.pendingChangeCount(), 0, "dequeued");
         assertEq(r.nextPossibleMutationBlock(), type(uint256).max, "horizon released");
     }
@@ -432,7 +442,7 @@ contract SchnorrStakeRegistryTest is Test {
         SchnorrStakeRegistry r = _noticeRegistry();
         address id = r.pointAddress(opX[1], opY[1]);
         r.deregisterOperator(id);
-        vm.roll(block.number + 10);
+        vm.roll(_blockNumber() + 10);
 
         r.announceRegister(opX[1], opY[1], WEIGHT, popS[1], popR[1]);
         assertEq(r.totalWeight(), 2 * WEIGHT, "not credited while pending");
@@ -485,7 +495,7 @@ contract SchnorrStakeRegistryTest is Test {
         address second = r.pointAddress(opX[1], opY[1]);
 
         r.announceDeregister(first);
-        vm.roll(block.number + 5);
+        vm.roll(_blockNumber() + 5);
         r.announceDeregister(second);
 
         vm.roll(r.nextPossibleMutationBlock());
@@ -504,7 +514,7 @@ contract SchnorrStakeRegistryTest is Test {
         r.announceDeregister(r.pointAddress(opX[0], opY[0]));
         uint256 firstHorizon = r.nextPossibleMutationBlock();
 
-        vm.roll(block.number + 5);
+        vm.roll(_blockNumber() + 5);
         r.announceDeregister(r.pointAddress(opX[1], opY[1]));
 
         r.cancelNextChange();
@@ -615,7 +625,7 @@ contract SchnorrStakeRegistryTest is Test {
 
         r.announceDeregister(first);
         uint256 horizon = r.nextPossibleMutationBlock();
-        vm.roll(block.number + 5);
+        vm.roll(_blockNumber() + 5);
         r.announceDeregister(second);
         assertEq(r.pendingChangeCount(), 2);
 

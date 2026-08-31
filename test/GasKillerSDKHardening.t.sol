@@ -44,7 +44,9 @@ contract ReentrantAttacker {
     uint32 public refBlock;
     bytes public storageUpdates;
     uint256 public transitionIndex;
-    bytes4 public targetFunction;
+    bytes32 public anchorHash;
+    address public callerAddress;
+    bytes public contractCalldata;
 
     constructor(GasKillerSDKExposed _sdk) {
         sdk = _sdk;
@@ -56,14 +58,18 @@ contract ReentrantAttacker {
         uint32 _refBlock,
         bytes calldata _storageUpdates,
         uint256 _transitionIndex,
-        bytes4 _targetFunction
+        bytes32 _anchorHash,
+        address _callerAddress,
+        bytes calldata _contractCalldata
     ) external {
         msgHash = _msgHash;
         quorumNumbers = _quorumNumbers;
         refBlock = _refBlock;
         storageUpdates = _storageUpdates;
         transitionIndex = _transitionIndex;
-        targetFunction = _targetFunction;
+        anchorHash = _anchorHash;
+        callerAddress = _callerAddress;
+        contractCalldata = _contractCalldata;
     }
 
     /// The CALL-update target. Records the latch state, then tries to re-enter.
@@ -71,7 +77,15 @@ contract ReentrantAttacker {
         sawInTransition = sdk.inTransition();
         IBLSSignatureCheckerTypes.NonSignerStakesAndSignature memory nsss;
         try sdk.verifyAndUpdate(
-            msgHash, quorumNumbers, refBlock, storageUpdates, transitionIndex, targetFunction, nsss
+            msgHash,
+            quorumNumbers,
+            refBlock,
+            storageUpdates,
+            transitionIndex,
+            anchorHash,
+            callerAddress,
+            contractCalldata,
+            nsss
         ) {
             reentrySucceeded = true;
         } catch (bytes memory reason) {
@@ -111,6 +125,12 @@ contract GasKillerSDKHardeningTest is Test {
 
     bytes constant QUORUMS = hex"00";
 
+    // Fixed execution-context fields bound into the task digest. The mock checker ignores the
+    // signature, so only digest/preimage consistency matters — the values themselves are arbitrary.
+    bytes32 internal constant ANCHOR = keccak256("anchor-block");
+    address internal constant CALLER = address(0xCA11E4);
+    bytes internal constant CALLDATA = hex"deadbeef";
+
     function setUp() public {
         vm.roll(1000);
         sdk = new GasKillerSDKExposed(makeAddr("AVS"), address(new MockBLSSignatureChecker()));
@@ -118,8 +138,8 @@ contract GasKillerSDKHardeningTest is Test {
 
     // ---- helpers -----------------------------------------------------------------
 
-    function _digest(uint256 transitionIndex, bytes4 targetFn, bytes memory updates) internal view returns (bytes32) {
-        return sha256(abi.encode(transitionIndex, address(sdk), targetFn, updates));
+    function _digest(uint256 transitionIndex, bytes memory updates) internal view returns (bytes32) {
+        return sha256(abi.encode(transitionIndex, address(sdk), ANCHOR, CALLER, CALLDATA, updates));
     }
 
     function _storeUpdate(bytes32 slot, bytes32 val) internal pure returns (bytes memory) {
@@ -144,12 +164,14 @@ contract GasKillerSDKHardeningTest is Test {
         uint256 transitionIndex = sdk.stateTransitionCount();
         IBLSSignatureCheckerTypes.NonSignerStakesAndSignature memory nsss;
         sdk.verifyAndUpdate{value: value}(
-            _digest(transitionIndex, bytes4(0), updates),
+            _digest(transitionIndex, updates),
             QUORUMS,
             uint32(block.number - 1),
             updates,
             transitionIndex,
-            bytes4(0),
+            ANCHOR,
+            CALLER,
+            CALLDATA,
             nsss
         );
     }
@@ -180,7 +202,7 @@ contract GasKillerSDKHardeningTest is Test {
         uint256 transitionIndex = sdk.stateTransitionCount();
         // Precomputed: sha256 inside _digest is a precompile staticcall, which would
         // otherwise be the "next call" expectRevert arms against.
-        bytes32 digest = _digest(transitionIndex, bytes4(0), updates);
+        bytes32 digest = _digest(transitionIndex, updates);
         uint32 refBlock = uint32(block.number - 1);
         IBLSSignatureCheckerTypes.NonSignerStakesAndSignature memory nsss;
         vm.expectRevert(
@@ -188,7 +210,9 @@ contract GasKillerSDKHardeningTest is Test {
                 StateChangeHandlerLib.RevertingContext.selector, 0, address(target), bytes(""), callData
             )
         );
-        sdk.verifyAndUpdate{value: 0.1 ether}(digest, QUORUMS, refBlock, updates, transitionIndex, bytes4(0), nsss);
+        sdk.verifyAndUpdate{value: 0.1 ether}(
+            digest, QUORUMS, refBlock, updates, transitionIndex, ANCHOR, CALLER, CALLDATA, nsss
+        );
 
         // The whole transition rolled back, counter included.
         assertEq(sdk.stateTransitionCount(), 0);
@@ -204,7 +228,7 @@ contract GasKillerSDKHardeningTest is Test {
         // following transition would carry — the guard must be the only failure cause.
         bytes memory innerUpdates = _storeUpdate(bytes32(uint256(0xbeef)), bytes32(uint256(1)));
         attacker.stage(
-            _digest(1, bytes4(0), innerUpdates), QUORUMS, uint32(block.number - 1), innerUpdates, 1, bytes4(0)
+            _digest(1, innerUpdates), QUORUMS, uint32(block.number - 1), innerUpdates, 1, ANCHOR, CALLER, CALLDATA
         );
 
         _submit(_callUpdate(address(attacker), 0, abi.encodeCall(ReentrantAttacker.attack, ())), 0);
