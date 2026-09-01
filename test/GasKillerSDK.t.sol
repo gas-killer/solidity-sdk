@@ -380,6 +380,19 @@ contract GasKillerSDKTest is Test {
         /// Test that the contract does not support 0xffffffff (invalid interface ID)
         assertFalse(sdk.supportsInterface(0xffffffff));
     }
+
+    /// Pinned literal: the interface is deliberately single-function, so its ID is exactly the
+    /// `verifyAndUpdate` selector, and state mutability is not part of a signature. The router
+    /// preflights this ID before every submission, so a change here makes every already-deployed
+    /// target unroutable.
+    function test_interfaceId_doesNotDrift() public pure {
+        assertEq(
+            type(IGasKillerSDK).interfaceId,
+            IGasKillerSDK.verifyAndUpdate.selector,
+            "id is still exactly the verifyAndUpdate selector"
+        );
+        assertEq(type(IGasKillerSDK).interfaceId, bytes4(0x93de4531), "id must not drift");
+    }
 }
 
 contract SimpleTarget {

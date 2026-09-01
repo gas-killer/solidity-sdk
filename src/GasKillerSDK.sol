@@ -6,6 +6,7 @@ import {
     IBLSSignatureCheckerTypes
 } from "@eigenlayer-middleware/interfaces/IBLSSignatureChecker.sol";
 import {IERC165} from "forge-std/interfaces/IERC165.sol";
+import {ERC165} from "@openzeppelin/contracts/utils/introspection/ERC165.sol";
 
 import {IGasKillerSDK} from "./interface/IGasKillerSDK.sol";
 import {StateTracker} from "./StateTracker.sol";
@@ -21,7 +22,7 @@ import {StateChangeHandlerLib, StateUpdateType} from "./StateChangeHandlerLib.so
 ///      `verifyAndUpdate` with the *next* transition's valid quorum signature would
 ///      otherwise interleave two signed transitions. The same transient flag is queryable
 ///      as `inTransition()` so external readers can reject mid-transition state.
-abstract contract GasKillerSDK is StateTracker, TransitionGuard, IGasKillerSDK {
+abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKillerSDK {
     /// @custom:storage-location erc7201:gaskiller.GasKillerSDK.storage
     struct GasKillerSDKStorage {
         /// @notice Deprecated. Maintained to preserve storage layout. Now derived on read by `namespace()`
@@ -103,11 +104,29 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, IGasKillerSDK {
     }
 
     /// @notice Query if a contract implements an interface
-    /// @dev Supports ERC-165 and IGasKillerSDK interface detection
+    /// @dev Supports ERC-165 and IGasKillerSDK interface detection.
+    ///
+    ///      Answers `IGasKillerSDK` and defers everything else to `super`, so an inheriting
+    ///      contract that also extends another OpenZeppelin ERC-165 module reports the union
+    ///      of both ID sets. Both this contract and OpenZeppelin's own modules share the
+    ///      `ERC165` base, which C3 places last in the linearization, so the standard
+    ///      integrator override reaches every implementation in the chain:
+    ///
+    ///      ```solidity
+    ///      contract MyNft is GasKillerSDK, ERC721 {
+    ///          function supportsInterface(bytes4 id) public view override(GasKillerSDK, ERC721) returns (bool) {
+    ///              return super.supportsInterface(id);
+    ///          }
+    ///      }
+    ///      ```
+    ///
+    ///      Answering `type(IERC165).interfaceId` here instead of deferring would terminate
+    ///      that chain and silently drop the other module's IDs, which the router's ERC-165
+    ///      preflight surfaces only as an unroutable target.
     /// @param interfaceId The interface identifier, as specified in ERC-165
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
-    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
-        return interfaceId == type(IERC165).interfaceId || interfaceId == type(IGasKillerSDK).interfaceId;
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
+        return interfaceId == type(IGasKillerSDK).interfaceId || super.supportsInterface(interfaceId);
     }
 
     /// @notice Compute the expected message hash for a given transition, function, and storage updates

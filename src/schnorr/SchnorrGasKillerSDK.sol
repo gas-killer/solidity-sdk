@@ -2,6 +2,7 @@
 pragma solidity ^0.8.27;
 
 import {IERC165} from "forge-std/interfaces/IERC165.sol";
+import {ERC165} from "@openzeppelin/contracts/utils/introspection/ERC165.sol";
 import {ISchnorrGasKillerSDK} from "./interface/ISchnorrGasKillerSDK.sol";
 import {ISchnorrGasKillerSDKBatch, SchnorrTaskSubmission} from "./interface/ISchnorrGasKillerSDKBatch.sol";
 import {StateTracker} from "../StateTracker.sol";
@@ -33,6 +34,7 @@ import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
 abstract contract SchnorrGasKillerSDK is
     StateTracker,
     TransitionGuard,
+    ERC165,
     ISchnorrGasKillerSDK,
     ISchnorrGasKillerSDKBatch
 {
@@ -183,12 +185,18 @@ abstract contract SchnorrGasKillerSDK is
     /// @notice Query if a contract implements an interface
     /// @dev Supports ERC-165, ISchnorrGasKillerSDK detection (the router's preflight
     ///      probes the schnorr `verifyAndUpdate` selector before submitting), and the
-    ///      ISchnorrGasKillerSDKBatch batching/latch extension
+    ///      ISchnorrGasKillerSDKBatch batching/latch extension.
+    ///
+    ///      Defers anything else to `super` for the same reason as the BLS
+    ///      `GasKillerSDK.supportsInterface`: an inheriting contract that also extends an
+    ///      OpenZeppelin ERC-165 module must report the union of both ID sets, and the
+    ///      shared `ERC165` base is what lets the standard integrator override reach every
+    ///      implementation in the chain.
     /// @param interfaceId The interface identifier, as specified in ERC-165
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
-    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
-        return interfaceId == type(IERC165).interfaceId || interfaceId == type(ISchnorrGasKillerSDK).interfaceId
-            || interfaceId == type(ISchnorrGasKillerSDKBatch).interfaceId;
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
+        return interfaceId == type(ISchnorrGasKillerSDK).interfaceId
+            || interfaceId == type(ISchnorrGasKillerSDKBatch).interfaceId || super.supportsInterface(interfaceId);
     }
 
     /// @notice Compute the expected message hash for a given transition, function, and storage updates
