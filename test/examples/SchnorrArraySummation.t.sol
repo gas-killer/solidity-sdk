@@ -7,7 +7,7 @@ import {SchnorrArraySummationFactory} from "../../src/examples/array-summation/S
 import {ISchnorrGasKillerSDK} from "../../src/schnorr/interface/ISchnorrGasKillerSDK.sol";
 import {ISchnorrStakeRegistry} from "../../src/schnorr/interface/ISchnorrStakeRegistry.sol";
 import {IGasKillerSDK} from "../../src/interface/IGasKillerSDK.sol";
-import {IERC165} from "forge-std/interfaces/IERC165.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {StateUpdateType} from "../../src/StateChangeHandlerLib.sol";
 
 /// A registry stub that returns a settable verdict (same pattern as

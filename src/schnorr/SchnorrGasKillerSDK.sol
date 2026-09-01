@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.27;
 
-import {IERC165} from "forge-std/interfaces/IERC165.sol";
+import {ERC165} from "@openzeppelin/contracts/utils/introspection/ERC165.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {ISchnorrGasKillerSDK} from "./interface/ISchnorrGasKillerSDK.sol";
 import {ISchnorrGasKillerSDKBatch, SchnorrTaskSubmission} from "./interface/ISchnorrGasKillerSDKBatch.sol";
 import {StateTracker} from "../StateTracker.sol";
@@ -33,6 +34,7 @@ import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
 abstract contract SchnorrGasKillerSDK is
     StateTracker,
     TransitionGuard,
+    ERC165,
     ISchnorrGasKillerSDK,
     ISchnorrGasKillerSDKBatch
 {
@@ -183,12 +185,14 @@ abstract contract SchnorrGasKillerSDK is
     /// @notice Query if a contract implements an interface
     /// @dev Supports ERC-165, ISchnorrGasKillerSDK detection (the router's preflight
     ///      probes the schnorr `verifyAndUpdate` selector before submitting), and the
-    ///      ISchnorrGasKillerSDKBatch batching/latch extension
+    ///      ISchnorrGasKillerSDKBatch batching/latch extension. Defers to `super` so a
+    ///      contract inheriting both this SDK and another OpenZeppelin ERC-165 module reports
+    ///      the union of both ID sets.
     /// @param interfaceId The interface identifier, as specified in ERC-165
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
-    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
-        return interfaceId == type(IERC165).interfaceId || interfaceId == type(ISchnorrGasKillerSDK).interfaceId
-            || interfaceId == type(ISchnorrGasKillerSDKBatch).interfaceId;
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
+        return interfaceId == type(ISchnorrGasKillerSDK).interfaceId
+            || interfaceId == type(ISchnorrGasKillerSDKBatch).interfaceId || super.supportsInterface(interfaceId);
     }
 
     /// @notice Compute the expected message hash for a given transition, function, and storage updates
