@@ -419,7 +419,7 @@ interface IAVSRegistrar {
 
 // lib/forge-std/src/interfaces/IERC165.sol
 
-interface IERC165 {
+interface IERC165_0 {
     /// @notice Query if a contract implements an interface
     /// @param interfaceID The interface identifier, as specified in ERC-165
     /// @dev Interface identification is specified in ERC-165. This function
@@ -427,6 +427,31 @@ interface IERC165 {
     /// @return `true` if the contract implements `interfaceID` and
     /// `interfaceID` is not 0xffffffff, `false` otherwise
     function supportsInterface(bytes4 interfaceID) external view returns (bool);
+}
+
+// lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol
+
+// OpenZeppelin Contracts v4.4.1 (utils/introspection/IERC165.sol)
+
+/**
+ * @dev Interface of the ERC165 standard, as defined in the
+ * https://eips.ethereum.org/EIPS/eip-165[EIP].
+ *
+ * Implementers can declare support of contract interfaces, which can then be
+ * queried by others ({ERC165Checker}).
+ *
+ * For an implementation, see {ERC165}.
+ */
+interface IERC165_1 {
+    /**
+     * @dev Returns true if this contract implements the interface defined by
+     * `interfaceId`. See the corresponding
+     * https://eips.ethereum.org/EIPS/eip-165#how-interfaces-are-identified[EIP section]
+     * to learn more about how these ids are created.
+     *
+     * This function call must use less than 30 000 gas.
+     */
+    function supportsInterface(bytes4 interfaceId) external view returns (bool);
 }
 
 // lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol
@@ -2551,6 +2576,33 @@ abstract contract TransitionGuard {
         assembly {
             tstore(TRANSITION_GUARD_SLOT, 0)
         }
+    }
+}
+
+// lib/openzeppelin-contracts/contracts/utils/introspection/ERC165.sol
+
+// OpenZeppelin Contracts v4.4.1 (utils/introspection/ERC165.sol)
+
+/**
+ * @dev Implementation of the {IERC165} interface.
+ *
+ * Contracts that want to implement ERC165 should inherit from this contract and override {supportsInterface} to check
+ * for the additional interface id that will be supported. For example:
+ *
+ * ```solidity
+ * function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+ *     return interfaceId == type(MyInterface).interfaceId || super.supportsInterface(interfaceId);
+ * }
+ * ```
+ *
+ * Alternatively, {ERC165Storage} provides an easier to use but more expensive implementation.
+ */
+abstract contract ERC165 is IERC165_1 {
+    /**
+     * @dev See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+        return interfaceId == type(IERC165_1).interfaceId;
     }
 }
 
@@ -5597,7 +5649,7 @@ interface IBLSSignatureChecker is IBLSSignatureCheckerErrors, IBLSSignatureCheck
 /// @title IGasKillerSDK
 /// @notice Interface for GasKillerSDK contracts
 /// @dev Defines the core functionality that GasKillerSDK implementations must provide
-interface IGasKillerSDK is IERC165 {
+interface IGasKillerSDK is IERC165_0 {
     // Custom errors
 
     /// @notice Thrown when `transitionIndex + 1` does not equal the current `stateTransitionCount`
@@ -5659,7 +5711,7 @@ interface IGasKillerSDK is IERC165 {
 ///      `verifyAndUpdate` with the *next* transition's valid quorum signature would
 ///      otherwise interleave two signed transitions. The same transient flag is queryable
 ///      as `inTransition()` so external readers can reject mid-transition state.
-abstract contract GasKillerSDK is StateTracker, TransitionGuard, IGasKillerSDK {
+abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKillerSDK {
     /// @custom:storage-location erc7201:gaskiller.GasKillerSDK.storage
     struct GasKillerSDKStorage {
         /// @notice Deprecated. Maintained to preserve storage layout. Now derived on read by `namespace()`
@@ -5741,11 +5793,29 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, IGasKillerSDK {
     }
 
     /// @notice Query if a contract implements an interface
-    /// @dev Supports ERC-165 and IGasKillerSDK interface detection
+    /// @dev Supports ERC-165 and IGasKillerSDK interface detection.
+    ///
+    ///      Answers `IGasKillerSDK` and defers everything else to `super`, so an inheriting
+    ///      contract that also extends another OpenZeppelin ERC-165 module reports the union
+    ///      of both ID sets. Both this contract and OpenZeppelin's own modules share the
+    ///      `ERC165` base, which C3 places last in the linearization, so the standard
+    ///      integrator override reaches every implementation in the chain:
+    ///
+    ///      ```solidity
+    ///      contract MyNft is GasKillerSDK, ERC721 {
+    ///          function supportsInterface(bytes4 id) public view override(GasKillerSDK, ERC721) returns (bool) {
+    ///              return super.supportsInterface(id);
+    ///          }
+    ///      }
+    ///      ```
+    ///
+    ///      Answering `type(IERC165).interfaceId` here instead of deferring would terminate
+    ///      that chain and silently drop the other module's IDs, which the router's ERC-165
+    ///      preflight surfaces only as an unroutable target.
     /// @param interfaceId The interface identifier, as specified in ERC-165
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
-    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
-        return interfaceId == type(IERC165).interfaceId || interfaceId == type(IGasKillerSDK).interfaceId;
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165_0) returns (bool) {
+        return interfaceId == type(IGasKillerSDK).interfaceId || super.supportsInterface(interfaceId);
     }
 
     /// @notice Compute the expected message hash for a given transition, function, and storage updates

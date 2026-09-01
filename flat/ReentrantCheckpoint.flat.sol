@@ -3,7 +3,7 @@ pragma solidity >=0.6.2 ^0.8.0 ^0.8.27;
 
 // lib/forge-std/src/interfaces/IERC165.sol
 
-interface IERC165 {
+interface IERC165_0 {
     /// @notice Query if a contract implements an interface
     /// @param interfaceID The interface identifier, as specified in ERC-165
     /// @dev Interface identification is specified in ERC-165. This function
@@ -11,6 +11,31 @@ interface IERC165 {
     /// @return `true` if the contract implements `interfaceID` and
     /// `interfaceID` is not 0xffffffff, `false` otherwise
     function supportsInterface(bytes4 interfaceID) external view returns (bool);
+}
+
+// lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol
+
+// OpenZeppelin Contracts v4.4.1 (utils/introspection/IERC165.sol)
+
+/**
+ * @dev Interface of the ERC165 standard, as defined in the
+ * https://eips.ethereum.org/EIPS/eip-165[EIP].
+ *
+ * Implementers can declare support of contract interfaces, which can then be
+ * queried by others ({ERC165Checker}).
+ *
+ * For an implementation, see {ERC165}.
+ */
+interface IERC165_1 {
+    /**
+     * @dev Returns true if this contract implements the interface defined by
+     * `interfaceId`. See the corresponding
+     * https://eips.ethereum.org/EIPS/eip-165#how-interfaces-are-identified[EIP section]
+     * to learn more about how these ids are created.
+     *
+     * This function call must use less than 30 000 gas.
+     */
+    function supportsInterface(bytes4 interfaceId) external view returns (bool);
 }
 
 // src/schnorr/interface/ISchnorrGasKillerSDKBatch.sol
@@ -387,6 +412,33 @@ abstract contract TransitionGuard {
     }
 }
 
+// lib/openzeppelin-contracts/contracts/utils/introspection/ERC165.sol
+
+// OpenZeppelin Contracts v4.4.1 (utils/introspection/ERC165.sol)
+
+/**
+ * @dev Implementation of the {IERC165} interface.
+ *
+ * Contracts that want to implement ERC165 should inherit from this contract and override {supportsInterface} to check
+ * for the additional interface id that will be supported. For example:
+ *
+ * ```solidity
+ * function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+ *     return interfaceId == type(MyInterface).interfaceId || super.supportsInterface(interfaceId);
+ * }
+ * ```
+ *
+ * Alternatively, {ERC165Storage} provides an easier to use but more expensive implementation.
+ */
+abstract contract ERC165 is IERC165_1 {
+    /**
+     * @dev See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+        return interfaceId == type(IERC165_1).interfaceId;
+    }
+}
+
 // src/schnorr/interface/ISchnorrGasKillerSDK.sol
 
 /// @title ISchnorrGasKillerSDK
@@ -398,7 +450,7 @@ abstract contract TransitionGuard {
 ///      signatures. Deliberately single-function so
 ///      `type(ISchnorrGasKillerSDK).interfaceId` equals the `verifyAndUpdate`
 ///      selector — the router's ERC-165 preflight probes exactly this ID.
-interface ISchnorrGasKillerSDK is IERC165 {
+interface ISchnorrGasKillerSDK is IERC165_0 {
     /// @notice Verify the operators' aggregate Schnorr quorum signature and apply the
     ///         encoded state updates
     /// @dev Payable so a caller can fund value-bearing `CALL`/`CREATE`/`CREATE2` state updates
@@ -460,6 +512,7 @@ interface ISchnorrGasKillerSDK is IERC165 {
 abstract contract SchnorrGasKillerSDK is
     StateTracker,
     TransitionGuard,
+    ERC165,
     ISchnorrGasKillerSDK,
     ISchnorrGasKillerSDKBatch
 {
@@ -610,12 +663,18 @@ abstract contract SchnorrGasKillerSDK is
     /// @notice Query if a contract implements an interface
     /// @dev Supports ERC-165, ISchnorrGasKillerSDK detection (the router's preflight
     ///      probes the schnorr `verifyAndUpdate` selector before submitting), and the
-    ///      ISchnorrGasKillerSDKBatch batching/latch extension
+    ///      ISchnorrGasKillerSDKBatch batching/latch extension.
+    ///
+    ///      Defers anything else to `super` for the same reason as the BLS
+    ///      `GasKillerSDK.supportsInterface`: an inheriting contract that also extends an
+    ///      OpenZeppelin ERC-165 module must report the union of both ID sets, and the
+    ///      shared `ERC165` base is what lets the standard integrator override reach every
+    ///      implementation in the chain.
     /// @param interfaceId The interface identifier, as specified in ERC-165
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
-    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
-        return interfaceId == type(IERC165).interfaceId || interfaceId == type(ISchnorrGasKillerSDK).interfaceId
-            || interfaceId == type(ISchnorrGasKillerSDKBatch).interfaceId;
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165_0) returns (bool) {
+        return interfaceId == type(ISchnorrGasKillerSDK).interfaceId
+            || interfaceId == type(ISchnorrGasKillerSDKBatch).interfaceId || super.supportsInterface(interfaceId);
     }
 
     /// @notice Compute the expected message hash for a given transition, function, and storage updates
