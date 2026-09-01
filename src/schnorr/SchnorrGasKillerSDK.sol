@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.27;
 
-import {IERC165} from "forge-std/interfaces/IERC165.sol";
 import {ERC165} from "@openzeppelin/contracts/utils/introspection/ERC165.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {ISchnorrGasKillerSDK} from "./interface/ISchnorrGasKillerSDK.sol";
 import {ISchnorrGasKillerSDKBatch, SchnorrTaskSubmission} from "./interface/ISchnorrGasKillerSDKBatch.sol";
 import {StateTracker} from "../StateTracker.sol";

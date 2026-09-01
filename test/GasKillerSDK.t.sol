@@ -2,7 +2,7 @@
 pragma solidity ^0.8.0;
 
 import "forge-std/Test.sol";
-import {IERC165} from "forge-std/interfaces/IERC165.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 
 import "../src/GasKillerSDK.sol";
 import "./exposed/GasKillerSDKExposed.sol";

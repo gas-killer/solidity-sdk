@@ -5,8 +5,8 @@ import {
     IBLSSignatureChecker,
     IBLSSignatureCheckerTypes
 } from "@eigenlayer-middleware/interfaces/IBLSSignatureChecker.sol";
-import {IERC165} from "forge-std/interfaces/IERC165.sol";
 import {ERC165} from "@openzeppelin/contracts/utils/introspection/ERC165.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 
 import {IGasKillerSDK} from "./interface/IGasKillerSDK.sol";
 import {StateTracker} from "./StateTracker.sol";
