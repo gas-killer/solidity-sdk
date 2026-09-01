@@ -104,25 +104,9 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKil
     }
 
     /// @notice Query if a contract implements an interface
-    /// @dev Supports ERC-165 and IGasKillerSDK interface detection.
-    ///
-    ///      Answers `IGasKillerSDK` and defers everything else to `super`, so an inheriting
-    ///      contract that also extends another OpenZeppelin ERC-165 module reports the union
-    ///      of both ID sets. Both this contract and OpenZeppelin's own modules share the
-    ///      `ERC165` base, which C3 places last in the linearization, so the standard
-    ///      integrator override reaches every implementation in the chain:
-    ///
-    ///      ```solidity
-    ///      contract MyNft is GasKillerSDK, ERC721 {
-    ///          function supportsInterface(bytes4 id) public view override(GasKillerSDK, ERC721) returns (bool) {
-    ///              return super.supportsInterface(id);
-    ///          }
-    ///      }
-    ///      ```
-    ///
-    ///      Answering `type(IERC165).interfaceId` here instead of deferring would terminate
-    ///      that chain and silently drop the other module's IDs, which the router's ERC-165
-    ///      preflight surfaces only as an unroutable target.
+    /// @dev Supports ERC-165 and IGasKillerSDK interface detection. Defers to `super` so a
+    ///      contract inheriting both this SDK and another OpenZeppelin ERC-165 module reports
+    ///      the union of both ID sets.
     /// @param interfaceId The interface identifier, as specified in ERC-165
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
     function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {

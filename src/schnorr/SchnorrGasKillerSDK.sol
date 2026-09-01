@@ -185,13 +185,9 @@ abstract contract SchnorrGasKillerSDK is
     /// @notice Query if a contract implements an interface
     /// @dev Supports ERC-165, ISchnorrGasKillerSDK detection (the router's preflight
     ///      probes the schnorr `verifyAndUpdate` selector before submitting), and the
-    ///      ISchnorrGasKillerSDKBatch batching/latch extension.
-    ///
-    ///      Defers anything else to `super` for the same reason as the BLS
-    ///      `GasKillerSDK.supportsInterface`: an inheriting contract that also extends an
-    ///      OpenZeppelin ERC-165 module must report the union of both ID sets, and the
-    ///      shared `ERC165` base is what lets the standard integrator override reach every
-    ///      implementation in the chain.
+    ///      ISchnorrGasKillerSDKBatch batching/latch extension. Defers to `super` so a
+    ///      contract inheriting both this SDK and another OpenZeppelin ERC-165 module reports
+    ///      the union of both ID sets.
     /// @param interfaceId The interface identifier, as specified in ERC-165
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
     function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
