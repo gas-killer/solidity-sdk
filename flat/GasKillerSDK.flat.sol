@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity >=0.5.0 >=0.6.2 ^0.8.0 ^0.8.27;
+pragma solidity >=0.5.0 ^0.8.0 ^0.8.27;
 
 // lib/eigenlayer-middleware/src/libraries/BN254.sol
 
@@ -417,18 +417,6 @@ interface IAVSRegistrar {
     ) external view returns (bool);
 }
 
-// lib/forge-std/src/interfaces/IERC165.sol
-
-interface IERC165_0 {
-    /// @notice Query if a contract implements an interface
-    /// @param interfaceID The interface identifier, as specified in ERC-165
-    /// @dev Interface identification is specified in ERC-165. This function
-    /// uses less than 30,000 gas.
-    /// @return `true` if the contract implements `interfaceID` and
-    /// `interfaceID` is not 0xffffffff, `false` otherwise
-    function supportsInterface(bytes4 interfaceID) external view returns (bool);
-}
-
 // lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol
 
 // OpenZeppelin Contracts v4.4.1 (utils/introspection/IERC165.sol)
@@ -442,7 +430,7 @@ interface IERC165_0 {
  *
  * For an implementation, see {ERC165}.
  */
-interface IERC165_1 {
+interface IERC165 {
     /**
      * @dev Returns true if this contract implements the interface defined by
      * `interfaceId`. See the corresponding
@@ -2597,12 +2585,12 @@ abstract contract TransitionGuard {
  *
  * Alternatively, {ERC165Storage} provides an easier to use but more expensive implementation.
  */
-abstract contract ERC165 is IERC165_1 {
+abstract contract ERC165 is IERC165 {
     /**
      * @dev See {IERC165-supportsInterface}.
      */
     function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
-        return interfaceId == type(IERC165_1).interfaceId;
+        return interfaceId == type(IERC165).interfaceId;
     }
 }
 
@@ -5649,7 +5637,7 @@ interface IBLSSignatureChecker is IBLSSignatureCheckerErrors, IBLSSignatureCheck
 /// @title IGasKillerSDK
 /// @notice Interface for GasKillerSDK contracts
 /// @dev Defines the core functionality that GasKillerSDK implementations must provide
-interface IGasKillerSDK is IERC165_0 {
+interface IGasKillerSDK is IERC165 {
     // Custom errors
 
     /// @notice Thrown when `transitionIndex + 1` does not equal the current `stateTransitionCount`
@@ -5814,7 +5802,7 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKil
     ///      preflight surfaces only as an unroutable target.
     /// @param interfaceId The interface identifier, as specified in ERC-165
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
-    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165_0) returns (bool) {
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
         return interfaceId == type(IGasKillerSDK).interfaceId || super.supportsInterface(interfaceId);
     }
 

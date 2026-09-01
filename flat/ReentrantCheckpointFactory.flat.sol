@@ -1,17 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity >=0.6.2 ^0.8.0 ^0.8.27;
-
-// lib/forge-std/src/interfaces/IERC165.sol
-
-interface IERC165_0 {
-    /// @notice Query if a contract implements an interface
-    /// @param interfaceID The interface identifier, as specified in ERC-165
-    /// @dev Interface identification is specified in ERC-165. This function
-    /// uses less than 30,000 gas.
-    /// @return `true` if the contract implements `interfaceID` and
-    /// `interfaceID` is not 0xffffffff, `false` otherwise
-    function supportsInterface(bytes4 interfaceID) external view returns (bool);
-}
+pragma solidity ^0.8.0 ^0.8.27;
 
 // lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol
 
@@ -26,7 +14,7 @@ interface IERC165_0 {
  *
  * For an implementation, see {ERC165}.
  */
-interface IERC165_1 {
+interface IERC165 {
     /**
      * @dev Returns true if this contract implements the interface defined by
      * `interfaceId`. See the corresponding
@@ -484,12 +472,12 @@ abstract contract TransitionGuard {
  *
  * Alternatively, {ERC165Storage} provides an easier to use but more expensive implementation.
  */
-abstract contract ERC165 is IERC165_1 {
+abstract contract ERC165 is IERC165 {
     /**
      * @dev See {IERC165-supportsInterface}.
      */
     function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
-        return interfaceId == type(IERC165_1).interfaceId;
+        return interfaceId == type(IERC165).interfaceId;
     }
 }
 
@@ -504,7 +492,7 @@ abstract contract ERC165 is IERC165_1 {
 ///      signatures. Deliberately single-function so
 ///      `type(ISchnorrGasKillerSDK).interfaceId` equals the `verifyAndUpdate`
 ///      selector — the router's ERC-165 preflight probes exactly this ID.
-interface ISchnorrGasKillerSDK is IERC165_0 {
+interface ISchnorrGasKillerSDK is IERC165 {
     /// @notice Verify the operators' aggregate Schnorr quorum signature and apply the
     ///         encoded state updates
     /// @dev Payable so a caller can fund value-bearing `CALL`/`CREATE`/`CREATE2` state updates
@@ -726,7 +714,7 @@ abstract contract SchnorrGasKillerSDK is
     ///      implementation in the chain.
     /// @param interfaceId The interface identifier, as specified in ERC-165
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
-    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165_0) returns (bool) {
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
         return interfaceId == type(ISchnorrGasKillerSDK).interfaceId
             || interfaceId == type(ISchnorrGasKillerSDKBatch).interfaceId || super.supportsInterface(interfaceId);
     }
