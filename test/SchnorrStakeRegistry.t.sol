@@ -741,30 +741,33 @@ contract SchnorrStakeRegistryTest is Test {
         address[] memory ns = new address[](1);
         ns[0] = _nonSigner(1);
 
-        // Warm the registry's base storage (aggX/aggY/totalWeight/effectiveBlock) and the
-        // op-1 slot so both measurements below see the same warm baseline; what remains is
-        // the actual compute (keccak + ecrecover, plus one affine point subtraction for the
-        // non-signer case).
+        // Cold in either mode; the repeat is measured against it to tell the modes apart.
+        uint256 g = gasleft();
         registry.isValidSignature(MESSAGE, FULL_S, FULL_R, none, _refBlock());
+        uint256 coldFull = g - gasleft();
+
         registry.isValidSignature(MESSAGE, SUB_S, SUB_R, ns, _refBlock());
 
-        uint256 g0 = gasleft();
+        g = gasleft();
         registry.isValidSignature(MESSAGE, FULL_S, FULL_R, none, _refBlock());
-        uint256 gasFull = g0 - gasleft();
+        uint256 gasFull = g - gasleft();
 
-        uint256 g1 = gasleft();
+        g = gasleft();
         registry.isValidSignature(MESSAGE, SUB_S, SUB_R, ns, _refBlock());
-        uint256 gasOneNonSigner = g1 - gasleft();
+        uint256 gasOneNonSigner = g - gasleft();
 
         console2.log("Schnorr isValidSignature, 3/3 signed (0 non-signers):", gasFull);
         console2.log("Schnorr isValidSignature, 2/3 signed (1 non-signer): ", gasOneNonSigner);
         console2.log("  -> marginal per non-signer (affine point sub):     ", gasOneNonSigner - gasFull);
-        // A full-participation verify is one keccak256 + one ecrecover plus a handful of warm
-        // storage reads: constant in the number of *signers*. Cost grows only with the number
-        // of *non-signers* (one affine point subtraction each), which is ~0 at healthy
-        // participation. This budget guards that constant-gas property against a regression
-        // that reintroduces per-signer work.
-        uint256 constantVerifyGasBudget = 12_000;
-        assertLt(gasFull, constantVerifyGasBudget, "full-participation verify must stay constant-gas cheap");
+
+        // Under `isolate` every call gets a fresh access list, so the repeat stays cold and the
+        // budget must cover cold reads. One cold slot of margin clears bracket noise without
+        // letting a warm regression pass itself off as isolation.
+        bool warm = coldFull > gasFull + 2_000;
+        uint256 budget = warm ? 12_000 : 25_000;
+
+        // Full participation is one keccak256 + one ecrecover plus a few storage reads: constant
+        // in signers, growing only per non-signer. The budget guards against per-signer work.
+        assertLt(gasFull, budget, "full-participation verify must stay constant-gas cheap");
     }
 }
