@@ -6,7 +6,7 @@ import {ArraySummation} from "../src/examples/array-summation/ArraySummation.sol
 import {BLSSignatureChecker} from "@eigenlayer-middleware/BLSSignatureChecker.sol";
 import {ISlashingRegistryCoordinator} from "@eigenlayer-middleware/interfaces/ISlashingRegistryCoordinator.sol";
 
-/// @title ArraySummationScript
+/// @title DeployArraySummation
 /// @notice Deploys an ArraySummation demo target wired to a REAL BLSSignatureChecker.
 /// @dev `verifyAndUpdate` calls `checkSignatures` on the target's configured signature checker.
 ///      That checker must NOT be the `BLSSigCheckOperatorStateRetriever` (the router's off-chain
@@ -17,7 +17,7 @@ import {ISlashingRegistryCoordinator} from "@eigenlayer-middleware/interfaces/IS
 ///          `REGISTRY_COORDINATOR_ADDRESS`;
 ///        - any provided checker is validated to expose `registryCoordinator()` (which the
 ///          retriever does not) and, when `REGISTRY_COORDINATOR_ADDRESS` is set, to match it.
-contract ArraySummationScript is Script {
+contract DeployArraySummation is Script {
     ArraySummation public arraySummation;
 
     function setUp() public {}

@@ -4,9 +4,9 @@ pragma solidity ^0.8.13;
 import {Script, console} from "forge-std/Script.sol";
 import {SchnorrArraySummation} from "../src/examples/array-summation/SchnorrArraySummation.sol";
 
-/// @title SchnorrArraySummationScript
+/// @title DeploySchnorrArraySummation
 /// @notice Deploys a SchnorrArraySummation demo target wired to an existing SchnorrStakeRegistry.
-/// @dev The aggregate-Schnorr counterpart of `ArraySummationScript`. The two are not
+/// @dev The aggregate-Schnorr counterpart of `DeployArraySummation`. The two are not
 ///      interchangeable: a target verifies exactly one scheme's proof, so this one settles only
 ///      against a fleet running `SIGNATURE_SCHEME=schnorr`, and `ArraySummation` only against a
 ///      BLS fleet.
@@ -20,7 +20,7 @@ import {SchnorrArraySummation} from "../src/examples/array-summation/SchnorrArra
 ///      Registration order is load-bearing. Every registration advances the registry's
 ///      `effectiveBlock` watermark and verification fail-closes for reference blocks behind it,
 ///      so the whole operator set must already be registered when this runs.
-contract SchnorrArraySummationScript is Script {
+contract DeploySchnorrArraySummation is Script {
     SchnorrArraySummation public arraySummation;
 
     function setUp() public {}
