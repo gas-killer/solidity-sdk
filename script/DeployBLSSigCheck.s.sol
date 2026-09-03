@@ -5,7 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {BLSSignatureChecker} from "@eigenlayer-middleware/BLSSignatureChecker.sol";
 import {ISlashingRegistryCoordinator} from "@eigenlayer-middleware/interfaces/ISlashingRegistryCoordinator.sol";
 
-contract DeployBLSSigCheckScript is Script {
+contract DeployBLSSigCheck is Script {
     BLSSignatureChecker public blsSigCheck;
 
     function setUp() public {}

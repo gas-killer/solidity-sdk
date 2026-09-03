@@ -251,7 +251,27 @@ forge test
 ### Deploy ArraySummation (demo)
 
 ```bash
-forge script script/ArraySummation.s.sol --rpc-url <rpc_url> --private-key <private_key> --broadcast
+forge script script/DeployArraySummation.s.sol --rpc-url <rpc_url> --private-key <private_key> --broadcast
 ```
 
 Required environment variables: `AVS_ADDRESS`, `SIG_CHECKER_ADDRESS`, `ARRAY_SIZE`, `MAX_VALUE`, `ARRAY_SEED`
+
+`SIG_CHECKER_ADDRESS` is optional: left unset, the script deploys a `BLSSignatureChecker`
+against `REGISTRY_COORDINATOR_ADDRESS` so the target is correct by construction.
+
+### Deploy SchnorrArraySummation (demo)
+
+The aggregate-Schnorr counterpart, verified against a `SchnorrStakeRegistry` rather than a
+`BLSSignatureChecker`. A target verifies exactly one scheme's proof, so this one settles only
+against a fleet running `SIGNATURE_SCHEME=schnorr`.
+
+```bash
+forge script script/DeploySchnorrArraySummation.s.sol --rpc-url <rpc_url> --private-key <private_key> --broadcast
+```
+
+Required environment variables: `AVS_ADDRESS`, `SCHNORR_STAKE_REGISTRY_ADDRESS`, `ARRAY_SIZE`, `MAX_VALUE`, `ARRAY_SEED`
+
+The registry is required rather than deployed here. It is an operator set, populated by each
+operator registering a secp256k1 key with a proof of possession, which the service repo's
+`setup_schnorr_operators` binary does. Deploying one here would produce a target verifying
+against an empty set.
