@@ -87,10 +87,35 @@ contract GasKillerChat is GasKillerSDK {
         _cfg1 = _packedConfig[1];
         _cfg2 = _packedConfig[2];
         if (_weightsRoot != address(0)) {
-            _engine.checkArtifacts(_weightsRoot, _weightsManifest, _packedConfig);
+            _validateArtifacts(_engine, _weightsRoot, _weightsManifest, _packedConfig);
         } else if (_weightsManifest == bytes32(0)) {
             revert MissingWeights();
         }
+    }
+
+    /// @notice Deploy-time artifact validation hook — directory mode only.
+    /// @dev Overridable so a deployment whose directory is too large to validate in
+    ///      ONE transaction can skip it (see GasKillerChatUnchecked). This is a shape
+    ///      assertion, not a security boundary: `checkArtifacts` only checks directory
+    ///      well-formedness, summed chunk lengths against the config-derived layout and
+    ///      the tokenizer table's magic byte — it never hashes the weights, so it cannot
+    ///      distinguish the real model from a same-length blob. `weightsRoot` is
+    ///      immutable and `engine.chat` re-resolves the directory on EVERY call, so a
+    ///      malformed directory can only revert `ask`/`dryRun`, never produce a wrong
+    ///      answer. Byte-level identity is established off-chain against the deployed
+    ///      codehashes (tools/verify_onchain_directory.py) and again by every operator
+    ///      that re-simulates the tracked call before signing.
+    /// @param _engine The engine that owns the directory-resolution rules
+    /// @param _weightsRoot Root directory data contract
+    /// @param _weightsManifest Overlay manifest hash (zero in directory mode)
+    /// @param _packedConfig The packed model config
+    function _validateArtifacts(
+        Qwen3Engine _engine,
+        address _weightsRoot,
+        bytes32 _weightsManifest,
+        bytes32[3] memory _packedConfig
+    ) internal view virtual {
+        _engine.checkArtifacts(_weightsRoot, _weightsManifest, _packedConfig);
     }
 
     /// @notice Answer a prompt and fold the exchange into the chat root.

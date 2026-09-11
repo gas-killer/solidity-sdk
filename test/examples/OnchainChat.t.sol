@@ -8,6 +8,7 @@ import {IBLSSignatureCheckerTypes} from "@eigenlayer-middleware/interfaces/IBLSS
 import {StateUpdateType} from "../../src/StateChangeHandlerLib.sol";
 import {DataContractLib} from "../../src/examples/onchain-llm/DataContractLib.sol";
 import {GasKillerChat} from "../../src/examples/onchain-llm/GasKillerChat.sol";
+import {GasKillerChatUnchecked} from "../../src/examples/onchain-llm/GasKillerChatUnchecked.sol";
 import {Qwen3} from "../../src/examples/onchain-llm/Qwen3.sol";
 import {Qwen3Engine} from "../../src/examples/onchain-llm/Qwen3Engine.sol";
 import {SyntheticQwen} from "../../src/examples/onchain-llm/SyntheticQwen.sol";
@@ -224,6 +225,37 @@ contract OnchainChatTest is Test {
         );
         vm.expectRevert();
         bare.dryRun(promptIds, 1);
+    }
+
+    /// @notice The unchecked variant answers IDENTICALLY to the checked one over the
+    ///         same directory — skipping `checkArtifacts` changes nothing but deploy gas.
+    function test_UncheckedDirectoryModeMatchesChecked() public {
+        GasKillerChatUnchecked unchecked_ = new GasKillerChatUnchecked(
+            avsAddress, address(blsChecker), engine, chat.weightsRoot(), bytes32(0), SyntheticQwen.packedConfig()
+        );
+        assertEq(unchecked_.weightsRoot(), chat.weightsRoot(), "root mismatch");
+
+        (string memory a1, uint32[] memory ids1) = chat.dryRun(promptIds, 6);
+        (string memory a2, uint32[] memory ids2) = unchecked_.dryRun(promptIds, 6);
+        assertEq(keccak256(bytes(a2)), keccak256(bytes(a1)), "answer mismatch");
+        assertEq(keccak256(abi.encodePacked(ids2)), keccak256(abi.encodePacked(ids1)), "id mismatch");
+    }
+
+    /// @notice The unchecked variant constructs over a directory the checked one rejects
+    ///         (this is the whole point: 104.3M-gas validation moves off the deploy tx),
+    ///         and the bad directory still cannot produce an answer — it reverts.
+    function test_UncheckedConstructorSkipsArtifactCheck() public {
+        bytes32[3] memory cfg = SyntheticQwen.packedConfig();
+        cfg[1] = bytes32(uint256(cfg[1]) ^ (uint256(1) << 70)); // corrupt weightLen
+        address dirRoot = chat.weightsRoot();
+
+        vm.expectRevert();
+        new GasKillerChat(avsAddress, address(blsChecker), engine, dirRoot, bytes32(0), cfg);
+
+        GasKillerChatUnchecked bad =
+            new GasKillerChatUnchecked(avsAddress, address(blsChecker), engine, dirRoot, bytes32(0), cfg);
+        vm.expectRevert();
+        bad.dryRun(promptIds, 1);
     }
 
     function test_ConstructorRejectsMismatchedConfig() public {
