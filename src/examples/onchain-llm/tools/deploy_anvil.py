@@ -51,15 +51,19 @@ def rpc_batch(url, calls):
     return out
 
 
+FAMILY = 5   # address family: chunks 0x{F}1…, pages 0x{F}2…, root 0x{F}3…01 (--family lets two directories coexist)
+
+
 def chunk_addr(i):
-    return '0x51' + format(i, '038x')
+    return f'0x{FAMILY:x}1' + format(i, '038x')
 
 
 def page_addr(i):
-    return '0x52' + format(i, '038x')
+    return f'0x{FAMILY:x}2' + format(i, '038x')
 
 
-ROOT_ADDR = '0x53' + '0' * 37 + '1'
+def root_addr():
+    return f'0x{FAMILY:x}3' + '0' * 37 + '1'
 
 
 def main():
@@ -69,21 +73,28 @@ def main():
     ap.add_argument('--batch', type=int, default=10)
     ap.add_argument('--overlay', action='store_true',
                     help='mount chunks at derived overlay addresses (no directory)')
+    ap.add_argument('--blobs', default='weights.bin,tokenizer.bin',
+                    help='comma-separated blob files under --artifacts, chunked in this order '
+                         '(default: weights.bin,tokenizer.bin; fly graph: ptr.bin,edges.bin,meta.bin)')
+    ap.add_argument('--vectors', default='vectors.json', help='vectors file under --artifacts holding packedConfig')
+    ap.add_argument('--family', type=int, default=5, help='address family nibble (default 5 → 0x51/0x52/0x53…; use 6 for a second directory)')
     args = ap.parse_args()
+    global FAMILY
+    FAMILY = args.family
 
-    weights = open(f'{args.artifacts}/weights.bin', 'rb').read()
-    tok = open(f'{args.artifacts}/tokenizer.bin', 'rb').read()
-    vectors = json.load(open(f'{args.artifacts}/vectors.json'))
+    names = [s.strip() for s in args.blobs.split(',') if s.strip()]
+    blobs = [open(f'{args.artifacts}/{n}', 'rb').read() for n in names]
+    vectors = json.load(open(f'{args.artifacts}/{args.vectors}'))
 
     chunks = []
-    for blob in (weights, tok):
+    for blob in blobs:
         for at in range(0, len(blob), CHUNK):
             chunks.append(blob[at:at + CHUNK])
-    print(f'{len(chunks)} chunks ({len(weights):,} weight bytes + {len(tok):,} tokenizer bytes)')
+    print(f'{len(chunks)} chunks (' + ' + '.join(f'{len(b):,} {n} bytes' for n, b in zip(names, blobs)) + ')')
 
     calls = []
     if args.overlay:
-        manifest = keccak256(keccak256(weights) + keccak256(tok))
+        manifest = keccak256(b''.join(keccak256(b) for b in blobs))   # == keccak(keccak(w) || keccak(t)) for the Qwen pair
         for i, data in enumerate(chunks):
             calls.append(('anvil_setCode', [overlay_chunk_addr(manifest, i), '0x00' + data.hex()]))
         done = 0
@@ -96,7 +107,8 @@ def main():
         assert len(sample[0]['result']) == 2 * (1 + len(chunks[0])) + 2, 'chunk 0 code mismatch'
         print(f'overlay manifest: 0x{manifest.hex()}')
         print(f'packedConfig: {vectors["packedConfig"]}')
-        print(f'promptIds:    {vectors["promptIds"]}')
+        if 'promptIds' in vectors:
+            print(f'promptIds:    {vectors["promptIds"]}')
         return
 
     for i, data in enumerate(chunks):
@@ -107,7 +119,7 @@ def main():
         pages.append(page_addr(len(pages)))
         calls.append(('anvil_setCode', [pages[-1], '0x00' + payload.hex()]))
     root_payload = b''.join(bytes.fromhex(a[2:]) for a in pages)
-    calls.append(('anvil_setCode', [ROOT_ADDR, '0x00' + root_payload.hex()]))
+    calls.append(('anvil_setCode', [root_addr(), '0x00' + root_payload.hex()]))
 
     done = 0
     for at in range(0, len(calls), args.batch):
@@ -118,13 +130,14 @@ def main():
 
     # verify a sample
     sample = rpc_batch(args.rpc, [('eth_getCode', [chunk_addr(0), 'latest']),
-                                  ('eth_getCode', [ROOT_ADDR, 'latest'])])
+                                  ('eth_getCode', [root_addr(), 'latest'])])
     assert len(sample[0]['result']) == 2 * (1 + len(chunks[0])) + 2, 'chunk 0 code mismatch'
     assert len(sample[1]['result']) == 2 * (1 + len(root_payload)) + 2, 'root code mismatch'
 
-    print(f'weights root: {ROOT_ADDR}')
+    print(f'weights root: {root_addr()}')
     print(f'packedConfig: {vectors["packedConfig"]}')
-    print(f'promptIds:    {vectors["promptIds"]}')
+    if 'promptIds' in vectors:
+        print(f'promptIds:    {vectors["promptIds"]}')
 
 
 if __name__ == '__main__':
