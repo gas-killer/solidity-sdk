@@ -131,6 +131,8 @@
 
   /* viz */
   .vizframe { border: 2px solid var(--poster-ink); box-shadow: var(--poster-offset) var(--poster-offset) 0 var(--poster-shadow); background: #05060a; height: min(84vh, 900px); width: 100%; display: block; }
+  .wide { max-width: 1560px; }
+  .wide .vizframe { height: min(92vh, 1040px); }
   .vizbar { display: flex; justify-content: space-between; align-items: center; gap: 14px; flex-wrap: wrap; margin: 14px 0 0; color: var(--zinc-400); font-size: 14px; }
   .legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 26px; }
   .legend div { border-left: 2px solid var(--emerald-500); padding: 2px 0 2px 14px; color: var(--zinc-300); font-size: 15px; }
@@ -159,8 +161,8 @@
       <li class="hide"><a href="#how">How</a></li>
       <li class="hide"><a href="#fly">The fly</a></li>
       <li class="hide"><a href="#onchain">On chain</a></li>
-      <li><a href="#viz">Visualizer</a></li>
       <li><a href="#brain">Full brain</a></li>
+      <li><a href="#viz">Per swap</a></li>
       <li><a class="btn" href="https://gaskiller.xyz" style="padding:9px 14px;font-size:12px">gaskiller.xyz →</a></li>
     </ul>
   </div>
@@ -168,10 +170,54 @@
 
 
 
-<section id="viz" class="first">
+
+
+<section id="brain" class="first">
+  <div class="wrap wide">
+    <div class="eyebrow green">Full brain · Live Gas Killer round</div>
+    <h2>The whole fly brain, running an AMM.</h2>
+    <p class="lead">One settled Gas Killer round replayed bit-exact from the on-chain frame: all 166,700 neurons of the MaleCNS connectome, 134,742 of them touched by the trace, firing for 100 ms of brain time while the fly body shows where each region sits. 3,335 photoreceptors read a 640×480 render of the pool window, and the descending-neuron readout turns spikes into the fee. Press play, orbit the fly, and switch to the AMM tab at the top for price and swaps.</p>
+
+    <iframe class="vizframe" src="viz/fly_brain_amm.html" title="Fly brain running an AMM: one settled Gas Killer round" loading="lazy" allow="fullscreen"></iframe>
+    <div class="vizbar">
+      <span>Drag to orbit · scroll to zoom · right-drag or shift-drag to pan · H hides the panels.</span>
+      <a class="btn ghost" href="viz/fly_brain_amm.html" target="_blank" rel="noopener" style="padding:9px 14px;font-size:12px">Open full screen ↗</a>
+    </div>
+
+    <div class="legend">
+      <div><b>Brain regions</b>Spikes per millisecond by MaleCNS superclass, with cumulative shading. Points glow when they spike; dim points were never touched by the trace.</div>
+      <div><b>Retina</b>The pool window rendered to a 640×480 canvas and sampled by 3,335 receptor neurons.</div>
+      <div><b>Descending-neuron readout</b>The four rates mapped to the fee and skew, settled as one storage word by FlyPolicy at <a class="mono" href="https://sepolia.etherscan.io/address/0x3c749083688dEDb379c37071fC4bf3809B67Db6E">0x3c74…Db6E</a>.</div>
+      <div><b>AMM tab</b>Price, swaps and the fly's decisions over the windows of the v1 pool at <a class="mono" href="https://sepolia.etherscan.io/address/0x0147847039d35Aa489c6654C21F49b9b58c9ed50">0x0147…ed50</a>.</div>
+    </div>
+  </div>
+</section>
+
+<section class="hero">
   <div class="wrap">
-    <div class="eyebrow">Visualizer</div>
-    <h2>Watch the brain trade.</h2>
+    <div class="eyebrow green">Gas Expand · Demo · Sepolia testnet</div>
+    <h1 style="margin-top:16px">A <span>fruit fly brain</span> prices every swap on an Ethereum AMM.</h1>
+    <p class="lead" style="margin-top:26px">The complete MaleCNS fruit-fly connectome, 166,700 neurons and 25.6 million synapses, runs as a Solidity contract. Every swap on the pool is priced by its own 100 ms brain episode. One episode costs about 14 billion gas to execute. Gas Killer settles it on Sepolia for 406 thousand.</p>
+    <div class="cta">
+      <a class="btn" href="#viz">Watch every swap get priced ↓</a>
+      <a class="btn ghost" href="#onchain">See the transactions</a>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><b>166,700</b><span>neurons simulated on-chain</span></div>
+      <div class="stat"><b>25.58 M</b><span>synapses in 4,196 data contracts</span></div>
+      <div class="stat"><b>~14 Ggas</b><span>EVM gas per swap decision</span></div>
+      <div class="stat"><b class="amber">16.78 M</b><span>Sepolia's per-transaction cap (EIP-7825)</span></div>
+      <div class="stat"><b>406,341</b><span>gas to settle a decision on-chain</span></div>
+      <div class="stat"><b>~830×</b><span>over the cap, made verifiable</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="viz">
+  <div class="wrap">
+    <div class="eyebrow">Per-swap visualizer</div>
+    <h2>Every swap gets its own episode.</h2>
     <p class="lead">Both episodes, replayed millisecond by millisecond from the logged observations and reproducing the on-chain spike roots exactly. The top half is the fly: every soma at its real position from the MaleCNS reconstruction, lit as it fires. The bottom half is the pool, advancing block by block as intents arrive, get decided and fill.</p>
 
     <iframe class="vizframe" src="viz/fly_amm_v2.html" title="Fly brain pricing every swap" loading="lazy" allow="fullscreen"></iframe>
@@ -185,27 +231,6 @@
       <div><b>Retina inset</b>The 160×120 image the rasterizer painted for this intent, the only thing the fly is told about the market.</div>
       <div><b>Block timeline</b>Spot price, reserves, intents in the queue and fills, in the order they happened on Sepolia. Each decision opens its episode in the brain view.</div>
       <div><b>Readout</b>The four population rates converging on the fee and skew that were written on chain.</div>
-    </div>
-  </div>
-</section>
-
-<section class="hero">
-  <div class="wrap">
-    <div class="eyebrow green">Gas Expand · Demo · Sepolia testnet</div>
-    <h1 style="margin-top:16px">A <span>fruit fly brain</span> prices every swap on an Ethereum AMM.</h1>
-    <p class="lead" style="margin-top:26px">The complete MaleCNS fruit-fly connectome, 166,700 neurons and 25.6 million synapses, runs as a Solidity contract. Every swap on the pool is priced by its own 100 ms brain episode. One episode costs about 14 billion gas to execute. Gas Killer settles it on Sepolia for 406 thousand.</p>
-    <div class="cta">
-      <a class="btn" href="#viz">Back to the visualizer ↑</a>
-      <a class="btn ghost" href="#onchain">See the transactions</a>
-    </div>
-
-    <div class="stats">
-      <div class="stat"><b>166,700</b><span>neurons simulated on-chain</span></div>
-      <div class="stat"><b>25.58 M</b><span>synapses in 4,196 data contracts</span></div>
-      <div class="stat"><b>~14 Ggas</b><span>EVM gas per swap decision</span></div>
-      <div class="stat"><b class="amber">16.78 M</b><span>Sepolia's per-transaction cap (EIP-7825)</span></div>
-      <div class="stat"><b>406,341</b><span>gas to settle a decision on-chain</span></div>
-      <div class="stat"><b>~830×</b><span>over the cap, made verifiable</span></div>
     </div>
   </div>
 </section>
@@ -414,26 +439,6 @@
 </section>
 
 
-<section id="brain">
-  <div class="wrap">
-    <div class="eyebrow">Full brain · 300 ms</div>
-    <h2>The whole fly, one full round.</h2>
-    <p class="lead">The first version of the policy priced the pool once per 25-block window with a 300 ms episode, three times longer than the per-swap version. This is that round replayed bit-exact from the on-chain frame: 3,000 steps, the fly body around the brain, and 3,335 photoreceptors reading a 640×480 render of the pool window. Switch between the Brain tab and the AMM tab at the top left.</p>
-
-    <iframe class="vizframe" src="viz/fly_brain_amm.html" title="Fly brain running an AMM: one settled Gas Killer round" loading="lazy" allow="fullscreen"></iframe>
-    <div class="vizbar">
-      <span>Drag to orbit · scroll to zoom · right-drag or shift-drag to pan · H hides the panels.</span>
-      <a class="btn ghost" href="viz/fly_brain_amm.html" target="_blank" rel="noopener" style="padding:9px 14px;font-size:12px">Open full screen ↗</a>
-    </div>
-
-    <div class="legend">
-      <div><b>Brain regions</b>Spikes per millisecond by MaleCNS superclass, with cumulative shading. Points glow when they spike; dim points were never touched by the trace.</div>
-      <div><b>Retina</b>The pool window rendered to a 640×480 canvas and sampled by 3,335 receptor neurons.</div>
-      <div><b>Descending-neuron readout</b>The four rates mapped to the fee and skew, settled as one storage word by FlyPolicy at <a class="mono" href="https://sepolia.etherscan.io/address/0x3c749083688dEDb379c37071fC4bf3809B67Db6E">0x3c74…Db6E</a>.</div>
-      <div><b>AMM tab</b>Price, swaps and the fly's decisions over the windows of the v1 pool at <a class="mono" href="https://sepolia.etherscan.io/address/0x0147847039d35Aa489c6654C21F49b9b58c9ed50">0x0147…ed50</a>.</div>
-    </div>
-  </div>
-</section>
 
 <section class="tight">
   <div class="wrap">
