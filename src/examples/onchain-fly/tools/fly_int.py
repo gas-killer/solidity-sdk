@@ -116,13 +116,13 @@ def decay(d: int):
 def pack_cfg(m, *, warm_chunks=0, episode_steps=3000, pulse_steps=2000, bin_steps=100,
              alpha=ALPHA_Q16_DEFAULT, decay_q16=DECAY_Q16_DEFAULT, eta=0,
              min_fee=5, max_fee=100, max_skew=30, rebal_skew=30, rebal_threshold=25, dev_ref=50,
-             max_lag=2, vol_bar_rows=440):
+             max_lag=2, vol_bar_rows=440, size_ref=2000, slip_ref=500, max_batch=1):
     c0 = (m['n'] << 224) | (m['nEdges'] << 192) | (m['ptrChunks'] << 176) | (m['edgeChunks'] << 160) \
         | (m['metaChunks'] << 144) | (warm_chunks << 128) | (m['delaySteps'] << 120) | (m['rfcSteps'] << 112) \
         | (m['entriesPerChunk'] << 96)
     c1 = (episode_steps << 240) | (pulse_steps << 224) | (bin_steps << 216) | (alpha << 200) | (decay_q16 << 184) | (eta << 168)
     c2 = (min_fee << 240) | (max_fee << 224) | (max_skew << 208) | (rebal_skew << 192) | (rebal_threshold << 176) \
-        | (dev_ref << 160) | (max_lag << 152) | (vol_bar_rows << 136)
+        | (dev_ref << 160) | (max_lag << 152) | (vol_bar_rows << 136) | (size_ref << 120) | (slip_ref << 104) | (max_batch << 96)
     return [c0, c1, c2]
 
 
@@ -135,7 +135,8 @@ def unpack_cfg(cfg):
                 episodeSteps=f(c1, 240, 16), pulseSteps=f(c1, 224, 16), binSteps=f(c1, 216, 8), alpha=f(c1, 200, 16),
                 decay=f(c1, 184, 16), eta=f(c1, 168, 16),
                 minFee=f(c2, 240, 16), maxFee=f(c2, 224, 16), maxSkew=f(c2, 208, 16), rebalSkew=f(c2, 192, 16),
-                rebalThreshold=f(c2, 176, 16), devRef=f(c2, 160, 16), maxLag=f(c2, 152, 8), volBarRows=f(c2, 136, 16))
+                rebalThreshold=f(c2, 176, 16), devRef=f(c2, 160, 16), maxLag=f(c2, 152, 8), volBarRows=f(c2, 136, 16),
+                sizeRef=f(c2, 120, 16), slipRef=f(c2, 104, 16), maxBatch=f(c2, 96, 8))
 
 
 # ----------------------------------------------------------------------------- graph blobs
@@ -433,6 +434,61 @@ def rasterize(G: Graph, cfg, o) -> bytes:
         assert 0 <= L <= 65535
         out.append(L)
     return struct.pack('>%dH' % len(out), *out)
+
+
+BAR_TOP = 120
+
+
+def canvas_swap(y, x, o, dev_ref, bar_rows, size_ref, slip_ref):
+    """FlySwapRasterizer._canvas: dev strip (spot vs emaSpot) | intent strip | slippage strip | per-epoch bars."""
+    if y < STRIP_ROWS:
+        spot, ema = int(o['spotQ64']), int(o['emaSpotQ64'])
+        if spot == ema or ema == 0 or dev_ref == 0: return 0
+        abs_dev = (abs(spot - ema) * 10000) // ema
+        lit = min(abs_dev * 65535 // dev_ref, 65535)
+        return lit if ((x < 320) == (spot > ema)) else 0
+    if y < 2 * STRIP_ROWS:
+        if size_ref == 0 or o['sizeBps'] == 0: return 0
+        lit = min(int(o['sizeBps']) * 65535 // size_ref, 65535)
+        return lit if ((x < 320) == bool(o['buyBase'])) else 0
+    if y < 3 * STRIP_ROWS:
+        if slip_ref == 0 or o['maxSlipBps'] == 0: return 0
+        return min(int(o['maxSlipBps']) * 65535 // slip_ref, 65535)
+    vol = int(o['buyQuote'][x // 20]) if x < 320 else int(o['sellQuote'][(x - 320) // 20])
+    vol_ref = int(o['volRef'])
+    rows = min(bar_rows, CANVAS_H - BAR_TOP)
+    h = (rows * min(vol, vol_ref)) // vol_ref if vol_ref else 0
+    return 65535 if y >= CANVAS_H - h else 0
+
+
+def rasterize_swap(G: Graph, cfg, o) -> bytes:
+    p = unpack_cfg(cfg)
+    out = []
+    for (_idx, u, v) in G.retina:
+        xq, yq = u * (CANVAS_W - 1), v * (CANVAS_H - 1)
+        x0, y0 = xq >> 16, yq >> 16
+        x1, y1 = min(x0 + 1, CANVAS_W - 1), min(y0 + 1, CANVAS_H - 1)
+        dx, dy = xq & 0xffff, yq & 0xffff
+        Y = lambda yy, xx: canvas_swap(yy, xx, o, p['devRef'], p['volBarRows'], p['sizeRef'], p['slipRef'])
+        L = ((65536 - dx) * (65536 - dy) * Y(y0, x0) + dx * (65536 - dy) * Y(y0, x1)
+             + (65536 - dx) * dy * Y(y1, x0) + dx * dy * Y(y1, x1)) >> 32
+        out.append(L)
+    return struct.pack('>%dH' % len(out), *out)
+
+
+def rotate_hist(raw, hist_epoch, epoch):
+    """FlySwapPolicy._observe: bins k = epochs epoch-16+k, valid iff 1 <= e <= histEpoch."""
+    out = []
+    for k in range(16):
+        e = epoch - 16 + k
+        out.append(int(raw[e % 16]) if 1 <= e <= hist_epoch else 0)
+    return out
+
+
+def pack_fill(fee, skew, flags, epoch, spike_root: bytes) -> bytes:
+    w = int.from_bytes(spike_root, 'big') & ((1 << 160) - 1)
+    w |= (epoch & 0xffffff) << 192; w |= flags << 216; w |= (skew & 0xffff) << 224; w |= fee << 240
+    return w.to_bytes(32, 'big')
 
 
 def retina_drive(Lf: int) -> int:

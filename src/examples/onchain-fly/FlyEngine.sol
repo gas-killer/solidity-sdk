@@ -684,10 +684,9 @@ contract FlyEngine {
             bad := or(bad, or(gt(nActive, n), gt(inflight, n)))
             // slot counts: sum == inflight, padding zero
             let sum := 0
-            for { let s := 0 } lt(s, slots) { s := add(s, 1) } { sum := add(
-                sum,
-                shr(224, mload(add(add(hdr, 32), shl(2, s))))
-            ) }
+            for { let s := 0 } lt(s, slots) { s := add(s, 1) } {
+                sum := add(sum, shr(224, mload(add(add(hdr, 32), shl(2, s)))))
+            }
             bad := or(bad, iszero(eq(sum, inflight)))
             for { let p := add(add(hdr, 32), shl(2, slots)) } lt(p, add(hdr, 128)) { p := add(p, 32) } {
                 let rem := sub(add(hdr, 128), p)
@@ -761,16 +760,14 @@ contract FlyEngine {
             let first := sub(n, head)
             if gt(first, inflight) { first := inflight }
             let src := add(ring, shl(2, head))
-            for { let off := 0 } lt(off, shl(2, first)) { off := add(off, 32) } { mstore(
-                add(dst, off),
-                mload(add(src, off))
-            ) }
+            for { let off := 0 } lt(off, shl(2, first)) { off := add(off, 32) } {
+                mstore(add(dst, off), mload(add(src, off)))
+            }
             let rest := sub(inflight, first)
             dst := add(dst, shl(2, first))
-            for { let off := 0 } lt(off, shl(2, rest)) { off := add(off, 32) } { mstore(
-                add(dst, off),
-                mload(add(ring, off))
-            ) }
+            for { let off := 0 } lt(off, shl(2, rest)) { off := add(off, 32) } {
+                mstore(add(dst, off), mload(add(ring, off)))
+            }
         }
         len = 128 + 32 * n + 4 * (nActive + inflight);
     }

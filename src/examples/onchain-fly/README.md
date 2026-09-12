@@ -12,6 +12,9 @@ build log and measurements: [PROGRESS.md](PROGRESS.md).
 | `FlyAMM.sol` | The pool. Never inherits the SDK; reads `FlyPolicy.params()` under hard clamps (fee ∈ [5,100] bps, skew ∈ ±30, staleness → 30 bps default). |
 | `FlyTypes.sol` | `Observation`, `Stimulus`, `Readout`, `FlyState`. |
 | `FlyTestToken.sol` | Mintable ERC20 for rehearsals. |
+| `FlySwapPool.sol` (v2) | Per-swap intents: escrow + FIFO queue, `applyNext` executes each intent at its own fly-decided fee (HANDOFF_PER_SWAP.md). |
+| `FlySwapPolicy.sol` (v2) | Gas Killer consumer: `settle(prev)` runs one episode per pending intent, writes one fill word per intent + the chained state. |
+| `FlySwapRasterizer.sol` (v2) | Renders one intent (direction, size, slippage) + the per-epoch histogram onto the retina. |
 
 ## How a round works
 
@@ -61,6 +64,14 @@ a cheaper kernel is a v2 item (§3.8 tonic-cell sleeping, d=1 fast path, cached 
 
 See PROGRESS.md "Testnet run" for the fleet timings and the deployment gotchas (EIP-7825 tx cap → `FlyPolicyUnchecked`,
 rendered-payload settlement tier, staleness clamp).
+
+## v2: every swap priced by its own fly episode (live on Sepolia)
+
+Pool `0xD9adC740c61c2362AA9649cDe79D1A20B537fa69`, policy `0x474c62c9931e5a501986f6E27AC4Cc084dFf9908`, rasterizer
+`0x9caE2512890d5B46b5882CA25EFF78d7c24E2428`. `submit` escrows an intent; the keeper (`tools/fly_keeper2.py round`) sends
+`settle(prev)` through the router, broadcasts the rendered `verifyAndUpdate`, then `applyUpTo` fills in queue order. Two
+live rounds: #1 buy paid 33 bps (fly fee 31 +2), #2 sell paid 32 bps (fly fee 41 −9). Details in PROGRESS.md "v2".
+The animation (`tools/fly_viz_build2.py`) replays each intent's episode from its on-chain log.
 
 ## Tests
 

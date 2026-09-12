@@ -175,6 +175,16 @@ def cmd_synth(a):
     assert rc == rp and rootc == rootp and outc == outp, 'decide C != py'
     report['decide'] = dict(frame=frame.hex(), readout=rc, spikeRoot=rootc.hex(), stateOutKeccak=F.keccak(outc).hex(),
                             wall_c=round(tc, 3), wall_py=round(tp, 1), trace_head=trace[:3])
+    # 4b. v2: one queued intent rendered by rasterize_swap, then the same decide (vectors for FlySwapRasterizer/FlySwapPolicy)
+    so = dict(id=3, buyBase=True, sizeBps=850, maxSlipBps=120, queueDepth=2, epoch=5,
+              buyQuote=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 900_000, 0, 1_200_000, 300_000, 2_000_000],
+              sellQuote=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 400_000, 0, 1_100_000, 700_000],
+              volRef=1_500_000, spotQ64=(1 << 64) * 1004 // 1000, emaSpotQ64=1 << 64, feeIncomeQuote=321, lpLossQuote=0)
+    sframe = F.rasterize_swap(G, cfg, so); sstim = dict(punishSteps=0, rewardSteps=200); srates0 = [5000, 7000, 9000, 11000]
+    rs_c, sroot_c, _, _, strace = run_fixed(G, cfg, wc, sframe, sstim, srates0, 'c')
+    rs_p, sroot_p, _, _, _ = run_fixed(G, cfg, wc, sframe, sstim, srates0, 'py')
+    assert rs_c == rs_p and sroot_c == sroot_p, 'decideSwap C != py'
+    report['decideSwap'] = dict(frame=sframe.hex(), lit=sum(1 for i in range(0, len(sframe), 2) if sframe[i:i+2] != b'\0\0'), readout=rs_c, spikeRoot=sroot_c.hex())
     # 5. kernel.cpp parity gates
     report['parity'] = parity(G, cfg, npz, wsteps, frame, stim)
     # 6. vectors.json for forge
@@ -185,7 +195,9 @@ def cmd_synth(a):
                step=dict(stateIn=gen.hex(), driveIn=drive_in.hex(), readoutIds=ro_ids, nSteps=T, stateOut=oc.hex(), readoutCounts=cc1, chk=hc.hex(),
                          split=dict(t1=t1, mid=m1.hex(), chk1=h1.hex(), chk2=h2.hex(), counts1=c1, counts2=c2)),
                decide=dict(observation=o, frame=frame.hex(), stimulus=stim, rates0=rates0, readout=rc, spikeRoot=rootc.hex(),
-                           stateOut=outc.hex(), episodeSteps=a.steps, binTrace=trace))
+                           stateOut=outc.hex(), episodeSteps=a.steps, binTrace=trace),
+               decideSwap=dict(observation=so, frame=sframe.hex(), stimulus=sstim, rates0=srates0, readout=rs_c, spikeRoot=sroot_c.hex(),
+                               rotated=F.rotate_hist(list(range(16)), 4, 5)))
     def hx(o):   # forge-friendly: 0x-prefixed hex strings, big ints as decimal strings
         if isinstance(o, dict): return {k: hx(v) for k, v in o.items()}
         if isinstance(o, list): return [hx(v) for v in o]

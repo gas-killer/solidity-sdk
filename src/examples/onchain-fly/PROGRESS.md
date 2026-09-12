@@ -98,3 +98,39 @@ python3 src/examples/onchain-fly/tools/fly_keeper.py verify --rpc $SEPOLIA --pol
 - Tooling gotchas: Cloudflare and the public Sepolia RPCs 403 Python's default user agent (tools now send `curl/8.4.0`);
   reth refuses `eth_getLogs` below block 1,000,000 and ranges over 100,000 blocks (keeper uses a 90k lookback);
   `cast call/send` want `--gas-limit` and positional raw calldata.
+
+## v2 — per-swap fly pricing (HANDOFF_PER_SWAP.md), 2026-09-12
+
+Implemented and LIVE on Sepolia through the Gas Killer testnet; v1 stays deployed and untouched.
+
+| Contract | Sepolia | Notes |
+|---|---|---|
+| `FlySwapRasterizer` | `0x9caE2512890d5B46b5882CA25EFF78d7c24E2428` | v2 canvas (§5.2) in a companion contract: the deployed engine is vector-pinned and 2.1 KB under EIP-170, so `rasterizeSwap` did not go into `FlyEngine` (deviation from §4.4; same sampler, `decide` unchanged, no engine redeploy) |
+| `FlySwapPool` | `0xD9adC740c61c2362AA9649cDe79D1A20B537fa69` | escrowed FIFO intents, `applyNext`/`applyUpTo`, per-epoch histogram ring + EMA spot, expiry-by-epoch refunds, v1 clamps |
+| `FlySwapPolicyUnchecked` | `0x474c62c9931e5a501986f6E27AC4Cc084dFf9908` | `settle(prev)`: one episode per intent, writes `fills[id]` + `DECIDED_SLOT` + `FLY_SLOT` only; `maxBatch = 1`, 100 ms episodes; cfg2 = v1 cfg2 \| sizeRef 2000 \| slipRef 500 \| maxBatch 1 |
+| engine / directories / tokens | reused (`0xB61f…E4fC`, `0xe7c8…5641`, `0x046b…66ac`, `0xc3EF…4A10`, `0x3015…a16F`) | |
+
+Live rounds (keeper `tools/fly_keeper2.py round`, rendered-payload tier):
+
+| Intent | Observation | Fly decision | Settlement | Fill |
+|---|---|---|---|---|
+| #1 BUY 10 quote | size 50 bps, queue 2, 244 lit receptors | fee 31, skew +2 (28,141 spikes) | task `29137a35…` ready in ~4 min → `0xddd22cf8a857c8aa2a6d0b347ec1e95b09c5811858e8c20aed5dba0fcb568c09` (406,341 gas: 3 STOREs + 2 logs) | `0x1e2f963b…` paid 33 bps, out 4.958788 base |
+| #2 SELL 2 base | size 20 bps, queue 1, 408 lit, rates seeded from #1's settle | fee 41, skew +9 (28,028 spikes) | task `898519a1…` ready in ~4 min → `0xfab96cfceb64428a83ad3ebe8c8066a9b31ea0dc176b05425ae3792a9beab523` (355,521 gas) | `0x2f33bb23…` paid 32 bps (fee − skew on sells), out 4.019053 quote |
+
+`fly_keeper2.py verify` replays both `FlySettled`/`FlyIntentDecided` logs: prevWord chain, `pack(next) == flyWord`,
+`fills[id]` slots, pool statuses. The visualizer (`tools/fly_viz_amm2.py` + `fly_viz_build2.py` + `fly_viz_template2.html`)
+replays each intent's episode from the logged `SwapObservation` and reproduces both spikeRoots bit-for-bit.
+
+Tests: `test/examples/FlySwapAMM.t.sol` (15) — escrow/queue, `NotDecided`, settle writes only policy slots, diff applies
+via `verifyAndUpdate` then `applyNext` fills at the fly fee, in-order/idempotent apply, minOut + expiry refunds, clamps
+(band, ±30 skew, sell = fee − skew), LP ops between reference and apply, batch chaining (`maxBatch = 2`), `rasterizeSwap`
++ decide vector, fill/state word round trips, histogram rotation. 11 engine vectors + 9 v1 tests unchanged (35 total).
+
+Payload gate (HANDOFF_PER_SWAP §8.9, by hand): at `MAX_BATCH = 3` the diff is 5 STOREs (≤ 5·22,100 = 110,500) + 4 logs
+(~6 KB data ≈ 50 k) + calldata + BLS floor ≈ 0.7 M applied gas, far under the 16.78 M budget; the measured single-intent
+settlement was 406 k. The binding limit stays trace time (84 s per 100 ms episode on the sim node).
+
+Gotchas found while implementing v2: memory-array assignment aliases (`uint64[16] memory raw = o.buyQuote` then rewriting
+`o.buyQuote` corrupted the rotation — copy explicitly); `dryRun` cannot emit, so `_compute` returns a `Round` struct and
+`settle` emits; the legacy codegen needed `applyNext` split into `_execute` and `_decideOne` into `_episode`/`_mapReadout`;
+`eth_account` requires a checksummed `to` (router payloads are lowercase).

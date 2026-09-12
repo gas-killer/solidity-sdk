@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fly brain → AMM: one settled Gas Killer round</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #05060a; color: #dfe3ea; font: 13px/1.45 -apple-system, "Inter", "Segoe UI", sans-serif; overflow: hidden; }
+  #c { position: absolute; inset: 0; }
+  .panel { position: absolute; background: rgba(8,10,16,.80); border: 1px solid rgba(255,255,255,.08); border-radius: 10px; padding: 12px 14px; backdrop-filter: blur(6px); }
+  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: #98a2b3; margin: 0 0 8px; font-weight: 600; cursor: pointer; user-select: none; }
+  .panel h2::before { content: '▾ '; color: #667085; }
+  .panel.collapsed h2::before { content: '▸ '; }
+  .panel.collapsed > *:not(h2) { display: none; }
+  #tabs { position: absolute; left: 50%; top: 14px; transform: translateX(-50%); display: flex; gap: 4px; z-index: 5; }
+  #tabs button { padding: 6px 14px; font-weight: 600; }
+  #tabs button.on { background: #f5c542; color: #111; border-color: #f5c542; }
+  #hud { left: 16px; top: 16px; width: 380px; }
+  #hud h1 { font-size: 16px; margin: 0 0 4px; font-weight: 600; letter-spacing: .2px; }
+  #hud .sub { color: #98a2b3; font-size: 12px; margin-bottom: 8px; }
+  #phase { font-size: 13px; min-height: 58px; color: #f3f4f6; margin: 8px 0; padding: 8px 10px; background: rgba(255,255,255,.04); border-left: 3px solid #f5c542; border-radius: 4px; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-variant-numeric: tabular-nums; }
+  .kv b { color: #98a2b3; font-weight: 500; }
+  #regions { right: 16px; top: 16px; width: 330px; }
+  .bar { display: grid; grid-template-columns: 138px 1fr 46px; gap: 8px; align-items: center; margin: 3px 0; font-size: 12px; }
+  .bar .track { height: 9px; background: rgba(255,255,255,.06); border-radius: 4px; overflow: hidden; position: relative; }
+  .bar .fill { height: 100%; border-radius: 4px; transition: width .08s linear; }
+  .bar .cum { position: absolute; top: 0; height: 100%; opacity: .28; }
+  .bar .n { text-align: right; color: #98a2b3; font-variant-numeric: tabular-nums; }
+  .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  #decode { right: 16px; bottom: 76px; width: 330px; }
+  #decode table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  #decode td { padding: 2px 4px; font-size: 12px; }
+  #decode td:nth-child(n+2) { text-align: right; }
+  #decode .fee { font-size: 20px; font-weight: 600; color: #f5c542; margin-top: 6px; }
+  #eye { left: 16px; bottom: 76px; width: 380px; }
+  #eye canvas { width: 100%; image-rendering: pixelated; border-radius: 4px; background: #000; display: block; }
+  #bottom { left: 16px; right: 16px; bottom: 16px; height: 40px; display: flex; align-items: center; gap: 10px; }
+  #bottom input[type=range] { flex: 1; }
+  button { background: #1c2230; color: #e5e7eb; border: 1px solid rgba(255,255,255,.12); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+  button:hover { background: #283042; }
+  #time { min-width: 150px; font-variant-numeric: tabular-nums; }
+  label.tog { color: #98a2b3; font-size: 12px; white-space: nowrap; }
+  .lbl { position: absolute; transform: translate(-50%, -130%); pointer-events: none; font-size: 11px; padding: 2px 6px; border-radius: 4px; background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.15); white-space: nowrap; }
+  #hint { position: absolute; left: 50%; bottom: 66px; transform: translateX(-50%); color: #667085; font-size: 11px; pointer-events: none; }
+  #amm { position: absolute; inset: 0; overflow: auto; background: #05060a; display: none; padding: 64px 24px 24px; box-sizing: border-box; }
+  #amm h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: #98a2b3; margin: 18px 0 8px; }
+  #amm .grid { display: grid; grid-template-columns: 1fr 420px; gap: 20px; }
+  #chart { width: 100%; height: 420px; background: rgba(255,255,255,.02); border: 1px solid rgba(255,255,255,.08); border-radius: 10px; }
+  #saw canvas { width: 100%; border-radius: 6px; background: #000; display: block; image-rendering: pixelated; }
+  table.ev { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12px; }
+  table.ev th { text-align: left; color: #98a2b3; font-weight: 500; padding: 4px 8px; border-bottom: 1px solid rgba(255,255,255,.08); }
+  table.ev td { padding: 4px 8px; border-bottom: 1px solid rgba(255,255,255,.04); white-space: nowrap; }
+  table.ev tr.round { background: rgba(245,197,66,.08); }
+  a { color: #8ab4f8; text-decoration: none; }
+  .tag { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .tag.swap { background: #1f3b2e; color: #7ee2a8; } .tag.window { background: #2a2540; color: #c7b6ff; } .tag.decision { background: #40331a; color: #f5c542; } .tag.liquidity { background: #1d2b3a; color: #8ab4f8; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="tabs"><button id="tabBrain" class="on">Brain</button><button id="tabAmm">AMM · price · swaps</button></div>
+<div id="hud" class="panel">
+  <h1>Fly brain running an AMM</h1>
+  <div class="sub">MaleCNS v1.0 connectome (166,700 neurons, 25.6 M synapses) as the fee policy of an x·y=k pool — one Gas Killer round replayed bit-exact from the on-chain frame.</div>
+  <div id="phase"></div>
+  <div class="kv" id="facts"></div>
+</div>
+<div id="regions" class="panel">
+  <h2>Brain regions firing (spikes / ms, shaded = cumulative)</h2>
+  <div id="bars"></div>
+  <div style="margin-top:8px;color:#98a2b3;font-size:11px">superclass = MaleCNS annotation; points glow when they spike, dim points were never touched by the trace.</div>
+</div>
+<div id="decode" class="panel">
+  <h2>Descending-neuron readout → fee</h2>
+  <table id="rotab"></table>
+  <div class="fee" id="fee"></div>
+  <div id="feenote" style="color:#98a2b3;font-size:11px"></div>
+</div>
+<div id="eye" class="panel">
+  <h2>What the retina saw (pool window → 640×480 canvas → 3,335 receptors)</h2>
+  <canvas id="eyecv" width="160" height="120"></canvas>
+  <div id="eyenote" style="color:#98a2b3;font-size:11px;margin-top:6px"></div>
+</div>
+<div id="hint">drag: rotate · right-drag / shift-drag / arrows: pan · wheel: zoom · H: hide panels</div>
+<div id="bottom" class="panel">
+  <button id="play">Pause</button>
+  <span id="time"></span>
+  <input type="range" id="scrub" min="0" max="99" value="0">
+  <button id="zin" title="zoom in">＋</button><button id="zout" title="zoom out">－</button><button id="reset">Reset view</button>
+  <label class="tog"><input type="checkbox" id="rot" checked> rotate</label>
+  <label class="tog"><input type="checkbox" id="untouched" checked> untouched</label>
+  <label class="tog"><input type="checkbox" id="body" checked> body</label>
+  <label class="tog">speed <select id="speed"><option value="0.5">½×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label>
+</div>
+<div id="amm">
+  <div class="grid">
+    <div>
+      <h2>Pool on Sepolia — spot price, swaps (fee charged), window closes, fly decisions</h2>
+      <canvas id="chart"></canvas>
+      <div id="chartnote" style="color:#98a2b3;font-size:11px;margin-top:6px"></div>
+      <h2>Events</h2>
+      <table class="ev" id="evtab"></table>
+    </div>
+    <div>
+      <h2>What the fly saw for the animated round</h2>
+      <div id="saw"><canvas id="sawcv" width="160" height="120"></canvas></div>
+      <div id="obs" class="kv" style="margin-top:8px"></div>
+      <h2>How the fly controls the pool</h2>
+      <div style="color:#c9d1dc;font-size:12px;line-height:1.5">
+        <p>1. Traders swap; the first swap in a new 25-block window <b>closes</b> the previous one: buy/sell volume, TWAP, fee income, LP loss and the closing spot are frozen (<span class="tag window">window</span>).</p>
+        <p>2. A keeper submits <code>decide(prevState)</code> to the Gas Killer router. The router and three operators each trace the call under the unbounded profile: rasterize the closed window, run the whole fly brain for the episode, decode DNp20 / DNpe017 into fee and skew.</p>
+        <p>3. They sign the identical diff; the quorum-signed <code>verifyAndUpdate</code> writes ONE word into <b>FlyPolicy</b> (<span class="tag decision">decision</span>). The pool never receives a transaction from the fly.</p>
+        <p>4. Every <span class="tag swap">swap</span> reads that word with one SLOAD (<code>effectiveFee</code>), clamps it to 5–100 bps and the 2-window staleness limit, and charges it — the <b>feeBps</b> column below is what each trade actually paid.</p>
+      </div>
+    </div>
+  </div>
+</div>
+<script type="importmap">{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const D = __DATA__;
+const b64 = (s, T) => { const bin = atob(s); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return new T(u.buffer); };
+const pos = b64(D.pos, Float32Array), cls = b64(D.cls, Uint8Array), touchedBits = b64(D.touched, Uint8Array);
+const frames = D.frames.map(f => b64(f, Uint32Array));
+const N = D.n, NF = frames.length;
+const touched = i => (touchedBits[i >> 3] >> (7 - (i & 7))) & 1;
+const PAL = ['#4cc9f0','#f72585','#b5e48c','#ffb703','#8338ec','#06d6a0','#ef476f','#ffd166','#118ab2','#c77dff','#fb8500','#80ffdb','#e63946','#a8dadc','#f4a261','#2a9d8f','#e9c46a','#9b5de5','#00f5d4','#ff70a6','#90be6d','#f9844a','#577590','#43aa8b','#f94144','#277da1','#ffafcc'];
+const classColor = k => new THREE.Color(PAL[k % PAL.length]);
+
+// ---------- scene
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x05060a);
+const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 200);
+const HOME = new THREE.Vector3(-2.4, 1.2, -2.8); camera.position.copy(HOME);
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true; controls.dampingFactor = 0.08; controls.autoRotate = true; controls.autoRotateSpeed = 0.5;
+controls.screenSpacePanning = true; controls.minDistance = 0.15; controls.maxDistance = 60; controls.zoomSpeed = 1.4; controls.panSpeed = 1.2;
+controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+controls.listenToKeyEvents(window); controls.keyPanSpeed = 25;
+const rotChk = document.getElementById('rot');
+controls.addEventListener('start', () => { controls.autoRotate = false; rotChk.checked = false; });
+addEventListener('keydown', e => { if (e.key === 'Shift') controls.mouseButtons.LEFT = THREE.MOUSE.PAN; });
+addEventListener('keyup', e => { if (e.key === 'Shift') controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE; });
+
+// neuron point cloud
+const geo = new THREE.BufferGeometry();
+const p3 = new Float32Array(N * 3); for (let i = 0; i < N; i++) { p3[3*i] = pos[3*i]; p3[3*i+1] = -pos[3*i+1]; p3[3*i+2] = pos[3*i+2]; }
+geo.setAttribute('position', new THREE.BufferAttribute(p3, 3));
+const col = new Float32Array(N * 3); for (let i = 0; i < N; i++) { const c = classColor(cls[i]); col[3*i] = c.r; col[3*i+1] = c.g; col[3*i+2] = c.b; }
+geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+const flash = new Float32Array(N); const flashAttr = new THREE.BufferAttribute(flash, 1); flashAttr.setUsage(THREE.DynamicDrawUsage); geo.setAttribute('flash', flashAttr);
+const tch = new Float32Array(N); for (let i = 0; i < N; i++) tch[i] = touched(i); geo.setAttribute('touched', new THREE.BufferAttribute(tch, 1));
+const mat = new THREE.ShaderMaterial({
+  uniforms: { showUntouched: { value: 1.0 }, pr: { value: renderer.getPixelRatio() } },
+  vertexShader: `attribute float flash; attribute float touched; varying vec3 vC; varying float vA; varying float vF; uniform float showUntouched; uniform float pr;
+    void main(){ vec4 mv = modelViewMatrix * vec4(position,1.0); float base = touched > 0.5 ? 0.42 : 0.10 * showUntouched;
+      vA = max(base, flash); vF = flash; vC = color; float sz = (touched > 0.5 ? 2.2 : 1.4) + 7.0 * flash; gl_PointSize = clamp(sz * pr * (1.6 / -mv.z), 0.5, 40.0); gl_Position = projectionMatrix * mv; }`,
+  fragmentShader: `varying vec3 vC; varying float vA; varying float vF; void main(){ vec2 d = gl_PointCoord - 0.5; float r = dot(d,d); if (r > 0.25) discard;
+      float soft = smoothstep(0.25, 0.05, r); vec3 c = mix(vC, vec3(1.0, 0.98, 0.85), vF * 0.85); gl_FragColor = vec4(c, vA * soft); }`,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, vertexColors: true });
+const cloud = new THREE.Points(geo, mat); cloud.renderOrder = 2; scene.add(cloud);
+
+// retina receptors: brightness = luminance sampled from the pool canvas
+const retIdx = D.retina.map(r => r[0]), retLum = D.retina.map(r => r[1] / 65535);
+const rgeo = new THREE.BufferGeometry(); const rp = new Float32Array(retIdx.length * 3); const rl = new Float32Array(retIdx.length);
+retIdx.forEach((i, k) => { rp[3*k] = p3[3*i]; rp[3*k+1] = p3[3*i+1]; rp[3*k+2] = p3[3*i+2]; rl[k] = retLum[k]; });
+rgeo.setAttribute('position', new THREE.BufferAttribute(rp, 3)); rgeo.setAttribute('lum', new THREE.BufferAttribute(rl, 1));
+const rmat = new THREE.ShaderMaterial({ uniforms: { pr: { value: renderer.getPixelRatio() }, t: { value: 0 } },
+  vertexShader: `attribute float lum; varying float vL; uniform float pr; uniform float t; void main(){ vec4 mv = modelViewMatrix * vec4(position,1.0); vL = lum;
+    float pulse = 0.5 + 0.5 * sin(t * 6.0); gl_PointSize = clamp((2.5 + 9.0 * lum * (0.7 + 0.3 * pulse)) * pr * (1.6 / -mv.z), 0.5, 40.0); gl_Position = projectionMatrix * mv; }`,
+  fragmentShader: `varying float vL; void main(){ vec2 d = gl_PointCoord - 0.5; float r = dot(d,d); if (r > 0.25) discard; float soft = smoothstep(0.25, 0.04, r);
+    vec3 c = mix(vec3(0.15,0.55,0.9), vec3(1.0,1.0,1.0), vL); gl_FragColor = vec4(c, (0.35 + 0.65 * vL) * soft); }`,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+const rcloud = new THREE.Points(rgeo, rmat); rcloud.renderOrder = 3; scene.add(rcloud);
+
+// readout neurons
+const bci = D.readouts.slice(0, 4);
+const roMeshes = bci.map((r, k) => {
+  const m = new THREE.Mesh(new THREE.SphereGeometry(0.014, 16, 16), new THREE.MeshBasicMaterial({ color: k < 2 ? 0xf5c542 : 0xff5c8a }));
+  m.position.set(p3[3*r.idx], p3[3*r.idx+1], p3[3*r.idx+2]); m.renderOrder = 4; scene.add(m);
+  const el = document.createElement('div'); el.className = 'lbl'; el.textContent = r.name + (k < 2 ? ' → skew' : ' → fee'); el.style.borderColor = k < 2 ? '#f5c542' : '#ff5c8a'; document.body.appendChild(el);
+  return { m, el, idx: r.idx, glow: 0, k };
+});
+
+// ---------- procedural fly body in the neuron frame (anatomy landmarks from the annotations)
+const V = v => new THREE.Vector3(v[0], -v[1], v[2]);
+const AN = D.anat; const cbC = V(AN.cb), vncC = V(AN.vnc), olL = V(AN.olL), olR = V(AN.olR), brainC = V(AN.brain);
+const lr = olL.clone().sub(olR).normalize();
+let ax = vncC.clone().sub(cbC); ax.sub(lr.clone().multiplyScalar(ax.dot(lr))).normalize();
+let dv = new THREE.Vector3().crossVectors(lr, ax).normalize(); if (dv.y < 0) dv.negate();
+const basis = new THREE.Matrix4().makeBasis(lr, dv, ax);
+const body = new THREE.Group(); scene.add(body);
+const skin = new THREE.MeshPhysicalMaterial({ color: 0x9fb4c7, transparent: true, opacity: 0.14, roughness: 0.55, metalness: 0.05, side: THREE.DoubleSide, depthWrite: false });
+const wire = new THREE.MeshBasicMaterial({ color: 0x8fb0d0, wireframe: true, transparent: true, opacity: 0.05, depthWrite: false });
+const eyeMat = new THREE.MeshPhysicalMaterial({ color: 0xb3261e, transparent: true, opacity: 0.30, roughness: 0.35, depthWrite: false });
+const wingMat = new THREE.MeshPhysicalMaterial({ color: 0xd6ecff, transparent: true, opacity: 0.16, roughness: 0.2, side: THREE.DoubleSide, depthWrite: false });
+const tubeMat = new THREE.MeshPhysicalMaterial({ color: 0xaac4dc, transparent: true, opacity: 0.35, roughness: 0.5, depthWrite: false });
+function place(mesh, center, scaleV) { mesh.position.copy(center); mesh.setRotationFromMatrix(basis); if (scaleV) mesh.scale.copy(scaleV); mesh.renderOrder = -1; body.add(mesh); return mesh; }
+function ellipsoid(center, rx, ry, rz, m = skin, withWire = true) {
+  const g = new THREE.SphereGeometry(1, 40, 28); const mesh = place(new THREE.Mesh(g, m), center, new THREE.Vector3(rx, ry, rz));
+  if (withWire) place(new THREE.Mesh(g, wire), center, new THREE.Vector3(rx, ry, rz)); return mesh; }
+const L = (x, y, z) => new THREE.Vector3().addScaledVector(lr, x).addScaledVector(dv, y).addScaledVector(ax, z);
+const headC = brainC.clone().add(L(0, 0.02, 0.02)); ellipsoid(headC, 0.74, 0.46, 0.40);
+ellipsoid(olL.clone().add(L(0.10, 0, 0)), 0.24, 0.30, 0.30, eyeMat, false); ellipsoid(olR.clone().add(L(-0.10, 0, 0)), 0.24, 0.30, 0.30, eyeMat, false);
+const thoraxC = vncC.clone().add(L(0, 0.26, -0.05)); ellipsoid(thoraxC, 0.56, 0.58, 0.66);
+ellipsoid(cbC.clone().add(L(0, 0.05, 0.62)), 0.22, 0.20, 0.30);
+const abdC = vncC.clone().add(L(0, 0.16, 1.30)); ellipsoid(abdC, 0.50, 0.42, 0.88);
+function wing(sign) {
+  const sh = new THREE.Shape(); sh.absellipse(0, 0, 1.55, 0.55, 0, Math.PI * 2);
+  const g = new THREE.ShapeGeometry(sh, 48); const m = new THREE.Mesh(g, wingMat);
+  m.position.copy(thoraxC.clone().add(L(sign * 0.35, 0.45, 0.05)));
+  m.setRotationFromMatrix(new THREE.Matrix4().makeBasis(lr.clone().multiplyScalar(sign), ax.clone(), dv.clone().multiplyScalar(-sign)));
+  m.rotateZ(sign * -0.55); m.rotateX(0.18); m.translateX(1.35); m.renderOrder = -1; body.add(m);
+  const w2 = new THREE.Mesh(g, wire); w2.position.copy(m.position); w2.quaternion.copy(m.quaternion); w2.renderOrder = -1; body.add(w2); }
+wing(1); wing(-1);
+function tube(points, r = 0.018) { const c = new THREE.CatmullRomCurve3(points); const m = new THREE.Mesh(new THREE.TubeGeometry(c, 24, r, 8, false), tubeMat); m.renderOrder = -1; body.add(m); }
+[-0.35, 0.05, 0.45].forEach((z, i) => { for (const sgn of [1, -1]) { const root = thoraxC.clone().add(L(sgn * 0.42, -0.35, z - 0.05));
+  tube([root, root.clone().add(L(sgn * 0.55, -0.15, (i - 1) * 0.35)), root.clone().add(L(sgn * 0.95, -0.55, (i - 1) * 0.55)), root.clone().add(L(sgn * 1.05, -1.15, (i - 1) * 0.70))]); } });
+for (const sgn of [1, -1]) { const a0 = headC.clone().add(L(sgn * 0.12, -0.05, -0.40)); tube([a0, a0.clone().add(L(sgn * 0.10, 0.05, -0.22)), a0.clone().add(L(sgn * 0.22, -0.02, -0.38))], 0.012);
+  const h0 = thoraxC.clone().add(L(sgn * 0.50, 0.05, 0.55)); tube([h0, h0.clone().add(L(sgn * 0.25, 0.10, 0.10))], 0.012); ellipsoid(h0.clone().add(L(sgn * 0.28, 0.12, 0.12)), 0.05, 0.05, 0.05, tubeMat, false); }
+scene.add(new THREE.HemisphereLight(0xbcd3ff, 0x1a1420, 0.9)); const dl = new THREE.DirectionalLight(0xffffff, 0.8); dl.position.set(1, 2, 1.5); scene.add(dl);
+document.getElementById('body').onchange = e => body.visible = e.target.checked;
+controls.target.copy(brainC.clone().lerp(vncC, 0.35));
+
+// ---------- retina input image (what the pool state looked like to the fly)
+function drawEye(cv, withReceptors) {
+  if (!D.amm) return; const R = D.amm.round; const g = b64(R.canvas.gray, Uint8Array); const ctx = cv.getContext('2d'); const im = ctx.createImageData(R.canvas.w, R.canvas.h);
+  for (let i = 0; i < g.length; i++) { const v = g[i]; im.data[4*i] = v * 0.55; im.data[4*i+1] = v * 0.85; im.data[4*i+2] = v; im.data[4*i+3] = 255; }
+  ctx.putImageData(im, 0, 0);
+  ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.beginPath(); ctx.moveTo(0, R.canvas.h * 40 / 480); ctx.lineTo(R.canvas.w, R.canvas.h * 40 / 480); ctx.moveTo(R.canvas.w / 2, 0); ctx.lineTo(R.canvas.w / 2, R.canvas.h); ctx.stroke();
+  if (withReceptors) for (const [u, v, l] of R.retinaUV) { ctx.fillStyle = l > 0 ? `rgba(255,${180 + 75 * l | 0},80,${0.6 + 0.4 * l})` : 'rgba(120,140,170,.35)'; ctx.fillRect(u * (R.canvas.w - 1), v * (R.canvas.h - 1), 1, 1); }
+}
+drawEye(document.getElementById('eyecv'), true); drawEye(document.getElementById('sawcv'), true);
+if (D.amm) { const o = D.amm.round.obs; document.getElementById('eyenote').innerHTML = `left half: 16 buy-volume bars · right half: 16 sell bars · top strip: price deviation from TWAP · dots: photoreceptors (orange = lit). Closed window ${o.windowId}: buy ${(o.buyQuote[15]/1e6).toFixed(2)} M / sell ${(o.sellQuote[15]/1e6).toFixed(2)} M units, volRef ${(o.volRef/1e6).toFixed(2)} M.`; }
+
+// ---------- HUD
+const R = D.round;
+document.getElementById('facts').innerHTML = [
+  ['Round', `epoch ${R.epoch}, pool window ${R.windowId}`], ['Settlement', `<a href="https://sepolia.etherscan.io/tx/${R.tx}" target="_blank">${R.tx.slice(0,10)}…${R.tx.slice(-6)}</a> (Sepolia)`],
+  ['Episode', `${D.episodeMs} ms of brain time = ${D.episodeMs*10} LIF steps`], ['Retina', `${D.retina.length} R1-R6 photoreceptors, ${R.litReceptors} lit by the pool's histogram`],
+  ['Neurons touched', `${D.touched_count.toLocaleString()} of ${N.toLocaleString()} (kernel active set)`], ['Spikes', `${D.totalSpikes.toLocaleString()} total`],
+  ['spikeRoot', `${R.spikeRoot.slice(0,12)}… (operators == reference)`]].map(([k,v]) => `<b>${k}</b><span>${v}</span>`).join('');
+const bars = document.getElementById('bars'); const order = [...D.classes.keys()].sort((a,b) => D.spikesByClass[b] - D.spikesByClass[a]).filter(k => D.spikesByClass[k] > 0);
+const maxCum = Math.max(...D.spikesByClass); const rows = {};
+order.forEach(k => { const row = document.createElement('div'); row.className = 'bar';
+  row.innerHTML = `<span><i class="sw" style="background:${PAL[k % PAL.length]}"></i>${D.classes[k].replace(/_/g,' ')}</span><div class="track"><div class="cum" style="background:${PAL[k % PAL.length]};width:0"></div><div class="fill" style="background:${PAL[k % PAL.length]};width:0"></div></div><span class="n"></span>`;
+  bars.appendChild(row); rows[k] = { fill: row.querySelector('.fill'), cum: row.querySelector('.cum'), n: row.querySelector('.n') }; });
+const phaseEl = document.getElementById('phase'), timeEl = document.getElementById('time'), feeEl = document.getElementById('fee'), rotab = document.getElementById('rotab'), feenote = document.getElementById('feenote');
+function phaseText(ms) {
+  if (ms < 1) return `<b>t = 0</b> — the pool's last closed window (16 buy/sell volume bars + price-deviation strip) has been rendered onto the retina: ${R.litReceptors} photoreceptors lit (blue-white points, bottom-left inset). The brain starts from the on-chain warm snapshot.`;
+  if (ms < 12) return `<b>0–12 ms</b> — photoreceptor drive (30·L/(0.02+L) mV) and the lamina's 12 mV tonic current push the optic lobes; the first spikes propagate with 1.8 ms synaptic delay.`;
+  if (ms < 40) return `<b>12–40 ms</b> — activity spreads from optic lobe through visual projection neurons into the central brain; every 10 ms the descending-neuron spike counts update the rate filters.`;
+  if (ms < D.episodeMs - 1) return `<b>${ms} ms</b> — DNp20 R−L → skew, DNpe017 L+R → fee (100 ms EMA). ${R.epoch > 1 ? 'The reward pulse (LB3c sugar cells, 30 mV) is on because the previous window earned fees.' : ''}`;
+  return `<b>episode end</b> — readouts decoded: fee ${R.feeBps} bps, skew ${R.skewBps > 0 ? '+' : ''}${R.skewBps} bps. Operators reproduced this bit-for-bit and settled it as one 32-byte word; the pool now charges ${R.feeBps + R.skewBps} bps to buy and ${Math.max(5, R.feeBps - R.skewBps)} bps to sell.`;
+}
+let frame = 0, playing = true, acc = 0, lastT = performance.now(); const cumRegion = new Float64Array(D.classes.length);
+function applyFrame(f) {
+  for (let i = 0; i < N; i++) flash[i] *= 0.72;
+  const ids = frames[f]; for (let k = 0; k < ids.length; k++) flash[ids[k]] = 1.0;
+  flashAttr.needsUpdate = true;
+  const reg = new Float64Array(D.classes.length); for (let k = 0; k < ids.length; k++) reg[cls[ids[k]]]++;
+  if (f === 0) cumRegion.fill(0);
+  for (let k = 0; k < reg.length; k++) cumRegion[k] += reg[k];
+  const mx = Math.max(1, ...reg);
+  for (const k of order) { rows[k].fill.style.width = (100 * reg[k] / mx).toFixed(1) + '%'; rows[k].cum.style.width = (100 * cumRegion[k] / maxCum).toFixed(1) + '%'; rows[k].n.textContent = reg[k] ? reg[k] : ''; }
+  for (const r of roMeshes) r.glow *= 0.8;
+  for (let k = 0; k < ids.length; k++) { const r = roMeshes.find(x => x.idx === ids[k]); if (r) r.glow = 1; }
+  const bin = Math.min(D.bins.length - 1, Math.floor(f * D.msPerFrame / D.binMs)); const b = D.bins[bin];
+  rotab.innerHTML = `<tr><td style="color:#98a2b3">readout</td><td style="color:#98a2b3">spikes/bin</td><td style="color:#98a2b3">rate mHz</td></tr>` +
+    bci.map((r, k) => `<tr><td><i class="sw" style="background:${k < 2 ? '#f5c542' : '#ff5c8a'}"></i>${r.name}</td><td>${b.counts[k]}</td><td>${b.rates[k].toLocaleString()}</td></tr>`).join('');
+  feeEl.textContent = `fee ${b.feeBps} bps · skew ${b.skewBps > 0 ? '+' : ''}${b.skewBps} bps`;
+  feenote.textContent = `after bin ${bin + 1}/${D.bins.length} (${(bin + 1) * D.binMs} ms) · ${b.nActive.toLocaleString()} neurons active · ${b.spikes.toLocaleString()} spikes so far`;
+  phaseEl.innerHTML = phaseText(f * D.msPerFrame);
+  timeEl.textContent = `t = ${String(f * D.msPerFrame).padStart(3, ' ')} ms / ${D.episodeMs} ms · ${ids.length} spikes`;
+  document.getElementById('scrub').value = f;
+}
+document.getElementById('play').onclick = e => { playing = !playing; e.target.textContent = playing ? 'Pause' : 'Play'; };
+document.getElementById('scrub').oninput = e => { frame = +e.target.value; applyFrame(frame); };
+rotChk.onchange = e => controls.autoRotate = e.target.checked;
+document.getElementById('untouched').onchange = e => mat.uniforms.showUntouched.value = e.target.checked ? 1 : 0;
+function dolly(f) { const d = camera.position.clone().sub(controls.target); d.multiplyScalar(f); camera.position.copy(controls.target).add(d); }
+document.getElementById('zin').onclick = () => dolly(0.75); document.getElementById('zout').onclick = () => dolly(1.35);
+document.getElementById('reset').onclick = () => { camera.position.copy(HOME); controls.target.copy(brainC.clone().lerp(vncC, 0.35)); controls.update(); };
+for (const h of document.querySelectorAll('.panel h2')) h.onclick = () => h.parentElement.classList.toggle('collapsed');
+let panelsHidden = false; addEventListener('keydown', e => { if (e.key === 'h' || e.key === 'H') { panelsHidden = !panelsHidden; for (const p of document.querySelectorAll('#hud,#regions,#decode,#eye')) p.style.display = panelsHidden ? 'none' : ''; } });
+const speedSel = document.getElementById('speed');
+function resize() { const w = innerWidth, h = innerHeight; renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); drawChart(); }
+addEventListener('resize', resize);
+const v = new THREE.Vector3();
+function loop(t) {
+  requestAnimationFrame(loop);
+  const dt = (t - lastT) / 1000; lastT = t;
+  if (playing) { acc += dt * 12 * +speedSel.value; while (acc >= 1) { acc -= 1; frame = (frame + 1) % NF; applyFrame(frame); } }
+  rmat.uniforms.t.value = t / 1000;
+  for (const r of roMeshes) { const s = 1 + 2.5 * r.glow; r.m.scale.set(s, s, s); r.m.material.color.setStyle(r.glow > 0.3 ? '#ffffff' : (r.k < 2 ? '#f5c542' : '#ff5c8a'));
+    v.copy(r.m.position).project(camera); r.el.style.left = ((v.x + 1) / 2 * innerWidth) + 'px'; r.el.style.top = ((1 - v.y) / 2 * innerHeight) + 'px'; r.el.style.display = (v.z < 1 && !ammOn) ? 'block' : 'none'; }
+  controls.update(); if (!ammOn) renderer.render(scene, camera);
+}
+
+// ---------- AMM view: price + swaps + windows + decisions on one time axis, event table
+let ammOn = false;
+const ammEl = document.getElementById('amm');
+function setTab(on) { ammOn = on; ammEl.style.display = on ? 'block' : 'none'; document.getElementById('tabAmm').classList.toggle('on', on); document.getElementById('tabBrain').classList.toggle('on', !on);
+  for (const p of document.querySelectorAll('#hud,#regions,#decode,#eye,#bottom,#hint')) p.style.display = on ? 'none' : ''; if (on) drawChart(); }
+document.getElementById('tabAmm').onclick = () => setTab(true); document.getElementById('tabBrain').onclick = () => setTab(false);
+function drawChart() {
+  if (!D.amm) return; const cv = document.getElementById('chart'); const W = cv.clientWidth || 900, H = 420; cv.width = W * devicePixelRatio; cv.height = H * devicePixelRatio;
+  const ctx = cv.getContext('2d'); ctx.scale(devicePixelRatio, devicePixelRatio); ctx.clearRect(0, 0, W, H);
+  const S = D.amm.series.filter(s => s.spot != null), E = D.amm.events; const b0 = Math.min(S[0].block, E[0].block) - 5, b1 = D.amm.head + 5;
+  const ml = 64, mr = 64, mt = 24, mb = 44; const X = b => ml + (b - b0) / (b1 - b0) * (W - ml - mr);
+  const spots = S.map(s => s.spot); const pmin = Math.min(...spots) * 0.995, pmax = Math.max(...spots) * 1.005; const Y = p => mt + (1 - (p - pmin) / (pmax - pmin)) * (H - mt - mb);
+  const fmax = 110; const YF = f => mt + (1 - f / fmax) * (H - mt - mb);
+  // window bands
+  ctx.font = '11px sans-serif'; for (let w = Math.floor(b0 / 25); w <= Math.floor(b1 / 25); w++) { const x0 = X(w * 25), x1 = X((w + 1) * 25);
+    ctx.fillStyle = (w % 2) ? 'rgba(255,255,255,.025)' : 'rgba(255,255,255,0)'; ctx.fillRect(Math.max(ml, x0), mt, Math.min(W - mr, x1) - Math.max(ml, x0), H - mt - mb);
+    if (w === D.round.windowId) { ctx.fillStyle = 'rgba(245,197,66,.10)'; ctx.fillRect(x0, mt, x1 - x0, H - mt - mb); }
+    ctx.fillStyle = '#667085'; ctx.textAlign = 'center'; if (x1 - x0 > 46) ctx.fillText('w ' + w, (x0 + x1) / 2, H - mb + 14); }
+  // axes
+  ctx.strokeStyle = 'rgba(255,255,255,.15)'; ctx.beginPath(); ctx.moveTo(ml, mt); ctx.lineTo(ml, H - mb); ctx.lineTo(W - mr, H - mb); ctx.stroke();
+  ctx.fillStyle = '#98a2b3'; ctx.textAlign = 'right'; for (let i = 0; i <= 4; i++) { const p = pmin + (pmax - pmin) * i / 4; ctx.fillText(p.toFixed(4), ml - 6, Y(p) + 4); }
+  ctx.textAlign = 'left'; for (const f of [0, 30, 60, 90]) ctx.fillText(f + ' bps', W - mr + 6, YF(f) + 4);
+  ctx.textAlign = 'center'; ctx.fillText('block (Sepolia) · 25-block windows', (ml + W - mr) / 2, H - 6); ctx.save(); ctx.translate(14, (mt + H - mb) / 2); ctx.rotate(-Math.PI / 2); ctx.fillText('spot price (quote per base)', 0, 0); ctx.restore();
+  ctx.save(); ctx.translate(W - 12, (mt + H - mb) / 2); ctx.rotate(Math.PI / 2); ctx.fillText('effective fee', 0, 0); ctx.restore();
+  // effective fee (stepped): buy solid, sell dashed
+  for (const [key, dash, color] of [['feeBuy', [], '#f5c542'], ['feeSell', [4, 3], '#ffb85c']]) { ctx.setLineDash(dash); ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+    S.forEach((s, i) => { const x = X(s.block), y = YF(s[key]); if (i === 0) ctx.moveTo(x, y); else { ctx.lineTo(x, YF(S[i-1][key])); ctx.lineTo(x, y); } }); ctx.stroke(); }
+  ctx.setLineDash([]);
+  // spot price line
+  ctx.strokeStyle = '#4cc9f0'; ctx.lineWidth = 2; ctx.beginPath(); S.forEach((s, i) => { const x = X(s.block), y = Y(s.spot); if (i === 0) ctx.moveTo(x, y); else { ctx.lineTo(x, Y(S[i-1].spot)); ctx.lineTo(x, y); } }); ctx.stroke();
+  // events
+  for (const e of E) { const x = X(e.block);
+    if (e.kind === 'swap') { const s = S.find(q => q.block === e.block); const y = s ? Y(s.spot) : H - mb - 10; ctx.fillStyle = e.buyBase ? '#7ee2a8' : '#ff6b6b'; ctx.beginPath();
+      if (e.buyBase) { ctx.moveTo(x, y - 9); ctx.lineTo(x - 6, y + 3); ctx.lineTo(x + 6, y + 3); } else { ctx.moveTo(x, y + 9); ctx.lineTo(x - 6, y - 3); ctx.lineTo(x + 6, y - 3); } ctx.fill();
+      ctx.fillStyle = '#e5e7eb'; ctx.textAlign = 'center'; ctx.fillText(e.feeBps + ' bps', x, e.buyBase ? y - 13 : y + 20); }
+    if (e.kind === 'window') { ctx.strokeStyle = 'rgba(199,182,255,.55)'; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(x, mt); ctx.lineTo(x, H - mb); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle = '#c7b6ff'; ctx.textAlign = 'center'; ctx.fillText('close ' + e.windowId, x, mt + 10); }
+    if (e.kind === 'decision') { ctx.fillStyle = '#f5c542'; ctx.beginPath(); ctx.arc(x, YF(e.feeBps), 6, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+      ctx.fillStyle = '#f5c542'; ctx.textAlign = 'left'; ctx.fillText(`★ fly: fee ${e.feeBps}, skew ${e.skewBps > 0 ? '+' : ''}${e.skewBps}`, x + 9, YF(e.feeBps) - 8); }
+  }
+  ctx.fillStyle = '#98a2b3'; ctx.textAlign = 'left'; ctx.fillText('— spot   — fee to buy   ┄ fee to sell   ▲ buy swap  ▼ sell swap  ┆ window close  ★ fly decision   shaded = animated round', ml, mt - 8);
+  document.getElementById('chartnote').textContent = `Fee to buy/sell = FlyPolicy word clamped to 5–100 bps and ≤2 windows old; 30 bps default otherwise. Price axis is the pool's reserveQuote/reserveBase after each event.`;
+  const tab = document.getElementById('evtab'); const rows = E.map(e => { const link = `<a href="https://sepolia.etherscan.io/tx/${e.tx}" target="_blank">${e.tx.slice(0, 10)}…</a>`; const s = S.find(q => q.block === e.block); const spot = s ? s.spot.toFixed(4) : '';
+    let det = ''; if (e.kind === 'swap') det = `${e.buyBase ? 'BUY base' : 'SELL base'}: in ${e.amountIn.toFixed(3)} → out ${e.amountOut.toFixed(4)} · <b>fee ${e.feeBps} bps</b>`;
+    if (e.kind === 'liquidity') det = `seed ${e.base.toFixed(0)} base + ${e.quote.toFixed(0)} quote`;
+    if (e.kind === 'window') det = `window ${e.windowId}: buy ${(e.buy/1e6).toFixed(2)} M · sell ${(e.sell/1e6).toFixed(2)} M · fee income ${(e.feeIncome/1e6).toFixed(3)} M · TWAP ${e.twap.toFixed(4)} · volRef ${(e.volRef/1e6).toFixed(2)} M`;
+    if (e.kind === 'decision') det = `epoch ${e.epoch} on window ${e.windowId}: <b>fee ${e.feeBps} bps, skew ${e.skewBps > 0 ? '+' : ''}${e.skewBps}</b>, ${e.totalSpikes.toLocaleString()} spikes, spikeRoot ${e.spikeRoot.slice(0, 12)}…`;
+    return `<tr class="${e.kind === 'decision' && e.windowId === D.round.windowId ? 'round' : ''}"><td>${e.block}</td><td><span class="tag ${e.kind}">${e.kind}</span></td><td>${det}</td><td>${spot}</td><td>${link}</td></tr>`; });
+  tab.innerHTML = `<tr><th>block</th><th>event</th><th>details</th><th>spot after</th><th>tx</th></tr>` + rows.join('');
+  const o = D.amm.round.obs; document.getElementById('obs').innerHTML = [['observed window', o.windowId], ['buy volume (newest bin)', (o.buyQuote[15]/1e6).toFixed(3) + ' M units'], ['sell volume (newest bin)', (o.sellQuote[15]/1e6).toFixed(3) + ' M units'],
+    ['volRef (EMA)', (o.volRef/1e6).toFixed(3) + ' M'], ['spot / TWAP', (o.spotQ64/2**64).toFixed(4) + ' / ' + (o.twapQ64/2**64).toFixed(4)], ['fee income · LP loss', (o.feeIncomeQuote/1e6).toFixed(3) + ' M · ' + (o.lpLossQuote/1e6).toFixed(3) + ' M'],
+    ['lit receptors', D.amm.round.litReceptors + ' of ' + D.retina.length]].map(([k, v]) => `<b>${k}</b><span>${v}</span>`).join('');
+}
+resize(); applyFrame(0); requestAnimationFrame(loop); if (location.hash === "#amm") setTab(true);
+</script>
+</body>
+</html>
