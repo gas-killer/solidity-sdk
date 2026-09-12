@@ -159,6 +159,7 @@
       <li class="hide"><a href="#fly">The fly</a></li>
       <li class="hide"><a href="#onchain">On chain</a></li>
       <li><a href="#viz">Visualizer</a></li>
+      <li><a href="#brain">Full brain</a></li>
       <li><a class="btn" href="https://gaskiller.xyz" style="padding:9px 14px;font-size:12px">gaskiller.xyz →</a></li>
     </ul>
   </div>
@@ -414,6 +415,27 @@
       <div><b>Retina inset</b>The 160×120 image the rasterizer painted for this intent, the only thing the fly is told about the market.</div>
       <div><b>Block timeline</b>Spot price, reserves, intents in the queue and fills, in the order they happened on Sepolia. Each decision opens its episode in the brain view.</div>
       <div><b>Readout</b>The four population rates converging on the fee and skew that were written on chain.</div>
+    </div>
+  </div>
+</section>
+
+<section id="brain">
+  <div class="wrap">
+    <div class="eyebrow">Full brain · 300 ms</div>
+    <h2>The whole fly, one full round.</h2>
+    <p class="lead">The first version of the policy priced the pool once per 25-block window with a 300 ms episode, three times longer than the per-swap version. This is that round replayed bit-exact from the on-chain frame: 3,000 steps, the fly body around the brain, and 3,335 photoreceptors reading a 640×480 render of the pool window. Switch between the Brain tab and the AMM tab at the top left.</p>
+
+    <iframe class="vizframe" src="viz/fly_brain_amm.html" title="Fly brain running an AMM: one settled Gas Killer round" loading="lazy" allow="fullscreen"></iframe>
+    <div class="vizbar">
+      <span>Drag to orbit · scroll to zoom · right-drag or shift-drag to pan · H hides the panels.</span>
+      <a class="btn ghost" href="viz/fly_brain_amm.html" target="_blank" rel="noopener" style="padding:9px 14px;font-size:12px">Open full screen ↗</a>
+    </div>
+
+    <div class="legend">
+      <div><b>Brain regions</b>Spikes per millisecond by MaleCNS superclass, with cumulative shading. Points glow when they spike; dim points were never touched by the trace.</div>
+      <div><b>Retina</b>The pool window rendered to a 640×480 canvas and sampled by 3,335 receptor neurons.</div>
+      <div><b>Descending-neuron readout</b>The four rates mapped to the fee and skew, settled as one storage word by FlyPolicy at <a class="mono" href="https://sepolia.etherscan.io/address/0x3c749083688dEDb379c37071fC4bf3809B67Db6E">0x3c74…Db6E</a>.</div>
+      <div><b>AMM tab</b>Price, swaps and the fly's decisions over the windows of the v1 pool at <a class="mono" href="https://sepolia.etherscan.io/address/0x0147847039d35Aa489c6654C21F49b9b58c9ed50">0x0147…ed50</a>.</div>
     </div>
   </div>
 </section>
