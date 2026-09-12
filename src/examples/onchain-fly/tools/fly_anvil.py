@@ -28,7 +28,7 @@ ANVIL_KEY0 = '0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266'   # anvil default acco
 
 def rpc(url, method, params, timeout=3600):
     req = urllib.request.Request(url, json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}).encode(),
-                                 {'Content-Type': 'application/json'})
+                                 {'Content-Type': 'application/json', 'User-Agent': 'curl/8.4.0'})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         out = json.loads(r.read())
     if 'error' in out:
@@ -39,17 +39,25 @@ def rpc(url, method, params, timeout=3600):
 def selector(sig): return keccak(sig.encode())[:4]
 
 
+TRACER = 'callTracer'          # or 'prestateTracer' (diffMode, what the Gas Killer analyzer runs)
+BLOCK = 'latest'
+
+
 def call(url, to, sig, types, args, out_types, measure=True):
     data = '0x' + (selector(sig) + encode(types, args)).hex()
     tx = {'from': ANVIL_KEY0, 'to': to, 'data': data, 'gas': hex(GAS)}
     t0 = time.perf_counter()
-    res = rpc(url, 'eth_call', [tx, 'latest'])
+    res = rpc(url, 'eth_call', [tx, BLOCK])
     wall = time.perf_counter() - t0
     gas = None
     if measure:
         t1 = time.perf_counter()
-        tr = rpc(url, 'debug_traceCall', [tx, 'latest', {'tracer': 'callTracer'}])
-        gas = int(tr['gasUsed'], 16)
+        if TRACER == 'prestateTracer':
+            tr = rpc(url, 'debug_traceCall', [tx, BLOCK, {'tracer': 'prestateTracer', 'tracerConfig': {'diffMode': True, 'disableCode': True}}])
+            gas = -len(json.dumps(tr))   # no gasUsed in the prestate result; report the diff size (negative) instead
+        else:
+            tr = rpc(url, 'debug_traceCall', [tx, BLOCK, {'tracer': 'callTracer'}])
+            gas = int(tr['gasUsed'], 16)
         wall_trace = time.perf_counter() - t1
     else:
         wall_trace = None
@@ -97,7 +105,10 @@ def cmd_warmup(a):
 
 
 def cmd_decide(a):
-    G = F.Graph(a.artifacts); cfg = cfg_words(a.artifacts); cfg_ints = [int.from_bytes(c, 'big') for c in cfg]
+    G = F.Graph(a.artifacts); cfg = cfg_words(a.artifacts)
+    if a.episode_steps:   # override cfg1's episodeSteps (bits 255..240)
+        c1 = int.from_bytes(cfg[1], 'big'); c1 = (c1 & ((1 << 240) - 1)) | (a.episode_steps << 240); cfg[1] = c1.to_bytes(32, 'big')
+    cfg_ints = [int.from_bytes(c, 'big') for c in cfg]
     o = V.observation(a.obs); frame = F.rasterize(G, cfg_ints, o); stim = dict(punishSteps=a.punish, rewardSteps=a.reward)
     rates0 = [0, 0, 0, 0]
     warm = (Path(a.artifacts) / 'warm.bin').read_bytes()
@@ -131,11 +142,19 @@ def main():
         s.add_argument('--rpc', default='http://127.0.0.1:9558'); s.add_argument('--engine'); s.add_argument('--graph', default='0x5300000000000000000000000000000000000001')
         s.add_argument('--warm', default='0x6300000000000000000000000000000000000001'); s.add_argument('--artifacts', default='artifacts')
         s.add_argument('--no-trace', action='store_true', help='skip the debug_traceCall gas measurement')
+        s.add_argument('--tracer', choices=['call', 'prestate'], default='call', help='prestate = diffMode/disableCode, what the analyzer runs')
+        s.add_argument('--block', default='latest', help='block tag/number for eth_call and the trace (the fleet fork pins a block)')
+        s.add_argument('--from-addr', default=None, help='override the from address')
     d = sub.add_parser('deploy'); d.add_argument('--rpc', default='http://127.0.0.1:9558'); d.add_argument('--out', required=True)
     c = sub.add_parser('check'); common(c)
     w = sub.add_parser('warmup'); common(w); w.add_argument('--steps', type=int, default=20000); w.add_argument('--save')
     e = sub.add_parser('decide'); common(e); e.add_argument('--obs', default='busy'); e.add_argument('--punish', type=int, default=0); e.add_argument('--reward', type=int, default=0)
+    e.add_argument('--episode-steps', type=int, default=0, help='override episodeSteps (e.g. 1000 = 100 ms) for timing probes')
     a = ap.parse_args()
+    global TRACER, BLOCK, ANVIL_KEY0
+    if getattr(a, 'tracer', 'call') == 'prestate': TRACER = 'prestateTracer'
+    if getattr(a, 'block', None): BLOCK = a.block if a.block in ('latest', 'pending') else hex(int(a.block))
+    if getattr(a, 'from_addr', None): ANVIL_KEY0 = a.from_addr
     {'deploy': cmd_deploy, 'check': cmd_check, 'warmup': cmd_warmup, 'decide': cmd_decide}[a.cmd](a)
 
 

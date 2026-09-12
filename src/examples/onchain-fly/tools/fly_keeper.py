@@ -24,7 +24,7 @@ FLY_SLOT = '0xcbecd64d5226c3b53f872ce956484768a63c3b8a34d2c1088c069f9663d00d00'
 
 def rpc(url, method, params):
     req = urllib.request.Request(url, json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}).encode(),
-                                 {'Content-Type': 'application/json'})
+                                 {'Content-Type': 'application/json', 'User-Agent': 'curl/8.4.0'})
     with urllib.request.urlopen(req, timeout=120) as r:
         out = json.loads(r.read())
     if 'error' in out:
@@ -54,8 +54,14 @@ def state_json(s):
             'rateMilliHz': list(rates), 'memoryRoot': '0x' + mem.hex()}
 
 
-def logs(url, policy, from_block='0x0'):
+LOG_LOOKBACK = 90_000   # blocks; pruned nodes refuse fromBlock 0 (reth: "pruned history unavailable")
+
+
+def logs(url, policy, from_block=None):
     topic = '0x' + keccak(EVENT_SIG.encode()).hex()
+    if from_block is None:
+        head = int(rpc(url, 'eth_blockNumber', []), 16)
+        from_block = hex(max(0, head - LOG_LOOKBACK))
     raw = rpc(url, 'eth_getLogs', [{'address': policy, 'topics': [topic], 'fromBlock': from_block, 'toBlock': 'latest'}])
     out = []
     for lg in raw:
@@ -101,7 +107,7 @@ def cmd_submit(a):
     if a.dry_run:
         print(json.dumps(body)); return
     req = urllib.request.Request(a.router.rstrip('/') + '/tasks', json.dumps(body).encode(),
-                                 {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + a.api_key})
+                                 {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + a.api_key, 'User-Agent': 'curl/8.4.0'})
     with urllib.request.urlopen(req, timeout=60) as r:
         print(r.status, r.read().decode())
 

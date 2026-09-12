@@ -17,8 +17,8 @@ float-vs-fixed parity tables). This file records the Solidity side and the full-
 | 6 warm.bin | done | reference `artifacts/warm.bin` (5,376,396 B, keccak `eb2a77cf…`, warmCommitment `ed717ffa…`); reproduced by FlyEngine on anvil (see below) |
 | 7 FlyPolicy / FlyAMM + tests | **done** | `test/examples/FlyAMM.t.sol`: 9 tests — windows + storage-only observe, clamps, single-slot `vm.record`, `verifyAndUpdate` applies `[STORE, LOG4]`, commitment chain |
 | 8 anvil full-graph rehearsal | **done** | `tools/fly_anvil.py`: decide busy/empty bit-exact vs reference; gas measured (below) |
-| 9 Sepolia upload + deploys | open (needs ≈31 ETH + key) | commands below |
-| 10 live rounds | open | `tools/fly_keeper.py submit` once the policy is on the testnet |
+| 9 Sepolia upload + deploys | **done 2026-09-12** | graph root `0xe7c83910719ea03d80f7dd71caee4489a0a05641` (4,196 chunks, 26.0 ETH at ~1.16 gwei, ~11 h with fee gating), warm root `0x046b0eedf28701d257944c0c48d64ac2fc9666ac` (219 chunks, 1.3 ETH); FlyEngine `0xB61fd991A4A6afAEf54404bA54DC6123d2B9E4fC`, FlyAMM `0x0147847039d35Aa489c6654C21F49b9b58c9ed50`, FlyPolicyUnchecked `0x3c749083688dEDb379c37071fC4bf3809B67Db6E` (100 ms episode) |
+| 10 live rounds | **done** | task `868b8f54…` through `testnet.gaskiller.xyz`: router traced in 89 s, all 3 operators certified height 46 with the task digest 2 min later, settled in `0xa31b872ba627878210d7cbf4b0ce3281b5bc9e11b16818b19353e18ba144f450` (418,737 gas); operators' spikeRoot == reference |
 
 ## Full-graph numbers (anvil 1.5.1, revm, `--disable-block-gas-limit`)
 
@@ -73,3 +73,24 @@ python3 src/examples/onchain-llm/tools/verify_onchain_directory.py … --engine 
 python3 src/examples/onchain-fly/tools/fly_keeper.py submit --rpc $SEPOLIA --policy <FlyPolicy> --router <router> --api-key <key>
 python3 src/examples/onchain-fly/tools/fly_keeper.py verify --rpc $SEPOLIA --policy <FlyPolicy>
 ```
+
+## Testnet run (2026-09-12) — what changed vs the plan
+
+- **Fleet trace time decides the episode length.** On the fleet's `sim-node` (reth v2.5.2, `--rpc.gascap=max`, 7 CPU):
+  100 ms episode = 25 s `eth_call` / 84 s prestate diff trace; 300 ms = 73 s / 255 s. With router + 3 operators tracing
+  concurrently and `ROUND_TIMEOUT=300`, the policy went live at `episodeSteps=1000` (100 ms). Both were bit-exact vs the
+  reference on real Sepolia state.
+- **EIP-7825 (16,777,216 gas per tx) is live on Sepolia.** The `FlyPolicy` constructor + `checkArtifacts` (~20 M) cannot be
+  deployed; `FlyPolicyUnchecked` (script `FLY_SKIP_CHECK=true`) is the only option, with the check run by `eth_call`
+  (`fly_anvil.py check`). `forge script` silently dropped that CREATE and the pool's one-shot `setPolicy` bound a codeless
+  address — pool + policy had to be redeployed (old pool `0x5c79…e0ca` is orphaned).
+- **Settlement is a rendered payload for this API-key tier.** The router validates the quorum certificate and stores a
+  ready-to-sign `verifyAndUpdate` (`GET /tasks/{id}` → `payload.{to,data,estimated_gas,valid_until_block}`); the
+  submitter broadcasts it. `fly_keeper.py` + `run_round3.sh` (in the service workspace's `.context/fly`) automate
+  trade → submit → poll `ready` → send.
+- **Staleness clamp in practice.** Round 1 took ~30 min from window close (script fixes), beyond `MAX_LAG_WINDOWS=2`, so
+  `effectiveFee` correctly fell back to 30 bps although the slot held fee 36 / skew +1. A prompt round (~5 min) lands
+  inside the window.
+- Tooling gotchas: Cloudflare and the public Sepolia RPCs 403 Python's default user agent (tools now send `curl/8.4.0`);
+  reth refuses `eth_getLogs` below block 1,000,000 and ranges over 100,000 blocks (keeper uses a 90k lookback);
+  `cast call/send` want `--gas-limit` and positional raw calldata.

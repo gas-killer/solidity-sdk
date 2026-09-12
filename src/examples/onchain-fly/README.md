@@ -51,6 +51,17 @@ a cheaper kernel is a v2 item (§3.8 tonic-cell sleeping, d=1 fast path, cached 
 - `script/DeployOnchainFly.s.sol` — engine + tokens + pool + policy on top of uploaded directories
   (`FLY_GRAPH_ROOT`, `FLY_WARM_ROOT`, `FLY_CFG0..2` from `artifacts/fly_config.json`).
 
+## Live on Sepolia (Gas Killer testnet, 2026-09-12)
+
+| | |
+|---|---|
+| Graph / warm directory roots | `0xe7c83910719ea03d80f7dd71caee4489a0a05641` / `0x046b0eedf28701d257944c0c48d64ac2fc9666ac` |
+| FlyEngine / FlyAMM / FlyPolicy | `0xB61fd991A4A6afAEf54404bA54DC6123d2B9E4fC` / `0x0147847039d35Aa489c6654C21F49b9b58c9ed50` / `0x3c749083688dEDb379c37071fC4bf3809B67Db6E` (100 ms episode) |
+| First settled round | tx `0xa31b872ba627878210d7cbf4b0ce3281b5bc9e11b16818b19353e18ba144f450`, fee 36 bps / skew +1, operators' spikeRoot == reference |
+
+See PROGRESS.md "Testnet run" for the fleet timings and the deployment gotchas (EIP-7825 tx cap → `FlyPolicyUnchecked`,
+rendered-payload settlement tier, staleness clamp).
+
 ## Tests
 
 ```
