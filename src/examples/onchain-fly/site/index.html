@@ -186,6 +186,27 @@
   </div>
 </section>
 
+<section id="viz">
+  <div class="wrap">
+    <div class="eyebrow">Visualizer</div>
+    <h2>Watch the brain trade.</h2>
+    <p class="lead">Both episodes, replayed millisecond by millisecond from the logged observations and reproducing the on-chain spike roots exactly. The top half is the fly: every soma at its real position from the MaleCNS reconstruction, lit as it fires. The bottom half is the pool, advancing block by block as intents arrive, get decided and fill.</p>
+
+    <iframe class="vizframe" src="viz/fly_amm_v2.html" title="Fly brain pricing every swap" loading="lazy" allow="fullscreen"></iframe>
+    <div class="vizbar">
+      <span>Drag to orbit · scroll to zoom · right-drag to pan. WebGL required; best on desktop.</span>
+      <a class="btn ghost" href="viz/fly_amm_v2.html" target="_blank" rel="noopener" style="padding:9px 14px;font-size:12px">Open full screen ↗</a>
+    </div>
+
+    <div class="legend">
+      <div><b>Brain regions</b>Optic lobes, central brain and ventral nerve cord, with the body outlined for orientation. Bars rank which superclasses fired most during the episode.</div>
+      <div><b>Retina inset</b>The 160×120 image the rasterizer painted for this intent, the only thing the fly is told about the market.</div>
+      <div><b>Block timeline</b>Spot price, reserves, intents in the queue and fills, in the order they happened on Sepolia. Each decision opens its episode in the brain view.</div>
+      <div><b>Readout</b>The four population rates converging on the fee and skew that were written on chain.</div>
+    </div>
+  </div>
+</section>
+
 <section id="what">
   <div class="wrap">
     <div class="eyebrow">What we built</div>
@@ -217,11 +238,6 @@
         <div class="icon">03</div>
         <h3>FlySwapPool + FlySwapPolicy</h3>
         <p>A plain x·y = k pool where every swap is an escrowed intent, and a tiny Gas Killer consumer whose only tracked function runs one brain episode per intent and writes the fee it chose.</p>
-        <ul>
-          <li>Fee clamped to 5–100 bps, skew to ±30 bps: the fly can only be so wrong</li>
-          <li>Policy contract is 841 bytes; the pool never inherits the SDK</li>
-          <li>35 Foundry tests, two live rounds through the real testnet</li>
-        </ul>
       </div>
     </div>
   </div>
@@ -285,11 +301,7 @@
       </div>
     </div>
 
-    <div class="grid2" style="margin-top:40px">
-      <div class="card">
-        <h3>Why the swap is a separate transaction</h3>
-        <p>Under the unbounded profile the fleet uses Gas Killer's prestate-net encoding: it reads the consumer's net storage diff and its logs instead of an opcode-by-opcode trace, because a trace of a 14 Ggas call is not something a node can produce. That encoding covers a tracked function that writes only its own storage and makes no regular <code>CALL</code>. So the brain writes a verdict, and a normal transaction moves the tokens. The escrow means nothing changes hands in between except the fee the fly chose.</p>
-      </div>
+    <div style="margin-top:40px">
       <div class="card">
         <h3>What the fill word carries</h3>
         <p>One 32-byte slot per intent, keyed by id, is all the pool ever reads from the brain.</p>
@@ -398,26 +410,6 @@
   </div>
 </section>
 
-<section id="viz">
-  <div class="wrap">
-    <div class="eyebrow">Visualizer</div>
-    <h2>Watch the brain trade.</h2>
-    <p class="lead">Both episodes, replayed millisecond by millisecond from the logged observations and reproducing the on-chain spike roots exactly. The top half is the fly: every soma at its real position from the MaleCNS reconstruction, lit as it fires. The bottom half is the pool, advancing block by block as intents arrive, get decided and fill.</p>
-
-    <iframe class="vizframe" src="viz/fly_amm_v2.html" title="Fly brain pricing every swap" loading="lazy" allow="fullscreen"></iframe>
-    <div class="vizbar">
-      <span>Drag to orbit · scroll to zoom · right-drag to pan. WebGL required; best on desktop.</span>
-      <a class="btn ghost" href="viz/fly_amm_v2.html" target="_blank" rel="noopener" style="padding:9px 14px;font-size:12px">Open full screen ↗</a>
-    </div>
-
-    <div class="legend">
-      <div><b>Brain regions</b>Optic lobes, central brain and ventral nerve cord, with the body outlined for orientation. Bars rank which superclasses fired most during the episode.</div>
-      <div><b>Retina inset</b>The 160×120 image the rasterizer painted for this intent, the only thing the fly is told about the market.</div>
-      <div><b>Block timeline</b>Spot price, reserves, intents in the queue and fills, in the order they happened on Sepolia. Each decision opens its episode in the brain view.</div>
-      <div><b>Readout</b>The four population rates converging on the fee and skew that were written on chain.</div>
-    </div>
-  </div>
-</section>
 
 <section id="brain">
   <div class="wrap">
