@@ -89,8 +89,12 @@ python3 src/examples/onchain-fly/tools/fly_keeper.py verify --rpc $SEPOLIA --pol
   submitter broadcasts it. `fly_keeper.py` + `run_round3.sh` (in the service workspace's `.context/fly`) automate
   trade → submit → poll `ready` → send.
 - **Staleness clamp in practice.** Round 1 took ~30 min from window close (script fixes), beyond `MAX_LAG_WINDOWS=2`, so
-  `effectiveFee` correctly fell back to 30 bps although the slot held fee 36 / skew +1. A prompt round (~5 min) lands
-  inside the window.
+  `effectiveFee` correctly fell back to 30 bps although the slot held fee 36 / skew +1. Round 2 (task `634c73e6…`,
+  fully automated: window closed 11:37:01 → submitted 11:38:12 → `ready` 11:45:04 → settled in
+  `0x68650b3e1b32e969da606f1a3eb43b1bd85b5ec45bb6a8e78e8735277fa3ee09` at 11:45:12, lag 2 windows) landed inside the
+  clamp: epoch 2, fee 16 / skew +8 → `effectiveFee` 24 bps buy / 8 bps sell, and the next swap
+  (`0x94806702ec9113a65ffb50f9bf559839c61d5ef23794678be687bd28c503e068`) paid 24 bps. Round latency on this fleet is
+  ~7 min from submission to `ready`, so a keeper should submit within seconds of a window close.
 - Tooling gotchas: Cloudflare and the public Sepolia RPCs 403 Python's default user agent (tools now send `curl/8.4.0`);
   reth refuses `eth_getLogs` below block 1,000,000 and ranges over 100,000 blocks (keeper uses a 90k lookback);
   `cast call/send` want `--gas-limit` and positional raw calldata.
