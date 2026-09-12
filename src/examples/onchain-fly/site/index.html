@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>A fruit fly brain prices every swap — Gas Killer</title>
-<meta name="description" content="The complete MaleCNS fruit-fly connectome (166,700 neurons, 25.6 million synapses) simulated on-chain to set the fee of every swap on a Sepolia AMM. ~14 billion gas per decision, settled for 406k gas through Gas Killer.">
+<meta name="description" content="The complete MaleCNS fruit-fly connectome (166,700 neurons, 25.6 million synapses) simulated on-chain to set the fee of every swap on a Sepolia AMM. over 14,000,000,000 gas per decision, settled for 406,341 gas through Gas Killer.">
 <link rel="icon" href="assets/gk-mark.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -70,9 +70,9 @@
   .hero .wrap { position: relative; }
   .hero h1 span { color: var(--emerald-300); }
   .hero .cta { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 34px; }
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 2px; background: rgba(255,255,255,.1); border: 2px solid var(--poster-ink); box-shadow: var(--poster-offset) var(--poster-offset) 0 var(--poster-shadow); margin-top: 64px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 2px; background: rgba(255,255,255,.1); border: 2px solid var(--poster-ink); box-shadow: var(--poster-offset) var(--poster-offset) 0 var(--poster-shadow); margin-top: 64px; }
   .stat { background: linear-gradient(to bottom, var(--zinc-950), #000); padding: 22px 20px; }
-  .stat b { display: block; font-family: var(--font-display); font-size: 30px; font-weight: 700; color: var(--emerald-300); line-height: 1.05; white-space: nowrap; }
+  .stat b { display: block; font-family: var(--font-display); font-size: 26px; font-weight: 700; color: var(--emerald-300); line-height: 1.05; white-space: nowrap; }
   .stat b.amber { color: var(--amber-200); }
   .stat span { display: block; margin-top: 6px; font-size: 13px; color: var(--zinc-500); letter-spacing: .04em; }
 
@@ -197,7 +197,7 @@
   <div class="wrap">
     <div class="eyebrow green">Gas Expand · Demo · Sepolia testnet</div>
     <h1 style="margin-top:16px">A <span>fruit fly brain</span> prices every swap on an Ethereum AMM.</h1>
-    <p class="lead" style="margin-top:26px">The complete MaleCNS fruit-fly connectome, 166,700 neurons and 25.6 million synapses, runs as a Solidity contract. Every swap on the pool is priced by its own 100 ms brain episode. One episode costs about 14 billion gas to execute. Gas Killer settles it on Sepolia for 406 thousand.</p>
+    <p class="lead" style="margin-top:26px">The complete MaleCNS fruit-fly connectome, 166,700 neurons and 25.6 million synapses, runs as a Solidity contract. Every swap on the pool is priced by its own 100 ms brain episode. One episode burns more than 14,000,000,000 gas to execute. Gas Killer settles it on Sepolia for 406,341.</p>
     <div class="cta">
       <a class="btn" href="#viz">Watch every swap get priced ↓</a>
       <a class="btn ghost" href="#onchain">See the transactions</a>
@@ -206,7 +206,7 @@
     <div class="stats">
       <div class="stat"><b>166,700</b><span>neurons simulated on-chain</span></div>
       <div class="stat"><b>25.58 M</b><span>synapses in 4,196 data contracts</span></div>
-      <div class="stat"><b>~14 Ggas</b><span>EVM gas per swap decision</span></div>
+      <div class="stat"><b>14,000,000,000+</b><span>EVM gas per swap decision</span></div>
       <div class="stat"><b class="amber">16.78 M</b><span>Sepolia's per-transaction cap (EIP-7825)</span></div>
       <div class="stat"><b>406,341</b><span>gas to settle a decision on-chain</span></div>
       <div class="stat"><b>~830×</b><span>over the cap, made verifiable</span></div>
@@ -257,7 +257,7 @@
         <h3>FlyEngine</h3>
         <p>A stateless, integer-only leaky-integrate-and-fire simulator written in Solidity and Yul. It reads the connectome through STATICCALL, steps 166,700 neurons in Q24 fixed point, and is bit-for-bit identical to the Python reference across 11 pinned test vectors.</p>
         <ul>
-          <li>~150 Ggas per simulated second</li>
+          <li>149,600,000,000 gas per simulated second of brain time</li>
           <li>Retina rasterizer turns market state into a 160×120 image</li>
           <li>Deterministic spike root commits to every spike</li>
         </ul>
@@ -299,7 +299,7 @@
         <div>
           <div class="where off">Off chain · Keeper → Gas Killer router</div>
           <h3>A task is posted for the tracked function</h3>
-          <p>A keeper reads the last settled fly state from the logs and posts a task: target <code>FlySwapPolicy</code>, calldata <code>settle(prev)</code>, reference block latest. The router validates it, traces the call once under the 2<sup>40</sup> gas profile, and hands the digest to the operator quorum. The same call sent as a normal transaction would revert immediately: it needs 14 billion gas and Sepolia allows 16.8 million.</p>
+          <p>A keeper reads the last settled fly state from the logs and posts a task: target <code>FlySwapPolicy</code>, calldata <code>settle(prev)</code>, reference block latest. The router validates it, traces the call once under the 2<sup>40</sup> gas profile, and hands the digest to the operator quorum. The same call sent as a normal transaction would revert immediately: it needs over 14,000,000,000 gas and Sepolia allows 16,777,216.</p>
         </div>
       </div>
       <div class="step">
@@ -315,7 +315,7 @@
         <div class="n">Step<b>04</b></div>
         <div>
           <div class="where on">On chain · FlySwapPolicy.verifyAndUpdate</div>
-          <h3>Fourteen billion gas becomes three stores and two logs</h3>
+          <h3>14,000,000,000 gas becomes three stores and two logs</h3>
           <p>The keeper broadcasts the rendered payload. <code>verifyAndUpdate</code> verifies the quorum signature and applies the diff: the fill word for the intent, the decided-through counter, and the chained fly state. It also replays <code>FlyIntentDecided</code> and <code>FlySettled</code>, so the observation, the readout and the spike root are all in the event log for anyone to re-simulate.</p>
         </div>
       </div>
