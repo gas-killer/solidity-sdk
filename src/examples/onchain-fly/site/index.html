@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A fruit fly brain prices every swap — Gas Killer</title>
+<meta name="description" content="The complete MaleCNS fruit-fly connectome (166,700 neurons, 25.6 million synapses) simulated on-chain to set the fee of every swap on a Sepolia AMM. ~14 billion gas per decision, settled for 406k gas through Gas Killer.">
+<link rel="icon" href="assets/gk-mark.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --black: #000;
+    --zinc-950: #09090b; --zinc-900: #18181b; --zinc-800: #27272a; --zinc-700: #3f3f46;
+    --zinc-500: #71717a; --zinc-400: #a1a1aa; --zinc-300: #d4d4d8; --zinc-200: #e4e4e7;
+    --emerald-300: #5ee9b5; --emerald-400: #00d294; --emerald-500: #00bb7f; --emerald-950: #002c22;
+    --amber-200: #fee685; --amber-500: #f99c00;
+    --poster-ink: #26262c; --poster-ink-hi: #34343c; --poster-shadow: #1b1b21;
+    --poster-offset: 4px; --poster-offset-hover: 6px;
+    --font-display: "Chakra Petch", sans-serif;
+    --font-sans: "Space Grotesk", "Space Grotesk Fallback", Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --max: 1180px;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--black); color: var(--zinc-200); font-family: var(--font-sans); font-size: 17px; line-height: 1.6; -webkit-font-smoothing: antialiased; }
+  a { color: var(--emerald-300); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, .mono { font-family: var(--font-mono); font-size: .86em; }
+  code { background: var(--zinc-900); border: 1px solid var(--zinc-800); padding: .1em .4em; border-radius: 4px; color: var(--zinc-200); }
+  pre { background: var(--zinc-950); border: 2px solid var(--poster-ink); padding: 18px 20px; overflow: auto; font-family: var(--font-mono); font-size: 13.5px; line-height: 1.55; color: var(--zinc-300); box-shadow: var(--poster-offset) var(--poster-offset) 0 var(--poster-shadow); }
+  pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+  .wrap { max-width: var(--max); margin: 0 auto; padding: 0 24px; }
+  .display { font-family: var(--font-display); }
+  .eyebrow { font-family: var(--font-display); font-size: 13px; letter-spacing: .25em; text-transform: uppercase; color: var(--zinc-500); }
+  .eyebrow.green { color: var(--emerald-400); }
+  h1, h2, h3 { font-family: var(--font-display); font-weight: 700; line-height: 1.1; margin: 0; letter-spacing: -.01em; }
+  h1 { font-size: clamp(40px, 6.5vw, 76px); }
+  h2 { font-size: clamp(30px, 4.5vw, 46px); margin: 14px 0 18px; }
+  h3 { font-size: 21px; margin: 0 0 10px; }
+  p { margin: 0 0 16px; }
+  .lead { font-size: 21px; color: var(--zinc-300); font-weight: 300; max-width: 760px; }
+  .muted { color: var(--zinc-400); }
+  .green { color: var(--emerald-300); }
+  .amber { color: var(--amber-200); }
+  section { padding: 96px 0; border-top: 1px solid rgba(255,255,255,.07); }
+  section.tight { padding: 56px 0; }
+
+  /* nav */
+  nav { position: sticky; top: 0; z-index: 50; background: rgba(0,0,0,.82); backdrop-filter: blur(10px); border-bottom: 1px solid rgba(255,255,255,.08); }
+  nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 66px; }
+  .brand { display: flex; align-items: center; gap: 12px; color: #fff; font-family: var(--font-display); font-weight: 700; font-size: 19px; letter-spacing: .02em; }
+  .brand img { height: 22px; width: auto; display: block; }
+  nav ul { list-style: none; margin: 0; padding: 0; display: flex; gap: 26px; align-items: center; }
+  nav ul a { color: var(--zinc-300); font-family: var(--font-display); font-size: 14px; letter-spacing: .08em; text-transform: uppercase; }
+  nav ul a:hover { color: #fff; text-decoration: none; }
+  .btn { display: inline-flex; align-items: center; gap: 10px; padding: 12px 20px; border: 2px solid var(--emerald-500); background: var(--emerald-950); color: var(--emerald-300); font-family: var(--font-display); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; font-size: 14px; box-shadow: 3px 3px 0 var(--poster-shadow); transition: all .15s; }
+  .btn:hover { transform: translate(-2px,-2px); box-shadow: 5px 5px 0 var(--poster-shadow); text-decoration: none; }
+  .btn.ghost { border-color: var(--poster-ink); background: var(--zinc-950); color: var(--zinc-200); }
+  @media (max-width: 800px) { nav ul li.hide { display: none; } }
+
+  /* hero */
+  .hero { padding: 110px 0 80px; position: relative; overflow: hidden; border-top: 0; }
+  .hero::before { content: ""; position: absolute; inset: 0; background:
+      radial-gradient(60% 55% at 80% 20%, rgba(0,210,148,.10), transparent 70%),
+      radial-gradient(40% 40% at 10% 80%, rgba(249,156,0,.06), transparent 70%); pointer-events: none; }
+  .hero .wrap { position: relative; }
+  .hero h1 span { color: var(--emerald-300); }
+  .hero .cta { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 34px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 2px; background: rgba(255,255,255,.1); border: 2px solid var(--poster-ink); box-shadow: var(--poster-offset) var(--poster-offset) 0 var(--poster-shadow); margin-top: 64px; }
+  .stat { background: linear-gradient(to bottom, var(--zinc-950), #000); padding: 22px 20px; }
+  .stat b { display: block; font-family: var(--font-display); font-size: 30px; font-weight: 700; color: var(--emerald-300); line-height: 1.05; white-space: nowrap; }
+  .stat b.amber { color: var(--amber-200); }
+  .stat span { display: block; margin-top: 6px; font-size: 13px; color: var(--zinc-500); letter-spacing: .04em; }
+
+  /* cards */
+  .card { position: relative; background: var(--zinc-950); border: 2px solid var(--poster-ink); box-shadow: var(--poster-offset) var(--poster-offset) 0 var(--poster-shadow); padding: 30px; transition: all .15s; }
+  .card:hover { border-color: var(--poster-ink-hi); box-shadow: var(--poster-offset-hover) var(--poster-offset-hover) 0 var(--poster-shadow); transform: translate(-2px,-2px); }
+  .card .icon { width: 40px; height: 40px; border-radius: 8px; background: rgba(0,210,148,.10); border: 1px solid rgba(0,210,148,.2); color: var(--emerald-300); display: flex; align-items: center; justify-content: center; margin-bottom: 20px; font-family: var(--font-display); font-weight: 700; }
+  .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 22px; }
+  @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
+  .grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 22px; }
+  .card p:last-child { margin-bottom: 0; }
+  .card ul { padding-left: 18px; margin: 0; color: var(--zinc-300); }
+  .card li { margin: 6px 0; }
+
+  /* steps */
+  .steps { counter-reset: step; display: grid; gap: 2px; background: rgba(255,255,255,.1); border: 2px solid var(--poster-ink); box-shadow: var(--poster-offset) var(--poster-offset) 0 var(--poster-shadow); }
+  .step { background: var(--zinc-950); padding: 26px 28px; display: grid; grid-template-columns: 120px 1fr; gap: 20px; align-items: start; }
+  .step .n { font-family: var(--font-display); font-size: 13px; letter-spacing: .25em; color: var(--zinc-500); padding-top: 4px; }
+  .step .n b { display: block; color: var(--emerald-300); font-size: 30px; letter-spacing: 0; margin-top: 2px; }
+  .step h3 { margin-bottom: 6px; }
+  .step p { margin-bottom: 8px; color: var(--zinc-300); }
+  .step p:last-child { margin-bottom: 0; }
+  .step .where { font-family: var(--font-display); font-size: 12px; letter-spacing: .18em; text-transform: uppercase; color: var(--zinc-500); }
+  .step .where.on { color: var(--emerald-400); } .step .where.off { color: var(--amber-200); }
+  @media (max-width: 700px) { .step { grid-template-columns: 1fr; } }
+
+  /* flow diagram */
+  .flow { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap: 12px; align-items: stretch; margin: 26px 0 10px; }
+  .flow .box { border: 2px solid var(--poster-ink); background: linear-gradient(to bottom, var(--zinc-900), var(--zinc-950)); padding: 18px; box-shadow: 3px 3px 0 var(--poster-shadow); }
+  .flow .box.on { border-color: rgba(0,210,148,.45); }
+  .flow .box.off { border-color: rgba(249,156,0,.45); }
+  .flow .box h4 { margin: 0 0 8px; font-family: var(--font-display); font-size: 15px; letter-spacing: .08em; text-transform: uppercase; }
+  .flow .box.on h4 { color: var(--emerald-300); } .flow .box.off h4 { color: var(--amber-200); }
+  .flow .box small { color: var(--zinc-400); font-size: 14px; display: block; line-height: 1.45; }
+  .flow .arrow { align-self: center; color: var(--zinc-500); font-family: var(--font-display); font-size: 24px; }
+  @media (max-width: 860px) { .flow { grid-template-columns: 1fr; } .flow .arrow { transform: rotate(90deg); justify-self: center; } }
+
+  /* tables */
+  table { width: 100%; border-collapse: collapse; font-size: 15px; }
+  th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid rgba(255,255,255,.08); vertical-align: top; }
+  th { font-family: var(--font-display); font-size: 12px; letter-spacing: .18em; text-transform: uppercase; color: var(--zinc-500); font-weight: 600; }
+  td .mono { color: var(--zinc-300); word-break: break-all; }
+  .tablewrap { border: 2px solid var(--poster-ink); background: var(--zinc-950); box-shadow: var(--poster-offset) var(--poster-offset) 0 var(--poster-shadow); overflow: auto; }
+  .pill { display: inline-block; font-family: var(--font-display); font-size: 11px; letter-spacing: .14em; text-transform: uppercase; padding: 3px 8px; border: 1px solid; border-radius: 3px; }
+  .pill.buy { color: var(--emerald-300); border-color: rgba(0,210,148,.4); background: rgba(0,210,148,.08); }
+  .pill.sell { color: var(--amber-200); border-color: rgba(249,156,0,.4); background: rgba(249,156,0,.08); }
+  .pill.gk { color: var(--zinc-200); border-color: var(--zinc-700); background: var(--zinc-900); }
+
+  /* word layout */
+  .word { display: grid; grid-template-columns: repeat(6, 1fr); gap: 2px; background: rgba(255,255,255,.1); border: 2px solid var(--poster-ink); box-shadow: 3px 3px 0 var(--poster-shadow); margin: 14px 0 6px; font-family: var(--font-mono); font-size: 12.5px; }
+  .word div { background: var(--zinc-950); padding: 10px 8px; text-align: center; }
+  .word div b { display: block; font-family: var(--font-display); color: var(--emerald-300); font-size: 13px; letter-spacing: .06em; }
+  .word div span { color: var(--zinc-500); }
+  .word div.big { grid-column: span 2; }
+  @media (max-width: 700px) { .word { grid-template-columns: repeat(3, 1fr); } }
+
+  /* viz */
+  .vizframe { border: 2px solid var(--poster-ink); box-shadow: var(--poster-offset) var(--poster-offset) 0 var(--poster-shadow); background: #05060a; height: min(84vh, 900px); width: 100%; display: block; }
+  .vizbar { display: flex; justify-content: space-between; align-items: center; gap: 14px; flex-wrap: wrap; margin: 14px 0 0; color: var(--zinc-400); font-size: 14px; }
+  .legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 26px; }
+  .legend div { border-left: 2px solid var(--emerald-500); padding: 2px 0 2px 14px; color: var(--zinc-300); font-size: 15px; }
+  .legend div b { display: block; font-family: var(--font-display); color: #fff; letter-spacing: .04em; }
+
+  /* callout */
+  .callout { border: 2px solid rgba(249,156,0,.45); background: rgba(249,156,0,.06); padding: 22px 26px; box-shadow: 3px 3px 0 var(--poster-shadow); }
+  .callout .eyebrow { color: var(--amber-200); }
+  .callout p:last-child { margin-bottom: 0; }
+
+  footer { border-top: 1px solid rgba(255,255,255,.08); padding: 48px 0 60px; color: var(--zinc-500); font-size: 14px; }
+  footer .row { display: flex; justify-content: space-between; gap: 24px; flex-wrap: wrap; align-items: center; }
+  footer ul { list-style: none; margin: 0; padding: 0; display: flex; gap: 20px; flex-wrap: wrap; }
+  footer a { color: var(--zinc-300); }
+  .backed { display: flex; align-items: center; gap: 12px; }
+  .backed img { height: 28px; width: 28px; border-radius: 6px; }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="https://gaskiller.xyz" title="Gas Killer"><img src="assets/gk-mark.png" alt="Gas Killer"> Gas Killer</a>
+    <ul>
+      <li class="hide"><a href="#what">What</a></li>
+      <li class="hide"><a href="#how">How</a></li>
+      <li class="hide"><a href="#fly">The fly</a></li>
+      <li class="hide"><a href="#onchain">On chain</a></li>
+      <li><a href="#viz">Visualizer</a></li>
+      <li><a class="btn" href="https://gaskiller.xyz" style="padding:9px 14px;font-size:12px">gaskiller.xyz →</a></li>
+    </ul>
+  </div>
+</nav>
+
+<section class="hero">
+  <div class="wrap">
+    <div class="eyebrow green">Gas Expand · Demo · Sepolia testnet</div>
+    <h1 style="margin-top:16px">A <span>fruit fly brain</span> prices every swap on an Ethereum AMM.</h1>
+    <p class="lead" style="margin-top:26px">The complete MaleCNS fruit-fly connectome, 166,700 neurons and 25.6 million synapses, runs as a Solidity contract. Every swap on the pool is priced by its own 100 ms brain episode. One episode costs about 14 billion gas to execute. Gas Killer settles it on Sepolia for 406 thousand.</p>
+    <div class="cta">
+      <a class="btn" href="#viz">Watch the brain trade ↓</a>
+      <a class="btn ghost" href="#onchain">See the transactions</a>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><b>166,700</b><span>neurons simulated on-chain</span></div>
+      <div class="stat"><b>25.58 M</b><span>synapses in 4,196 data contracts</span></div>
+      <div class="stat"><b>~14 Ggas</b><span>EVM gas per swap decision</span></div>
+      <div class="stat"><b class="amber">16.78 M</b><span>Sepolia's per-transaction cap (EIP-7825)</span></div>
+      <div class="stat"><b>406,341</b><span>gas to settle a decision on-chain</span></div>
+      <div class="stat"><b>~830×</b><span>over the cap, made verifiable</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="what">
+  <div class="wrap">
+    <div class="eyebrow">What we built</div>
+    <h2>The biggest computation ever settled into a single storage word.</h2>
+    <p class="lead">Gas Killer's unbounded profile lets a tracked contract call run under a 2<sup>40</sup> gas budget off-chain, with only the resulting state change written on-chain under an aggregate signature. To prove that end to end we picked the heaviest deterministic workload we could find: a whole animal's brain.</p>
+
+    <div class="grid3" style="margin-top:44px">
+      <div class="card">
+        <div class="icon">01</div>
+        <h3>The connectome, on-chain</h3>
+        <p>The MaleCNS v1.0 fly connectome, converted to a compact integer graph and uploaded to Sepolia as immutable data contracts behind a two-level directory. The same deployment pipeline that put Qwen3 weights on-chain for our LLM consumer.</p>
+        <ul>
+          <li>4,196 graph chunks, 219 warm-state chunks</li>
+          <li>Content-addressed; the engine verifies every code hash before use</li>
+          <li>Directory root <code>0xe7c8…5641</code></li>
+        </ul>
+      </div>
+      <div class="card">
+        <div class="icon">02</div>
+        <h3>FlyEngine</h3>
+        <p>A stateless, integer-only leaky-integrate-and-fire simulator written in Solidity and Yul. It reads the connectome through STATICCALL, steps 166,700 neurons in Q24 fixed point, and is bit-for-bit identical to the Python reference across 11 pinned test vectors.</p>
+        <ul>
+          <li>~150 Ggas per simulated second</li>
+          <li>Retina rasterizer turns market state into a 160×120 image</li>
+          <li>Deterministic spike root commits to every spike</li>
+        </ul>
+      </div>
+      <div class="card">
+        <div class="icon">03</div>
+        <h3>FlySwapPool + FlySwapPolicy</h3>
+        <p>A plain x·y = k pool where every swap is an escrowed intent, and a tiny Gas Killer consumer whose only tracked function runs one brain episode per intent and writes the fee it chose.</p>
+        <ul>
+          <li>Fee clamped to 5–100 bps, skew to ±30 bps: the fly can only be so wrong</li>
+          <li>Policy contract is 841 bytes; the pool never inherits the SDK</li>
+          <li>35 Foundry tests, two live rounds through the real testnet</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <div class="eyebrow">How it works</div>
+    <h2>Off-chain execution. On-chain security. One swap at a time.</h2>
+    <p class="lead">The pool never calls the brain. The brain never touches the pool's tokens. The two are joined by a 32-byte fill word that Gas Killer's operator network writes into the policy contract after simulating the episode and agreeing on the result.</p>
+
+    <div class="flow">
+      <div class="box on"><h4>1 · On chain</h4><small>Trader calls <code>submit()</code>. Tokens are escrowed, the intent joins a FIFO queue.</small></div>
+      <div class="arrow">→</div>
+      <div class="box off"><h4>2 · Gas Killer network</h4><small>Router and operators simulate <code>settle()</code> under the unbounded profile: rasterize the intent, run 1,000 brain steps, read out a fee. They sign the resulting storage diff.</small></div>
+      <div class="arrow">→</div>
+      <div class="box on"><h4>3 · On chain</h4><small><code>verifyAndUpdate()</code> checks the signature and writes the fill word. Anyone calls <code>applyUpTo()</code>; the pool fills the swap at the fly's fee.</small></div>
+    </div>
+
+    <div class="steps" style="margin-top:40px">
+      <div class="step">
+        <div class="n">Step<b>01</b></div>
+        <div>
+          <div class="where on">On chain · FlySwapPool</div>
+          <h3>A swap becomes an intent</h3>
+          <p>The trader picks a side and an amount and calls <code>submit</code>. The pool pulls the input tokens into escrow, assigns the next id, and emits <code>IntentSubmitted</code>. Nothing is priced yet. Intents settle strictly in order, so nobody can jump the queue once the brain has looked at it.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="n">Step<b>02</b></div>
+        <div>
+          <div class="where off">Off chain · Keeper → Gas Killer router</div>
+          <h3>A task is posted for the tracked function</h3>
+          <p>A keeper reads the last settled fly state from the logs and posts a task: target <code>FlySwapPolicy</code>, calldata <code>settle(prev)</code>, reference block latest. The router validates it, traces the call once under the 2<sup>40</sup> gas profile, and hands the digest to the operator quorum. The same call sent as a normal transaction would revert immediately: it needs 14 billion gas and Sepolia allows 16.8 million.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="n">Step<b>03</b></div>
+        <div>
+          <div class="where off">Off chain · Operator quorum</div>
+          <h3>Every operator runs the brain</h3>
+          <p><code>settle</code> STATICCALLs the pool for a storage-only observation of the head intent: side, size relative to reserves, queue depth, the 16-epoch buy/sell histogram, spot versus its moving average. The rasterizer paints that as a 160×120 retina image. The engine then integrates all 166,700 neurons for 1,000 steps of 100 µs and returns four population firing rates and a spike root. Each operator reaches the identical bytes, so each signs the identical storage diff.</p>
+          <p class="muted">Measured on the fleet's simulation node: 25 s to execute, 84 s to produce the net storage diff via the prestate tracer. Three operators plus the router finish inside the five-minute round.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="n">Step<b>04</b></div>
+        <div>
+          <div class="where on">On chain · FlySwapPolicy.verifyAndUpdate</div>
+          <h3>Fourteen billion gas becomes three stores and two logs</h3>
+          <p>The keeper broadcasts the rendered payload. <code>verifyAndUpdate</code> verifies the quorum signature and applies the diff: the fill word for the intent, the decided-through counter, and the chained fly state. It also replays <code>FlyIntentDecided</code> and <code>FlySettled</code>, so the observation, the readout and the spike root are all in the event log for anyone to re-simulate.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="n">Step<b>05</b></div>
+        <div>
+          <div class="where on">On chain · FlySwapPool.applyUpTo</div>
+          <h3>The pool fills at the fly's price</h3>
+          <p>Anyone, including the trader, calls <code>applyUpTo</code>. The pool reads the fill word from the policy, clamps fee and skew to the safety band, computes the output on x·y = k, releases the tokens and emits <code>Swap</code>. If the fly's fee would breach the trader's minimum output, or the intent expired before a decision, the escrow is refunded instead.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid2" style="margin-top:40px">
+      <div class="card">
+        <h3>Why the swap is a separate transaction</h3>
+        <p>Under the unbounded profile the fleet uses Gas Killer's prestate-net encoding: it reads the consumer's net storage diff and its logs instead of an opcode-by-opcode trace, because a trace of a 14 Ggas call is not something a node can produce. That encoding covers a tracked function that writes only its own storage and makes no regular <code>CALL</code>. So the brain writes a verdict, and a normal transaction moves the tokens. The escrow means nothing changes hands in between except the fee the fly chose.</p>
+      </div>
+      <div class="card">
+        <h3>What the fill word carries</h3>
+        <p>One 32-byte slot per intent, keyed by id, is all the pool ever reads from the brain.</p>
+        <div class="word">
+          <div><b>fee</b><span>16 bits</span></div>
+          <div><b>skew</b><span>16 bits</span></div>
+          <div><b>flags</b><span>8 bits</span></div>
+          <div><b>epoch</b><span>24 bits</span></div>
+          <div class="big"><b>spike root</b><span>160 bits</span></div>
+        </div>
+        <p class="muted" style="font-size:14px">Intent #1's word: <span class="mono">0x001f0002000000010000000065250fef…4437e6</span> reads fee 31, skew +2, epoch 1.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="fly">
+  <div class="wrap">
+    <div class="eyebrow">Inside the fly</div>
+    <h2>How a market becomes something a fly can see.</h2>
+    <p class="lead">The connectome is real. The retina input is engineered. We draw the state of the order book as an image on the fly's photoreceptors, let the whole brain react, and read the fee off four groups of neurons.</p>
+
+    <div class="grid2" style="margin-top:44px">
+      <div class="card">
+        <h3>The retina image</h3>
+        <p>A 160×120 canvas rasterized fresh for each intent:</p>
+        <ul>
+          <li><b>Rows 0–39</b> deviation strip: spot price against its 1/8 exponential moving average</li>
+          <li><b>Rows 40–79</b> intent strip: which side, how big relative to a reference size, queue depth</li>
+          <li><b>Rows 80–119</b> slippage strip: the trader's tolerance</li>
+          <li><b>Rows 120+</b> volume bars: the last 16 epochs of buy and sell flow</li>
+        </ul>
+        <p style="margin-top:12px">Lit pixels become input current on the photoreceptor neurons that sit at those coordinates. Intent #1 lit 244 receptors; intent #2, with history behind it, lit 408.</p>
+      </div>
+      <div class="card">
+        <h3>The simulation</h3>
+        <p>Leaky integrate-and-fire dynamics on every neuron, with signed synaptic weights straight from the electron-microscopy reconstruction. All arithmetic is 64-bit fixed point with round-half-up, decay tables precomputed in Q64, and a fixed iteration order, so the EVM, the C kernel and the Python reference agree bit for bit.</p>
+        <p>A 100 ms episode is 1,000 steps. Intent #1 produced 28,141 spikes; intent #2 produced 28,028. Every spike goes into a running hash, and the final 160-bit spike root lands in the fill word as a commitment anyone can check by re-running the episode.</p>
+      </div>
+      <div class="card">
+        <h3>The readout</h3>
+        <p>Four population rates are measured over the episode. Their ratios map onto the fee and the directional skew through fixed, published tables. The pool then clamps: fee within 5 to 100 bps, skew within ±30 bps, and sells pay fee minus skew so the brain can lean the pool one way without ever charging outside the band.</p>
+        <p class="muted" style="font-size:14px">Intent #1: rates 11,323 / 6,377 / 6,377 / 7,790 → fee 31, skew +2, buy paid 33 bps. Intent #2: 25,005 / 9,393 / 9,393 / 9,913 → fee 41, skew +9, sell paid 32 bps.</p>
+      </div>
+      <div class="card">
+        <h3>Honest framing</h3>
+        <p>This fly does not learn, and it is not a market oracle. It is a deterministic, biologically derived controller whose outputs can be predicted by anyone willing to run the simulation. That is exactly the property Gas Killer needs: every operator must reach the same answer, and every user must be able to verify it.</p>
+        <p>What it demonstrates is scale. If an entire brain can be a tracked function, so can your risk engine, your on-chain order matching, or the invariant checks you cut because gas made them unaffordable.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="onchain">
+  <div class="wrap">
+    <div class="eyebrow">On chain</div>
+    <h2>Live on Sepolia, through the public Gas Killer testnet.</h2>
+    <p class="lead">Two intents were submitted, priced by the brain, settled by the operator quorum and filled. Every step is a public transaction; the observation and readout are in the logs, so the episodes can be replayed from chain data alone. The visualizer below was built that way.</p>
+
+    <div class="tablewrap" style="margin-top:36px">
+      <table>
+        <thead><tr><th>Intent</th><th>Observation</th><th>Fly decision</th><th>Settlement (verifyAndUpdate)</th><th>Fill (applyUpTo)</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><span class="pill buy">Buy</span> <span class="mono">#1</span><br><span class="muted">10 quote in</span><br><a class="mono" href="https://sepolia.etherscan.io/tx/0xc09828fed175f12fe7714ca87a0b048f77bf046311f24c5a8943a9f73040138b">0xc09828fe…138b</a></td>
+            <td>size 50 bps · queue 2 · 244 receptors lit · flat history</td>
+            <td>fee <b class="green">31</b> · skew <b class="green">+2</b><br><span class="muted">28,141 spikes</span></td>
+            <td><a class="mono" href="https://sepolia.etherscan.io/tx/0xddd22cf8a857c8aa2a6d0b347ec1e95b09c5811858e8c20aed5dba0fcb568c09#eventlog">0xddd22cf8…8c09</a><br><span class="muted">406,341 gas · 3 STOREs + 2 logs · ready in ~4 min</span></td>
+            <td><a class="mono" href="https://sepolia.etherscan.io/tx/0x1e2f963b751dd74fcaa1f78fe0116532ee80c30e30fd5d90aa6d3b242e535c25#eventlog">0x1e2f963b…5c25</a><br><span class="muted">paid 33 bps · out 4.958788 base</span></td>
+          </tr>
+          <tr>
+            <td><span class="pill sell">Sell</span> <span class="mono">#2</span><br><span class="muted">2 base in</span><br><a class="mono" href="https://sepolia.etherscan.io/tx/0x2a465ed2d273095466c043c1de71fd13137ecfaf3ca02e4122992a6776fbef3a">0x2a465ed2…ef3a</a></td>
+            <td>size 20 bps · queue 1 · 408 receptors lit · spot 1.0% above EMA</td>
+            <td>fee <b class="green">41</b> · skew <b class="green">+9</b><br><span class="muted">28,028 spikes</span></td>
+            <td><a class="mono" href="https://sepolia.etherscan.io/tx/0xfab96cfceb64428a83ad3ebe8c8066a9b31ea0dc176b05425ae3792a9beab523#eventlog">0xfab96cfc…b523</a><br><span class="muted">355,521 gas · ready in ~4 min</span></td>
+            <td><a class="mono" href="https://sepolia.etherscan.io/tx/0x2f33bb23c5209cbeef85b82afdaac082108c55804b96e3bc7e5437c2eb09655f#eventlog">0x2f33bb23…655f</a><br><span class="muted">paid 32 bps (fee − skew) · out 4.019053 quote</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="grid2" style="margin-top:28px">
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Contract</th><th>Sepolia</th></tr></thead>
+          <tbody>
+            <tr><td>FlySwapPool</td><td><a class="mono" href="https://sepolia.etherscan.io/address/0xD9adC740c61c2362AA9649cDe79D1A20B537fa69">0xD9adC740c61c2362AA9649cDe79D1A20B537fa69</a></td></tr>
+            <tr><td>FlySwapPolicy <span class="pill gk">GK consumer</span></td><td><a class="mono" href="https://sepolia.etherscan.io/address/0x474c62c9931e5a501986f6E27AC4Cc084dFf9908">0x474c62c9931e5a501986f6E27AC4Cc084dFf9908</a></td></tr>
+            <tr><td>FlySwapRasterizer</td><td><a class="mono" href="https://sepolia.etherscan.io/address/0x9caE2512890d5B46b5882CA25EFF78d7c24E2428">0x9caE2512890d5B46b5882CA25EFF78d7c24E2428</a></td></tr>
+            <tr><td>FlyEngine</td><td><a class="mono" href="https://sepolia.etherscan.io/address/0xB61fd991A4A6afAEf54404bA54DC6123d2B9E4fC">0xB61fd991A4A6afAEf54404bA54DC6123d2B9E4fC</a></td></tr>
+            <tr><td>Connectome directory root</td><td><a class="mono" href="https://sepolia.etherscan.io/address/0xe7c83910719ea03d80f7dd71caee4489a0a05641">0xe7c83910719ea03d80f7dd71caee4489a0a05641</a></td></tr>
+            <tr><td>Warm-state directory root</td><td><a class="mono" href="https://sepolia.etherscan.io/address/0x046b0eedf28701d257944c0c48d64ac2fc9666ac">0x046b0eedf28701d257944c0c48d64ac2fc9666ac</a></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h3>Where to look on Etherscan</h3>
+        <ul>
+          <li>The <b>settlement</b> transactions are calls to <code>verifyAndUpdate</code> on the policy. Their <code>FlyIntentDecided</code> log holds the observation, the four rates and the spike root.</li>
+          <li>The <b>fill</b> transactions are calls to <code>applyUpTo</code> on the pool. Their <code>Swap</code> log shows the fee actually paid, which matches the policy's fill word from the transaction before it.</li>
+          <li>The policy's storage is the whole interface: three slots per round. Nothing else on chain knows a brain was involved.</li>
+        </ul>
+        <p class="muted" style="font-size:14px;margin-top:14px">An earlier version, FlyAMM + FlyPolicy at <a class="mono" href="https://sepolia.etherscan.io/address/0x0147847039d35Aa489c6654C21F49b9b58c9ed50">0x0147…ed50</a>, priced the pool per 25-block window with a 300 ms episode. It stays deployed; the per-swap design above replaced it because it gives every trade its own decision.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="viz">
+  <div class="wrap">
+    <div class="eyebrow">Visualizer</div>
+    <h2>Watch the brain trade.</h2>
+    <p class="lead">Both episodes, replayed millisecond by millisecond from the logged observations and reproducing the on-chain spike roots exactly. The top half is the fly: every soma at its real position from the MaleCNS reconstruction, lit as it fires. The bottom half is the pool, advancing block by block as intents arrive, get decided and fill.</p>
+
+    <iframe class="vizframe" src="viz/fly_amm_v2.html" title="Fly brain pricing every swap" loading="lazy" allow="fullscreen"></iframe>
+    <div class="vizbar">
+      <span>Drag to orbit · scroll to zoom · right-drag to pan. WebGL required; best on desktop.</span>
+      <a class="btn ghost" href="viz/fly_amm_v2.html" target="_blank" rel="noopener" style="padding:9px 14px;font-size:12px">Open full screen ↗</a>
+    </div>
+
+    <div class="legend">
+      <div><b>Brain regions</b>Optic lobes, central brain and ventral nerve cord, with the body outlined for orientation. Bars rank which superclasses fired most during the episode.</div>
+      <div><b>Retina inset</b>The 160×120 image the rasterizer painted for this intent, the only thing the fly is told about the market.</div>
+      <div><b>Block timeline</b>Spot price, reserves, intents in the queue and fills, in the order they happened on Sepolia. Each decision opens its episode in the brain view.</div>
+      <div><b>Readout</b>The four population rates converging on the fee and skew that were written on chain.</div>
+    </div>
+  </div>
+</section>
+
+<section class="tight">
+  <div class="wrap">
+    <div class="callout">
+      <div class="eyebrow">What this means for your contract</div>
+      <h3 style="margin-top:10px">Gas Expand: run what the block gas limit rules out.</h3>
+      <p>The fly is a stress test, not the product. The product is the path it took: one line of Solidity to make a function tracked, transactions redirected to the Gas Killer RPC, execution moved off-chain under a 2<sup>40</sup> gas budget, and the final state written back under an aggregate signature by a slashable operator network. If the network is unavailable your function still executes on-chain as before.</p>
+      <p><a class="btn" href="https://gaskiller.xyz">Get in touch →</a> &nbsp; <a class="btn ghost" href="https://gaskiller.xyz/docs">Read the docs</a> &nbsp; <a class="btn ghost" href="https://github.com/gas-killer">Code on GitHub</a></p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="row">
+      <div class="backed"><img src="assets/opacity-logo.png" alt="Opacity Labs"> <span>Backed by <a href="https://opacity.network/">Opacity Labs</a></span></div>
+      <ul>
+        <li><a href="https://gaskiller.xyz">gaskiller.xyz</a></li>
+        <li><a href="https://gaskiller.xyz/docs">Docs</a></li>
+        <li><a href="https://paragraph.com/@gaskiller">Blog</a></li>
+        <li><a href="https://x.com/gaskiller_">X</a></li>
+        <li><a href="https://t.me/gaskillerfriends">Telegram</a></li>
+        <li><a href="mailto:contact@gaskiller.xyz">contact@gaskiller.xyz</a></li>
+      </ul>
+    </div>
+    <p style="margin-top:22px">Connectome: MaleCNS v1.0 (Janelia FlyEM). Simulation lineage: doomfly. Testnet demo; test tokens only. © 2026 Gas Killer</p>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -96,3 +96,10 @@ prestate tracer with `disable_code` so the 4,415 touched chunks never enter the 
 Deterministic and predictable (anyone with the reference knows the next fee minutes ahead); the fly does
 not learn (ETA = 0); the DN readouts are an engineered BCI; the band and staleness clamps are caps, not
 manipulation resistance. See HANDOFF §9.
+
+## Promo site
+
+`site/` is a static, self-contained page in gaskiller.xyz branding that explains the build and embeds the
+visualizer (`site/viz/fly_amm_v2.html`, a copy of the built v2 page). Serve it with any static server, e.g.
+`python3 -m http.server 8878 --bind 127.0.0.1` from `site/` and open `index.html`. It links the live Sepolia
+transactions and contracts; regenerate `viz/fly_amm_v2.html` with `tools/fly_viz_build2.py` after new rounds.
