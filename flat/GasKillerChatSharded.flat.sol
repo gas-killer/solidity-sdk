@@ -5708,9 +5708,13 @@ contract GasKillerChatSharded is GasKillerSDK {
     /// @dev Distinct from CHAT_DOMAIN so a resumed exchange can never alias a fresh one.
     bytes32 public constant RESUME_DOMAIN = keccak256("gaskiller.llm.chat.sharded.resume.v1");
 
-    /// @notice Full sharded-pipeline roots this consumer has successfully settled — the
-    ///         set a `fulfilResumed` call may warm-start (resume) from. Written by
-    ///         `fulfil` and `fulfilResumed`; a resume from an unsettled root reverts.
+    /// @notice Warm prefix roots admitted as resume anchors — the set a `fulfilResumed`
+    ///         call may warm-start (resume) from. Written ONLY by `settlePrefix` (its
+    ///         single consumer storage write, satisfying the unbounded profile's
+    ///         single-slot commitment rule); a resume from an unsettled root reverts.
+    ///         `fulfil`/`fulfilResumed` fold their pipelineRoot into the chat root but do
+    ///         not record it here — settlePrefix a completed exchange's root explicitly
+    ///         if a later resume should chain off it.
     mapping(bytes32 => bool) public settledRoots;
 
     /// @notice Emitted for every answered prompt in a tracked transition
@@ -5784,7 +5788,10 @@ contract GasKillerChatSharded is GasKillerSDK {
         assembly ("memory-safe") {
             sstore(CHAT_ROOT_SLOT, newRoot)
         }
-        settledRoots[pipelineRoot] = true;
+        // pipelineRoot is folded into the chat root but deliberately NOT recorded in
+        // settledRoots: the unbounded gas profile admits at most ONE consumer storage
+        // write per settlement (single-slot commitment), and that write is the chat
+        // root. Resume anchors are admitted exclusively via settlePrefix.
         emit ChatAnswered(stateTransitionCount(), newRoot, pipelineRoot, promptIds, answerIds);
     }
 
@@ -5807,10 +5814,10 @@ contract GasKillerChatSharded is GasKillerSDK {
     /// @notice Commit a sharded-inference exchange that RESUMES from a previously-settled
     ///         warm prefix, and fold it into the chat root.
     /// @dev Additive latency path: a fixed chat-template prefix is run once through the
-    ///      committee-verified pipeline (a normal `fulfil` whose `pipelineRoot` becomes a
-    ///      resume anchor); real answers then resume from it instead of recomputing the
-    ///      prefix. The tracked function is still a pure commit — no inference. The quorum
-    ///      signs only after verifying the resumed segment commit chain off-chain.
+    ///      committee-verified pipeline and admitted as an anchor via `settlePrefix`;
+    ///      real answers then resume from it instead of recomputing the prefix. The
+    ///      tracked function is still a pure commit — no inference. The quorum signs
+    ///      only after verifying the resumed segment commit chain off-chain.
     /// @param promptIds The pre-tokenized prompt (chat template applied off-chain)
     /// @param maxNewTokens The generation bound the pipeline ran with
     /// @param answerIds The generated token ids produced by the resumed pipeline
@@ -5831,7 +5838,8 @@ contract GasKillerChatSharded is GasKillerSDK {
         assembly ("memory-safe") {
             sstore(CHAT_ROOT_SLOT, newRoot)
         }
-        settledRoots[pipelineRoot] = true;
+        // Single consumer write (the chat root) — see fulfil. settledRoots stays
+        // read-only here; anchors come from settlePrefix.
         emit ChatResumed(stateTransitionCount(), newRoot, pipelineRoot, prefixRoot, promptIds, answerIds);
     }
 
