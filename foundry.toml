@@ -7,4 +7,15 @@ fs_permissions = [{ access = "read", path = "./test/fixtures" }]
 gas_limit = "18446744073709551615"
 memory_limit = 134217728
 
+# TEST ONLY — gkvm ffi shim (test/GkVmFfiShim.sol): shells out to the `gk-run` sidecar.
+# `ffi = true` lives here and nowhere else; the shim tests skip themselves unless GK_RUN
+# names the binary:  GK_RUN=/path/to/gk-run FOUNDRY_PROFILE=gkvm-ffi forge test
+[profile.gkvm-ffi]
+ffi = true
+# ./cache/gkvm: spill files for payloads too large for one argv string
+fs_permissions = [
+    { access = "read", path = "./test/fixtures" },
+    { access = "read-write", path = "./cache/gkvm" },
+]
+
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
