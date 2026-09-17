@@ -40,3 +40,46 @@ jobs:
       - name: Run Forge tests
         run: forge test -vvv
         id: test
+
+  # gkvm golden fixtures: fresh direct-gk-run vectors must equal the committed
+  # test/fixtures/gkvm/*_vectors.json byte for byte, then the ffi suites replay them
+  # through GkVmFfiShim (shim output ≡ direct gk-run). `ffi = true` stays confined to
+  # the gkvm-ffi profile, which only `make golden-check` selects.
+  gkvm-golden:
+    name: gkvm golden fixtures
+    runs-on: ubuntu-latest
+
+    env:
+      # gas-analyzer commit the gk-run sidecar is built from (branch Rubydusa/gkvm-m1-runner);
+      # bump together with the fixtures when the runner changes
+      GK_RUN_REF: 49da299a0bbc64d092dcca4789cc46cad06bb978
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/checkout@v4
+        with:
+          repository: gas-killer/gas-analyzer
+          ref: ${{ env.GK_RUN_REF }}
+          path: gas-analyzer
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gas-analyzer
+
+      - name: Build gk-run
+        working-directory: gas-analyzer
+        run: cargo build --release -p gas-analyzer-gkvm --bin gk-run
+
+      - name: gk unit tests
+        run: make -C tools/gk test GAS_ANALYZER="$GITHUB_WORKSPACE/gas-analyzer"
+
+      - name: Golden fixture diff + shim replay
+        run: make -C tools/gk golden-check GAS_ANALYZER="$GITHUB_WORKSPACE/gas-analyzer"
