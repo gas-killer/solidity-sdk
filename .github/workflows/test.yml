@@ -83,3 +83,6 @@ jobs:
 
       - name: Golden fixture diff + shim replay
         run: make -C tools/gk golden-check GAS_ANALYZER="$GITHUB_WORKSPACE/gas-analyzer"
+
+      - name: Parity task fixture diff (ffi leg of gas-analyzer's ffi ≡ precompile suite)
+        run: make -C tools/gk parity-check GAS_ANALYZER="$GITHUB_WORKSPACE/gas-analyzer"

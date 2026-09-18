@@ -5,6 +5,10 @@
 #   make golden-check  the CI fixture diff: fresh direct-gk-run vectors must equal the
 #                      committed ones byte for byte, then the forge ffi suites replay them
 #                      through GkVmFfiShim (shim output ≡ direct gk-run)
+#   make parity        regenerate test/fixtures/gkvm/parity_tasks.json: every golden vector as
+#                      a GkVmParityConsumer task through GkVmFfiShim, recorded as the encoded
+#                      StateUpdate payload (the ffi leg of gas-analyzer's ffi ≡ precompile suite)
+#   make parity-check  fresh parity tasks must equal the committed fixture byte for byte
 #
 # GK_RUN        gk-run sidecar binary       (default: sibling gas-analyzer release build)
 # GK_GUEST_CRT  gk-guest-crt + link.ld dir  (default: sibling gas-analyzer crates/gkvm/guest)
@@ -18,6 +22,8 @@ FORGE ?= forge
 
 GOLDEN_DIR := test/fixtures/gkvm
 GOLDEN_SCRATCH := cache/gkvm/golden
+PARITY_SCRATCH := cache/gkvm/parity
+PARITY_CONSUMER_COPY := $(GAS_ANALYZER)/crates/evmsketch/tests/fixtures/gkvm/parity_tasks.json
 
 # $(1) = output dir, relative to the sdk root. Every vector set the golden suite replays
 # (test/GkVmGolden.t.sol lists the same three files). bench-c retires 8 instructions per
@@ -50,8 +56,23 @@ golden-check: need-gk-run
 	cd $(SDK_ROOT) && GK_RUN="$(GK_RUN)" FOUNDRY_PROFILE=gkvm-ffi \
 		$(FORGE) test --match-contract 'GkVm(Golden|FfiShim)Test'
 
+parity-tasks: need-gk-run
+	cd $(SDK_ROOT) && GK_RUN="$(GK_RUN)" FOUNDRY_PROFILE=gkvm-ffi \
+		$(FORGE) test --match-contract GkVmParityTest
+
+parity: parity-tasks
+	cp $(SDK_ROOT)/$(PARITY_SCRATCH)/parity_tasks.json $(SDK_ROOT)/$(GOLDEN_DIR)/parity_tasks.json
+
+parity-check: parity-tasks
+	cd $(SDK_ROOT) && diff -u $(GOLDEN_DIR)/parity_tasks.json $(PARITY_SCRATCH)/parity_tasks.json
+	@echo "parity-check: ffi-leg tasks == committed fixture"
+	@# the precompile leg reads its own copy; when that checkout carries one, it must be this one
+	@if [ -f "$(PARITY_CONSUMER_COPY)" ]; then \
+		diff -u $(SDK_ROOT)/$(GOLDEN_DIR)/parity_tasks.json "$(PARITY_CONSUMER_COPY)" || exit 1; \
+		echo "parity-check: gas-analyzer's copy == committed fixture"; fi
+
 need-gk-run:
 	@test -n "$(GK_RUN)" && test -x "$(GK_RUN)" || { \
 		echo "gk-run not found: build it (cargo build --release -p gas-analyzer-gkvm --bin gk-run) or pass GK_RUN=/abs/path"; exit 1; }
 
-.PHONY: test golden golden-check need-gk-run
+.PHONY: test golden golden-check parity-tasks parity parity-check need-gk-run

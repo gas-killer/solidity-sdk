@@ -17,5 +17,9 @@ fs_permissions = [
     { access = "read", path = "./test/fixtures" },
     { access = "read-write", path = "./cache/gkvm" },
 ]
+# test/fixtures/gkvm/parity_tasks.json records GkVmParityConsumer's runtime bytecode (and a
+# guest-gas constant tuned to it), so this profile's compiler output must not drift
+solc_version = "0.8.35"
+optimizer = false
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
