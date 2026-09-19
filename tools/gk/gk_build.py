@@ -42,13 +42,61 @@ CRT_FILES = ['crt/crt0.S', 'crt/gkvm.c', 'crt/gkvm.h', 'link.ld']
 DOCKER_IMAGE = 'ubuntu:24.04'
 DOCKER_PACKAGE = 'gcc-riscv64-unknown-elf'
 
-# Where gk-guest-crt lives, relative to the sdk root, when neither --crt nor
-# GK_GUEST_CRT says otherwise: the sibling gas-analyzer checkout.
-DEFAULT_CRT = os.path.join('..', 'gas-analyzer', 'crates', 'gkvm', 'guest')
+# The sdk's own copy of gk-guest-crt (byte-identical to gas-analyzer's
+# crates/gkvm/guest — `make -C tools/gk crt-check`), used when neither --crt, GK_GUEST_CRT
+# nor a project-vendored guest/ says otherwise. It is what `gk init` vendors, and what
+# makes a forge-installed sdk self-sufficient: no sibling gas-analyzer checkout is assumed.
+BUNDLED_CRT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'guest-crt')
+
+# Project mode (a forge project that installed the sdk, see gk_init.py): where `gk init`
+# vendors the crt, and the remapping prefix generated bindings import the sdk through.
+PROJECT_CRT_DIR = 'guest'
+SDK_REMAP_PREFIX = 'gk-sdk/'
 
 
 class GkBuildError(Exception):
     pass
+
+
+def find_project(start, sdk_root):
+    """The forge project `start` sits in (nearest foundry.toml upward), or None when that is
+    the sdk itself — the sdk keeps its historical defaults (src/gen, cache/gkvm under it)."""
+    cur = os.path.abspath(start)
+    while True:
+        if os.path.isfile(os.path.join(cur, 'foundry.toml')):
+            same = os.path.realpath(cur) == os.path.realpath(sdk_root)
+            return None if same else cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+
+
+def forge_dirs(project):
+    """(src, test) of the project's default profile; forge's defaults when unset/unreadable."""
+    try:
+        import tomllib
+        with open(os.path.join(project, 'foundry.toml'), 'rb') as f:
+            default = tomllib.load(f).get('profile', {}).get('default', {})
+    except (ImportError, OSError, ValueError):
+        default = {}
+    return str(default.get('src', 'src')), str(default.get('test', 'test'))
+
+
+def has_crt(crt):
+    return all(os.path.isfile(os.path.join(crt, f)) for f in CRT_FILES)
+
+
+def sdk_remapping(project):
+    """The `gk-sdk/=…` line of the project's remappings.txt, or None."""
+    path = os.path.join(project, 'remappings.txt')
+    if not os.path.isfile(path):
+        return None
+    with open(path) as f:
+        for line in f:
+            if line.strip().startswith(SDK_REMAP_PREFIX + '='):
+                return line.strip()
+    return None
 
 
 def binding_name(stem):
@@ -59,13 +107,17 @@ def binding_name(stem):
     return 'Gk' + ''.join(p[0].upper() + p[1:] for p in parts)
 
 
-def resolve_crt(crt, sdk_root):
-    crt = crt or os.environ.get('GK_GUEST_CRT') or os.path.join(sdk_root, DEFAULT_CRT)
+def resolve_crt(crt, project=None):
+    """--crt, else GK_GUEST_CRT, else the project's vendored guest/, else the sdk's bundled copy."""
+    crt = crt or os.environ.get('GK_GUEST_CRT')
+    if not crt and project and has_crt(os.path.join(project, PROJECT_CRT_DIR)):
+        crt = os.path.join(project, PROJECT_CRT_DIR)
+    crt = crt or BUNDLED_CRT
     missing = [f for f in CRT_FILES if not os.path.isfile(os.path.join(crt, f))]
     if missing:
         raise GkBuildError(
-            'gk-guest-crt not found at %s (missing %s); pass --crt or set GK_GUEST_CRT to '
-            "gas-analyzer's crates/gkvm/guest" % (crt, ', '.join(missing)))
+            'gk-guest-crt not found at %s (missing %s); pass --crt or set GK_GUEST_CRT to a '
+            "dir laid out like gas-analyzer's crates/gkvm/guest" % (crt, ', '.join(missing)))
     return os.path.abspath(crt)
 
 
@@ -149,15 +201,37 @@ library %(name)s {
 ''' % {'name': name, 'hash': program_hash, 'source': source_rel, 'import_path': import_path}
 
 
-def _sol_import_path(sol_out, sdk_root):
+def _sol_import_path(sol_out, sdk_root, project=None):
+    # a project that ran `gk init` reaches the sdk through its remapping, wherever it lives
+    if project and sdk_remapping(project):
+        return SDK_REMAP_PREFIX + 'gkvm/GkVm.sol'
     rel = os.path.relpath(os.path.join(sdk_root, 'src', 'gkvm', 'GkVm.sol'), sol_out)
     rel = rel.replace(os.sep, '/')
     return rel if rel.startswith('.') else './' + rel
 
 
+def check_compiler(compiler):
+    """Resolve 'auto' and fail before any work when nothing can compile a guest."""
+    if compiler not in ('auto', 'native', 'docker'):
+        raise GkBuildError('--compiler is auto, native or docker')
+    if compiler == 'auto':
+        if not (shutil.which(CC) or shutil.which('docker')):
+            raise GkBuildError('neither %s nor docker is on PATH' % CC)
+        return 'native' if shutil.which(CC) else 'docker'
+    tool = CC if compiler == 'native' else 'docker'
+    if not shutil.which(tool):
+        raise GkBuildError('%s is not on PATH' % tool)
+    return compiler
+
+
 def build(source, sdk_root, out=None, sol_out=None, crt=None, name=None,
-          compiler='auto', emit_binding=True, log=print):
-    """Build one guest. Returns the guest.json dict (also written next to the ELF)."""
+          compiler='auto', emit_binding=True, log=print, project=None):
+    """Build one guest. Returns the guest.json dict (also written next to the ELF).
+
+    `project` = the forge project to build into (see find_project); default outputs, the
+    vendored crt and the binding's import path hang off it instead of the sdk root.
+    """
+    root = project or sdk_root
     if not os.path.isfile(source):
         raise GkBuildError('no such guest source: %s' % source)
     stem, ext = os.path.splitext(os.path.basename(source))
@@ -167,18 +241,13 @@ def build(source, sdk_root, out=None, sol_out=None, crt=None, name=None,
             'this gk builds C guests')
     if ext != '.c':
         raise GkBuildError('unsupported guest source %r (expected a .c file)' % ext)
-    if compiler not in ('auto', 'native', 'docker'):
-        raise GkBuildError('--compiler is auto, native or docker')
+    compiler = check_compiler(compiler)
 
-    crt = resolve_crt(crt, sdk_root)
-    out = out or os.path.join(sdk_root, 'cache', 'gkvm', 'build', stem)
+    crt = resolve_crt(crt, project)
+    out = out or os.path.join(root, 'cache', 'gkvm', 'build', stem)
     stage_dir = os.path.join(out, 'stage')
     guest_rel = stage(source, crt, stage_dir)
 
-    if compiler == 'auto':
-        compiler = 'native' if shutil.which(CC) else 'docker'
-    if compiler == 'docker' and not shutil.which('docker'):
-        raise GkBuildError('neither %s nor docker is on PATH' % CC)
     cc_version = (compile_native if compiler == 'native' else compile_docker)(stage_dir, guest_rel)
 
     elf_path = os.path.join(out, 'guest.elf')
@@ -203,16 +272,16 @@ def build(source, sdk_root, out=None, sol_out=None, crt=None, name=None,
     }
 
     if emit_binding:
-        sol_out = sol_out or os.path.join(sdk_root, 'src', 'gen')
+        sol_out = sol_out or os.path.join(root, forge_dirs(root)[0], 'gen')
         os.makedirs(sol_out, exist_ok=True)
         name = name or binding_name(stem)
         sol_path = os.path.join(sol_out, name + '.sol')
-        source_rel = os.path.relpath(source, sdk_root).replace(os.sep, '/')
+        source_rel = os.path.relpath(source, root).replace(os.sep, '/')
         if source_rel.startswith('..'):
             source_rel = os.path.basename(source)
         with open(sol_path, 'w') as f:
             f.write(render_binding(name, program_hash, source_rel,
-                                   _sol_import_path(sol_out, sdk_root)))
+                                   _sol_import_path(sol_out, sdk_root, project)))
         info['binding'] = name
         log('  emitted   %s' % os.path.relpath(sol_path))
 

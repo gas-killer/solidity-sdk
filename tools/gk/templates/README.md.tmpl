@@ -1,0 +1,57 @@
+# gkvm guests
+
+Scaffolded by `gk init`. A **guest** is a small deterministic program (rv64im ELF) that a
+contract runs through the gkvm precompile with `GkVm.exec`; its identity on-chain is
+`programHash = keccak256(guest.elf)`.
+
+## What `gk init` added
+
+| path | what | yours to edit? |
+| --- | --- | --- |
+| `guest/hello.c` | example guest: answers `"GKVM-HELLO-V1\n"` + the payload reversed | yes |
+| `guest/crt/`, `guest/link.ld` | gk-guest-crt, vendored: entry code, hostcalls (`gkvm.h`), linker script. Part of every guest's `programHash` | no — changing it changes every programHash |
+| `{{SRC}}/gen/GkHello.sol` | generated binding (`PROGRAM_HASH` + `call`) | no — `gk build` rewrites it |
+| `{{SRC}}/HelloGk.sol` | sample consumer | yes |
+| `{{TEST}}/HelloGk.t.sol` | test wired to `GkVmFfiShim` | yes |
+| `foundry.toml` | `[profile.gkvm-ffi]` appended (`ffi = true` lives there and nowhere else) | — |
+| `remappings.txt` | `{{SDK_REMAP}}={{SDK_PATH}}/src/` | — |
+| `.gitignore` | `cache/gkvm/` (build outputs, shim spill files) | — |
+
+Re-running `gk init` is safe: existing files are never overwritten.
+
+## Quickstart
+
+1. **Build the guest** (needs `riscv64-unknown-elf-gcc`, or docker — the build then runs in
+   `ubuntu:24.04`):
+
+       python3 {{SDK_PATH}}/tools/gk build guest/hello.c
+
+   → `cache/gkvm/build/hello/guest.elf` + `{{SRC}}/gen/GkHello.sol`. The build is reproducible:
+   same source + crt + compiler → same `programHash`.
+
+2. **Get `gk-run`**, the sidecar that executes guests (the same binary the operator path wraps).
+   From a checkout of `gas-killer/gas-analyzer`:
+
+       cargo build --release -p gas-analyzer-gkvm --bin gk-run    # → target/release/gk-run
+
+3. **Run the tests** under the ffi profile:
+
+       GK_RUN=/abs/path/to/gk-run FOUNDRY_PROFILE=gkvm-ffi forge test --match-contract HelloGkTest
+
+   Without `GK_RUN` the shim-backed tests skip (plain `forge test` stays green and ffi-free).
+
+## Writing your own guest
+
+Add `guest/<name>.c` (`#include "gkvm.h"`; `gk_input_read` → compute → `gk_output_write`;
+`gk_abort` for a typed, deterministic failure), then `gk build guest/<name>.c` and import
+`{{SRC}}/gen/Gk<Name>.sol`. Guests are freestanding rv64im C: no libc, no floating point (nothing
+links libgcc), no I/O beyond the hostcalls in `guest/crt/gkvm.h`.
+
+`forge clean` deletes `cache/` and with it the built ELFs — rebuild with `gk build`.
+
+## What runs where
+
+In forge tests the guest really executes — through `GkVmFfiShim`, a test-only contract that
+shells out to `gk-run`. That is an emulation of the precompile for development. On a live chain
+the precompile address is an empty account, so `GkVm.exec` reverts `GkVmUnavailable`; guests
+run for real only inside Gas Killer operators' simulation environment.

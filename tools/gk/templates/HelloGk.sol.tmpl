@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.4;
+
+import {GkHello} from "{{BINDING_IMPORT}}";
+
+/// @title HelloGk
+/// @notice Sample gkvm consumer scaffolded by `gk init`: runs the `guest/hello.c` program through
+///         the gkvm precompile and keeps its answer
+/// @dev `gkvm` is `GKVM_ADDRESS` ({{SDK_REMAP}}gkvm/GkVm.sol) in production and a `GkVmFfiShim` in
+///      forge tests. On a chain without the precompile — every real chain today — `preview` and
+///      `greet` revert `GkVmUnavailable`: the guest only ever runs inside the operators'
+///      simulation environment.
+contract HelloGk {
+    address public immutable gkvm;
+    bytes public lastGreeting;
+
+    event Greeted(bytes greeting);
+
+    constructor(address _gkvm) {
+        gkvm = _gkvm;
+    }
+
+    /// @notice The guest's answer for `payload`: "GKVM-HELLO-V1\n" followed by the payload reversed
+    function preview(bytes memory payload) public view returns (bytes memory) {
+        return GkHello.call(gkvm, bytes32(0), payload);
+    }
+
+    function greet(bytes calldata payload) external {
+        bytes memory greeting = preview(payload);
+        lastGreeting = greeting;
+        emit Greeted(greeting);
+    }
+}

@@ -1,0 +1,28 @@
+/* hello: the example gkvm guest scaffolded by `gk init`.
+ *
+ * Reads the payload the consumer passed to GkVm.exec and answers with a fixed
+ * tag followed by the payload reversed. A guest is a pure function of its
+ * payload (and of its artifact bundle, when it mounts one): no clock, no
+ * randomness, no filesystem — see crt/gkvm.h for the whole hostcall surface.
+ *
+ * Rebuild after every edit; the programHash in the generated binding is the
+ * keccak256 of the ELF, so a different guest is a different program:
+ *
+ *     python3 {{SDK_PATH}}/tools/gk build guest/hello.c
+ */
+#include "gkvm.h"
+
+static u8 input[GK_INPUT_BYTES_CAP + 8] __attribute__((aligned(8)));
+
+int main(void) {
+    u64 len = gk_input_read(input);
+    static const u8 tag[] = "GKVM-HELLO-V1\n";
+    gk_output_write(tag, sizeof tag - 1);
+    for (u64 i = 0; i < len / 2; i++) {
+        u8 tmp = input[i];
+        input[i] = input[len - 1 - i];
+        input[len - 1 - i] = tmp;
+    }
+    gk_output_write(input, len);
+    return 0;
+}

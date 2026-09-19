@@ -5,6 +5,7 @@
 #   make golden-check  the CI fixture diff: fresh direct-gk-run vectors must equal the
 #                      committed ones byte for byte, then the forge ffi suites replay them
 #                      through GkVmFfiShim (shim output ≡ direct gk-run)
+#   make crt-check     bundled guest-crt/ is byte-identical to gas-analyzer's gk-guest-crt
 #
 # GK_RUN        gk-run sidecar binary       (default: sibling gas-analyzer release build)
 # GK_GUEST_CRT  gk-guest-crt + link.ld dir  (default: sibling gas-analyzer crates/gkvm/guest)
@@ -50,8 +51,18 @@ golden-check: need-gk-run
 	cd $(SDK_ROOT) && GK_RUN="$(GK_RUN)" FOUNDRY_PROFILE=gkvm-ffi \
 		$(FORGE) test --match-contract 'GkVm(Golden|FfiShim)Test'
 
+# The bundled gk-guest-crt (what `gk init` vendors, what `gk build` falls back to) must be
+# byte-identical to gas-analyzer's. Not part of `test`: it compares against whatever the
+# sibling checkout has checked out, which CI pins to an older crt.
+crt-check:
+	@test -n "$(GK_GUEST_CRT)" || { echo "no gas-analyzer guest dir: pass GK_GUEST_CRT=/abs/path"; exit 1; }
+	@for f in crt/crt0.S crt/gkvm.c crt/gkvm.h link.ld; do \
+		cmp guest-crt/$$f "$(GK_GUEST_CRT)/$$f" || exit 1; \
+	done
+	@echo "crt-check: tools/gk/guest-crt == $(GK_GUEST_CRT) (4 files)"
+
 need-gk-run:
 	@test -n "$(GK_RUN)" && test -x "$(GK_RUN)" || { \
 		echo "gk-run not found: build it (cargo build --release -p gas-analyzer-gkvm --bin gk-run) or pass GK_RUN=/abs/path"; exit 1; }
 
-.PHONY: test golden golden-check need-gk-run
+.PHONY: test golden golden-check crt-check need-gk-run

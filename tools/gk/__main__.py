@@ -14,9 +14,16 @@ Run from the solidity-sdk root:
 
     python3 tools/gk hash guest.elf
 
-`build` needs gk-guest-crt (gas-analyzer crates/gkvm/guest: --crt, GK_GUEST_CRT, or a
-sibling gas-analyzer checkout) and riscv64-unknown-elf-gcc or docker. `vectors` needs the
-gk-run sidecar (--gk-run or GK_RUN). Python standard library only.
+From a forge project that installed the sdk (outputs then hang off the project):
+
+    python3 lib/solidity-sdk/tools/gk init
+        scaffolds guest/ (vendored crt + hello.c), a sample consumer + shim-wired test,
+        [profile.gkvm-ffi], the gk-sdk/ remapping — never overwrites, safe to re-run
+    python3 lib/solidity-sdk/tools/gk build guest/hello.c
+
+`build` needs gk-guest-crt (--crt, GK_GUEST_CRT, the project's vendored guest/, else the
+copy bundled in tools/gk/guest-crt) and riscv64-unknown-elf-gcc or docker. `vectors` needs
+the gk-run sidecar (--gk-run or GK_RUN). Python standard library only.
 
 See src/examples/onchain-llm/UNBOUNDED_V3_NATIVE.md (§ Writing programs).
 """
@@ -27,6 +34,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import gk_build  # noqa: E402
+import gk_init  # noqa: E402
 import gk_vectors  # noqa: E402
 from gk_keccak import hex32, keccak256  # noqa: E402
 
@@ -43,9 +51,11 @@ def main(argv=None):
     b.add_argument('source', help='guest source (.c)')
     b.add_argument('--out', help='build dir (default cache/gkvm/build/<name>)')
     b.add_argument('--sol-out', help='binding dir (default src/gen)')
+    b.add_argument('--project', help='forge project to build into (default: the project the '
+                                     'cwd sits in; the sdk itself when there is none)')
     b.add_argument('--name', help='binding library name (default Gk<Source>)')
-    b.add_argument('--crt', help='gk-guest-crt dir (default $GK_GUEST_CRT, else the sibling '
-                                 'gas-analyzer checkout)')
+    b.add_argument('--crt', help="gk-guest-crt dir (default $GK_GUEST_CRT, else the project's "
+                                 "vendored guest/, else the sdk's bundled copy)")
     b.add_argument('--compiler', default='auto', choices=['auto', 'native', 'docker'])
     b.add_argument('--no-binding', action='store_true', help='skip the Solidity binding')
 
@@ -64,12 +74,28 @@ def main(argv=None):
     h = sub.add_parser('hash', help='print programHash = keccak256(ELF)')
     h.add_argument('elf')
 
+    i = sub.add_parser('init', help='scaffold a guest into an existing forge project '
+                                    '(never overwrites; safe to re-run)')
+    i.add_argument('project', nargs='?', default='.', help='forge project root (default: .)')
+    i.add_argument('--crt', help='gk-guest-crt dir to vendor (default $GK_GUEST_CRT, else the '
+                                 "sdk's bundled copy)")
+    i.add_argument('--sdk-path', help='where the project sees the sdk, project-relative '
+                                      '(default: derived from this checkout)')
+    i.add_argument('--compiler', default='auto', choices=['auto', 'native', 'docker'])
+    i.add_argument('--no-build', action='store_true',
+                   help='skip building the example guest (its binding is then missing until '
+                        '`gk build guest/hello.c`)')
+
     args = ap.parse_args(argv)
     try:
         if args.cmd == 'build':
+            project = args.project or gk_build.find_project(os.getcwd(), args.sdk_root)
             gk_build.build(args.source, args.sdk_root, out=args.out, sol_out=args.sol_out,
                            crt=args.crt, name=args.name, compiler=args.compiler,
-                           emit_binding=not args.no_binding)
+                           emit_binding=not args.no_binding, project=project)
+        elif args.cmd == 'init':
+            gk_init.init(args.project, args.sdk_root, crt=args.crt, compiler=args.compiler,
+                         build=not args.no_build, sdk_path=args.sdk_path)
         elif args.cmd == 'vectors':
             if bool(args.artifact) != bool(args.artifact_root):
                 raise gk_vectors.GkVectorsError(
@@ -84,7 +110,8 @@ def main(argv=None):
         else:
             with open(args.elf, 'rb') as f:
                 print(hex32(keccak256(f.read())))
-    except (gk_build.GkBuildError, gk_vectors.GkVectorsError, OSError) as e:
+    except (gk_build.GkBuildError, gk_init.GkInitError, gk_vectors.GkVectorsError,
+            OSError) as e:
         print('gk: %s' % e, file=sys.stderr)
         return 1
     return 0

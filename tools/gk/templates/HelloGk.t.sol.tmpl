@@ -1,0 +1,57 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.13;
+
+import {Test} from "forge-std/Test.sol";
+import {GKVM_ADDRESS} from "{{SDK_REMAP}}gkvm/GkVm.sol";
+import {GkVmUnavailable} from "{{SDK_REMAP}}gkvm/GkVmErrors.sol";
+import {GkVmFfiShim} from "{{SDK_REMAP}}gkvm/testing/GkVmFfiShim.sol";
+import {GkHello} from "{{BINDING_IMPORT}}";
+import {HelloGk} from "{{CONSUMER_IMPORT}}";
+
+/// @dev Runs the real guest through the `gk-run` sidecar. The shim-backed tests skip unless GK_RUN
+///      names the binary, and need the `gkvm-ffi` profile (the only place `ffi = true` lives):
+///        GK_RUN=$(command -v gk-run) FOUNDRY_PROFILE=gkvm-ffi forge test --match-contract HelloGkTest
+contract HelloGkTest is Test {
+    /// @dev written by `gk build guest/hello.c`; `forge clean` removes it — rebuild
+    string internal constant HELLO_ELF = "cache/gkvm/build/hello/guest.elf";
+    bytes internal constant HELLO_TAG = "GKVM-HELLO-V1\n";
+
+    HelloGk internal hello;
+    bool internal gkRunMissing;
+
+    event Greeted(bytes greeting);
+
+    modifier needsGkRun() {
+        vm.skip(gkRunMissing);
+        _;
+    }
+
+    function setUp() public {
+        string memory gkRun = vm.envOr("GK_RUN", string(""));
+        gkRunMissing = bytes(gkRun).length == 0;
+        if (gkRunMissing) return;
+        GkVmFfiShim shim = new GkVmFfiShim(gkRun);
+        bytes32 installed = shim.installProgram(HELLO_ELF);
+        assertEq(installed, GkHello.PROGRAM_HASH, "guest.elf != the binding: re-run gk build guest/hello.c");
+        hello = new HelloGk(address(shim));
+    }
+
+    function testPreviewReversesThePayload() public needsGkRun {
+        assertEq(hello.preview(hex"11223344"), abi.encodePacked(HELLO_TAG, hex"44332211"));
+    }
+
+    function testGreetStoresAndLogsTheAnswer() public needsGkRun {
+        bytes memory expected = abi.encodePacked(HELLO_TAG, "olleh");
+        vm.expectEmit(address(hello));
+        emit Greeted(expected);
+        hello.greet("hello");
+        assertEq(hello.lastGreeting(), expected);
+    }
+
+    /// @dev No gk-run needed: this is what EVERY chain without the precompile does today
+    function testRevertsUnavailableWithoutThePrecompile() public {
+        HelloGk production = new HelloGk(GKVM_ADDRESS);
+        vm.expectRevert(GkVmUnavailable.selector);
+        production.preview(hex"11223344");
+    }
+}
