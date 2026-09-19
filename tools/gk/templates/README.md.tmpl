@@ -32,11 +32,23 @@ Re-running `gk init` is safe: existing files are never overwritten.
 2. **Get `gk-run`**, the sidecar that executes guests (the same binary the operator path wraps).
    From a checkout of `gas-killer/gas-analyzer`:
 
-       cargo build --release -p gas-analyzer-gkvm --bin gk-run    # → target/release/gk-run
+       cargo install --locked --path crates/gkvm --bin gk-run    # → ~/.cargo/bin/gk-run
+
+   Keep `--locked`: the executor is a consensus pin and `Cargo.lock` is what holds its
+   dependency tree still (cargo may warn that some locked crates are yanked and suggest dropping
+   the flag — don't). This builds the x86_64 JIT tier. The JIT is x86_64-only; add
+   `--features portable-exec` for the portable interpreter, the tier operators treat as the
+   reference. Outputs and cycle counts are identical on both; the `"tier"` field of the JSON line
+   `gk-run` prints on stderr says which one you have. Both install as `gk-run` — pass
+   `--root <dir>` (→ `<dir>/bin/gk-run`) to keep them side by side.
+
+   Once the gkvm crate is on gas-analyzer's default branch, no checkout is needed:
+
+       cargo install --locked --git https://github.com/gas-killer/gas-analyzer gas-analyzer-gkvm --bin gk-run
 
 3. **Run the tests** under the ffi profile:
 
-       GK_RUN=/abs/path/to/gk-run FOUNDRY_PROFILE=gkvm-ffi forge test --match-contract HelloGkTest
+       GK_RUN=$(command -v gk-run) FOUNDRY_PROFILE=gkvm-ffi forge test --match-contract HelloGkTest
 
    Without `GK_RUN` the shim-backed tests skip (plain `forge test` stays green and ffi-free).
 

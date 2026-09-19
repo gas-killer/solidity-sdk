@@ -334,8 +334,11 @@ class Init(unittest.TestCase):
         self.assertIn('import {GkVmFfiShim} from "gk-sdk/gkvm/testing/GkVmFfiShim.sol";', test)
         self.assertIn('import {GkHello} from "../src/gen/GkHello.sol";', test)
         self.assertIn('import {HelloGk} from "../src/HelloGk.sol";', test)
-        self.assertIn('python3 lib/solidity-sdk/tools/gk build guest/hello.c',
-                      files['guest/README.md'].decode())
+        readme = files['guest/README.md'].decode()
+        self.assertIn('python3 lib/solidity-sdk/tools/gk build guest/hello.c', readme)
+        # the verified gk-run install story: lockfile-pinned, both tiers named
+        self.assertIn('cargo install --locked --path crates/gkvm --bin gk-run', readme)
+        self.assertIn('--features portable-exec', readme)
         for name, body in files.items():
             self.assertNotIn(b'{{', body, name)
 
