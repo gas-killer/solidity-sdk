@@ -7,7 +7,7 @@ fs_permissions = [{ access = "read", path = "./test/fixtures" }]
 gas_limit = "18446744073709551615"
 memory_limit = 134217728
 
-# TEST ONLY — gkvm ffi shim (test/GkVmFfiShim.sol): shells out to the `gk-run` sidecar.
+# TEST ONLY — gkvm ffi shim (src/gkvm/testing/GkVmFfiShim.sol): shells out to the `gk-run` sidecar.
 # `ffi = true` lives here and nowhere else; the shim tests skip themselves unless GK_RUN
 # names the binary:  GK_RUN=/path/to/gk-run FOUNDRY_PROFILE=gkvm-ffi forge test
 [profile.gkvm-ffi]

@@ -15,7 +15,7 @@ import {
     GkVmFfiShimMalformedInput,
     GkVmFfiShimProgramNotInstalled,
     GkVmFfiShimArtifactNotInstalled
-} from "./GkVmFfiShim.sol";
+} from "../src/gkvm/testing/GkVmFfiShim.sol";
 
 /// @dev Runs real guests through `gk-run`; every test skips unless GK_RUN names the binary:
 ///        GK_RUN=/path/to/gk-run FOUNDRY_PROFILE=gkvm-ffi forge test --match-contract GkVmFfiShimTest

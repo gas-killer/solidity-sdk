@@ -2,14 +2,14 @@
 pragma solidity ^0.8.12;
 
 import {Vm} from "forge-std/Vm.sol";
-import {GKVM_OK_TAG} from "../src/gkvm/GkVm.sol";
+import {GKVM_OK_TAG} from "../GkVm.sol";
 import {
     GkGuestTrap,
     GkGuestOutOfCycles,
     GkVmInputOverflow,
     GkVmOutputOverflow,
     GkVmStaticOnly
-} from "../src/gkvm/GkVmErrors.sol";
+} from "../GkVmErrors.sol";
 
 /// @notice The wire input is shorter than programHash (32) || artifactRoot (32)
 error GkVmFfiShimMalformedInput();
@@ -28,7 +28,9 @@ error GkVmFfiShimEnvFailure(int32 exitCode, bytes stderr);
 /// @title GkVmFfiShim
 /// @notice Forge-test stand-in for the gkvm precompile: decodes the wire format and runs the
 ///         same `gk-run` sidecar binary the operator path wraps, through `vm.tryFfi`
-/// @dev TEST ONLY — needs `ffi = true` (the `gkvm-ffi` profile in foundry.toml). Deploy at any
+/// @dev TEST ONLY — lives under `src/gkvm/testing/` (not `test/`) so a project that
+///      `forge install`s the sdk can import it; never deploy it on a chain.
+///      Needs `ffi = true` (the `gkvm-ffi` profile in foundry.toml). Deploy at any
 ///      address and inject it into the consumer's constructor in place of `GKVM_ADDRESS`; production
 ///      bytecode carries zero ffi paths. See src/examples/onchain-llm/UNBOUNDED_V3_NATIVE.md
 ///      (§ Foundry integration, Phase A).

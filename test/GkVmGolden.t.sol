@@ -4,7 +4,7 @@ pragma solidity ^0.8.12;
 import {Test} from "forge-std/Test.sol";
 import {GKVM_OK_TAG} from "../src/gkvm/GkVm.sol";
 import {GkGuestTrap, GkGuestOutOfCycles, GkVmInputOverflow, GkVmOutputOverflow} from "../src/gkvm/GkVmErrors.sol";
-import {GkVmFfiShim} from "./GkVmFfiShim.sol";
+import {GkVmFfiShim} from "../src/gkvm/testing/GkVmFfiShim.sol";
 
 /// @dev Golden parity: the `*_vectors.json` fixtures are written by `gk vectors` from DIRECT
 ///      `gk-run` invocations (`make -C tools/gk golden`); here every vector is replayed through
