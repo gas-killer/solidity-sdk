@@ -6,6 +6,7 @@
 #                      committed ones byte for byte, then the forge ffi suites replay them
 #                      through GkVmFfiShim (shim output ≡ direct gk-run)
 #   make crt-check     bundled guest-crt/ is byte-identical to gas-analyzer's gk-guest-crt
+#   make quickstart-proof  the README quickstart replayed in a scratch dir outside the repo
 #
 # GK_RUN        gk-run sidecar binary       (default: sibling gas-analyzer release build)
 # GK_GUEST_CRT  gk-guest-crt + link.ld dir  (default: sibling gas-analyzer crates/gkvm/guest)
@@ -61,8 +62,15 @@ crt-check:
 	done
 	@echo "crt-check: tools/gk/guest-crt == $(GK_GUEST_CRT) (4 files)"
 
+# The clean-directory proof: fresh forge project outside every checkout, only the commands
+# written in README.md + the scaffolded guest/README.md. Installs THIS checkout's HEAD commit
+# (SDK_SRC= takes the published `forge install` route instead); network + a recursive
+# submodule fetch, so not part of `test`. KEEP=1 keeps the scratch project.
+quickstart-proof:
+	GAS_ANALYZER="$(GAS_ANALYZER)" bash quickstart-proof.sh
+
 need-gk-run:
 	@test -n "$(GK_RUN)" && test -x "$(GK_RUN)" || { \
 		echo "gk-run not found: build it (cargo build --release -p gas-analyzer-gkvm --bin gk-run) or pass GK_RUN=/abs/path"; exit 1; }
 
-.PHONY: test golden golden-check crt-check need-gk-run
+.PHONY: test golden golden-check crt-check quickstart-proof need-gk-run
