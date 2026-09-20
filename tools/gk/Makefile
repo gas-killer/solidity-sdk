@@ -18,8 +18,10 @@
 #   make zero-glue             regenerate test/fixtures/gkvm/native_tasks.json (the forge leg)
 #   make zero-glue-check       answer.py → gk build → forge test → gas-analyzer's local executor:
 #                              same StateUpdate bytes on both legs, no hand-written marshalling
+#   make zero-glue-proof       … from fresh clones of both repos in a scratch dir, running only
+#                              the commands written in src/examples/onchain-llm-native/README.md
 #
-# GK_RUN        gk-run sidecar binary       (default: sibling gas-analyzer release build)
+# GK_RUN       gk-run sidecar binary       (default: sibling gas-analyzer release build)
 # GK_GUEST_CRT  gk-guest-crt + link.ld dir  (default: sibling gas-analyzer crates/gkvm/guest)
 # GK_MPY_SRC    MicroPython at the pinned commit, for the Python-guest build tests (default:
 #               sibling gas-analyzer target/gkvm-micropython/src — its `make fetch`; the
@@ -177,10 +179,18 @@ zero-glue-check: native-example-check zero-glue-tasks
 		cargo test -p gas-analyzer-evmsketch --lib $(ZERO_GLUE_CARGO_FLAGS) gkvm_native -- --include-ignored
 	@echo "zero-glue-check: PASS — answer.py → gk build → forge test → local executor, same bytes"
 
+# The fresh-checkout proof of the same loop: both repos cloned (their HEAD commits) into a
+# scratch dir outside every checkout, only the commands written in the example's README.md.
+# Cold on purpose — submodule + MicroPython fetches, a from-scratch cargo build of gk-run and
+# of gas-analyzer's evmsketch test target — so tens of minutes, and not part of `test`.
+# KEEP=1 keeps the scratch clones.
+zero-glue-proof:
+	GAS_ANALYZER_SRC="$(GAS_ANALYZER)" bash zero-glue-proof.sh
+
 need-gk-run:
 	@test -n "$(GK_RUN)" && test -x "$(GK_RUN)" || { \
 		echo "gk-run not found: build it (cargo build --release -p gas-analyzer-gkvm --bin gk-run) or pass GK_RUN=/abs/path"; exit 1; }
 
 .PHONY: test golden golden-check crt-check port-check quickstart-proof native-example native-example-check \
 	native-stories-artifacts native-stories native-stories-check zero-glue-tasks zero-glue zero-glue-check \
-	need-gk-run
+	zero-glue-proof need-gk-run

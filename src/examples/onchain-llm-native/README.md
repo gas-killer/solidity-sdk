@@ -47,6 +47,24 @@ the real gkvm precompile with the same image installed. Both legs must produce t
 bytes — including the revert data of the task whose guest raises `ValueError`. What an operator
 would sign for this consumer is therefore a function of `answer.py` and the consumer alone.
 
+From fresh checkouts, the whole loop is these commands and nothing else. Needs `git`, `forge`,
+`python3`, `cargo`, `make`, docker and network — the sdk's submodules and, on the first
+`gk build`, MicroPython v1.29.0 (into `cache/gkvm/micropython/src`) are fetched from GitHub.
+Until this work is on the default branches, `<branch>` is `Rubydusa/gkvm-m5-dx` for the sdk and
+`Rubydusa/gkvm-m5-local-exec` for gas-analyzer; the two checkouts must be siblings.
+
+```bash
+git clone --branch <branch> https://github.com/gas-killer/solidity-sdk
+git clone --branch <branch> https://github.com/gas-killer/gas-analyzer
+cd solidity-sdk
+git submodule update --init --recursive
+(cd ../gas-analyzer && cargo build --release -p gas-analyzer-gkvm --bin gk-run)
+make -C tools/gk zero-glue-check
+```
+
+`make -C tools/gk zero-glue-proof` replays exactly that in a scratch directory outside every
+checkout (cloning the local checkouts' HEAD commits) and refuses any command not written above.
+
 ## stories260K, in Python
 
 The second guest is a model: engine v1 of [`../onchain-llm`](../onchain-llm) — stories260K,
