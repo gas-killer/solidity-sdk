@@ -83,3 +83,24 @@ shape tested without `via_ir`; expect "stack too deep" not far beyond it.
 ## In this repository
 
 `make -C tools/gk test | golden | golden-check | crt-check | port-check` — see the Makefile header.
+
+## Hosts: x86_64 Linux, aarch64, Apple silicon
+
+Everything above runs unchanged on an Apple-silicon Mac (verified 2026-09-20: macOS, Docker
+Desktop, forge 1.5.1, system bash 3.2) — `make test`, `golden-check`, `crt-check`,
+`port-check`, `zero-glue-check`, `native-stories-check`, and `gk init` / `gk build` for C and
+Python guests. What differs by host:
+
+- **One executor tier.** SP1's jit is x86_64-only; elsewhere a plain `cargo build --release -p
+  gas-analyzer-gkvm --bin gk-run` already yields the portable interpreter (`gk-run --print-tier`
+  → `interp`), no feature flag needed. Outputs and cycle counts are identical across tiers and
+  architectures — the committed vectors were recorded on x86_64 and replay bit for bit on arm64
+  — but the interpreter is roughly 10× slower than the jit, so wall-clock numbers taken on such
+  a host say nothing about the jit tier.
+- **Guest builds go through Docker** on every host (`ubuntu:24.04` +
+  `gcc-riscv64-unknown-elf`); Docker Desktop must be running. `programHash` is host-independent:
+  an arm64 container produces the same ELF bytes as an x86_64 one, and the frozen-module order
+  of Python guests is fixed by a generated manifest rather than by the filesystem.
+- **Fixtures that carry contract bytecode** (`native_tasks.json`) are compared with
+  `fixture_diff.py`, which ignores solc's metadata trailer: its hash covers forge's
+  auto-detected remappings, which depend on which nested submodules are checked out.
