@@ -95,8 +95,10 @@ Python guests. What differs by host:
   gas-analyzer-gkvm --bin gk-run` already yields the portable interpreter (`gk-run --print-tier`
   → `interp`), no feature flag needed. Outputs and cycle counts are identical across tiers and
   architectures — the committed vectors were recorded on x86_64 and replay bit for bit on arm64
-  — but the interpreter is roughly 10× slower than the jit, so wall-clock numbers taken on such
-  a host say nothing about the jit tier.
+  — but the interpreter is several times slower than the jit (measured with the 80,000,157-cycle
+  bench guest: ≈ 259 Mcycles/s on an M-series Mac's interpreter, against ≈ 72 interp / ≈ 780 jit
+  on the x86_64 laptop the vectors were recorded on), so wall-clock numbers taken on such a
+  host say nothing about the jit tier.
 - **Guest builds go through Docker** on every host (`ubuntu:24.04` +
   `gcc-riscv64-unknown-elf`); Docker Desktop must be running. `programHash` is host-independent:
   an arm64 container produces the same ELF bytes as an x86_64 one, and the frozen-module order
