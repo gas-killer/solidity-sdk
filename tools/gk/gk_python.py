@@ -255,16 +255,28 @@ def _exec_call(indent, prefix, payload, tail):
     return '%s%sGkVm.exec(\n%s\n%s)%s' % (pad, prefix, args, pad, tail)
 
 
-def _exec_statement(payload, decode_types):
+def _exec_statement(payload, decode_types, brace_own_line):
     """The body of `call`, the way forge fmt lays it out. decode_types None = return the
-    raw output. Layouts beyond these (an abi.encode(...) or a type tuple that alone
-    overflows the line) still compile; they are just not fmt-clean."""
+    raw output; brace_own_line = the signature wrapped its attributes and left `{` on a line
+    of its own. Layouts beyond these (an abi.encode(...) or a type tuple that alone
+    overflows the line) still compile; they are just not fmt-clean.
+
+    All of it measured against forge fmt 1.5.1 (the fmt test holds both sides of every
+    boundary), none of it read from its source."""
+    exec_ = 'GkVm.exec(gkvm, PROGRAM_HASH, artifactRoot, %s)' % payload
+    expr = exec_ if decode_types is None else 'abi.decode(%s, %s)' % (exec_, decode_types)
+    if len('        return ' + expr) <= SOL_LINE:
+        return '        return %s;\n' % expr
+    # under a `{` of its own, the expression moves whole under `return` before it breaks
+    # inside (three columns gained) — here the `;` may NOT overhang. Under
+    # `) internal view … {` it never moves.
+    if brace_own_line and len('            ' + expr + ';') <= SOL_LINE:
+        return '        return\n            %s;\n' % expr
     if decode_types is None:
         return _exec_call(8, 'return ', payload, ';') + '\n'
-    one = ('        return abi.decode(GkVm.exec(gkvm, PROGRAM_HASH, artifactRoot, %s), %s)'
-           % (payload, decode_types))
-    if len(one) <= SOL_LINE:
-        return one + ';\n'
+    args = '            %s, %s' % (exec_, decode_types)
+    if len(args) <= SOL_LINE:
+        return '        return abi.decode(\n%s\n        );\n' % args
     return ('        return abi.decode(\n%s\n            %s\n        );\n'
             % (_exec_call(12, '', payload, ','), decode_types))
 
@@ -281,11 +293,12 @@ def render_binding(name, program_hash, source_rel, import_path, sig):
     # call, and solc's legacy codegen reaches 16 deep — a `payload` / `result` local each
     # costs one of them (6 params + 5 returns compiled only in this shape).
     if returns is None:
-        ret_decl = 'bytes memory'
-        body = _exec_statement(payload, None)
+        ret_decl, decode_types = 'bytes memory', None
     else:
         ret_decl = ', '.join(_memory(t) for t in returns)
-        body = _exec_statement(payload, '(%s)' % ', '.join(returns))
+        decode_types = '(%s)' % ', '.join(returns)
+    signature = _signature(params, ret_decl)
+    body = _exec_statement(payload, decode_types, signature.endswith('\n    {'))
     py_sig = 'main(%s) -> %s' % (
         ', '.join(p for p, _, _ in sig['params']),
         'bytes (raw output)' if returns is None else '(%s), ABI-encoded by the guest' % ', '.join(returns))
@@ -304,7 +317,7 @@ def render_binding(name, program_hash, source_rel, import_path, sig):
             '    }\n'
             '}\n' % {'name': name, 'source': source_rel, 'import_path': import_path,
                      'py_sig': py_sig, 'hash': program_hash,
-                     'signature': _signature(params, ret_decl), 'body': body})
+                     'signature': signature, 'body': body})
 
 
 # --- upstream MicroPython: fetch, pin ----------------------------------------------------

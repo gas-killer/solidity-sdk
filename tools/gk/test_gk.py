@@ -540,6 +540,12 @@ def main(prompt_ids: list[int], max_new: int) -> bytes:
 '''
 
 
+# two parameters keep `function call(…)` on one line, so the attributes wrap and `{` lands on
+# a line of its own — forge fmt lays the body out differently under that signature
+BRACE_GUEST = 'def main(%s: list[int], %s: int) -> tuple[str, list[int]]:\n    pass\n'
+BRACE_RAW_GUEST = 'def main(%s: int, %s: int) -> bytes:\n    pass\n'
+
+
 class PythonUnits(unittest.TestCase):
     def analyze(self, text):
         return gk_python.analyze(text, 'answer.py')
@@ -730,6 +736,29 @@ class PythonUnits(unittest.TestCase):
             # one character past DecodeEdge: 120 columns before the `;`
             'DecodeEdge1': 'def main(a: int, b: bool, c: bytes, d: str, e: list[list[str]], '
                            'ff: list[int]) -> tuple[str, list[bytes]]:\n    pass\n',
+            # past it, under a `) internal view returns (…) {` signature: abi.decode( / both
+            # arguments on one line / ) — up to 120 columns of them (f × 17), then one per line
+            'DecodeArgs1': 'def main(a: int, b: bool, c: bytes, d: str, e: list[list[str]], '
+                           'fff: list[int]) -> tuple[str, list[bytes]]:\n    pass\n',
+            'DecodeArgsEdge': 'def main(a: int, b: bool, c: bytes, d: str, e: list[list[str]], '
+                              '%s: list[int]) -> tuple[str, list[bytes]]:\n    pass\n' % ('f' * 17),
+            'DecodeArgsEdge1': 'def main(a: int, b: bool, c: bytes, d: str, e: list[list[str]], '
+                               '%s: list[int]) -> tuple[str, list[bytes]]:\n    pass\n' % ('f' * 18),
+            # under a signature that left `{` on its own line (what the sdk's onchain-llm-native
+            # answer.py gets), by the two names' total length: 13 = one line at the limit;
+            # 14, 15 = `return` alone with the whole decode under it (15 = 120 columns WITH its
+            # `;`); 16 = back to abi.decode( / arguments / ); 28 = 120 columns of arguments;
+            # 29 = one per line
+            'BraceEdge': BRACE_GUEST % ('a' * 7, 'b' * 6),
+            'BraceUnder1': BRACE_GUEST % ('a' * 7, 'b' * 7),
+            'BraceUnder2': BRACE_GUEST % ('a' * 8, 'b' * 7),
+            'BraceArgs': BRACE_GUEST % ('a' * 8, 'b' * 8),
+            'BraceArgsEdge': BRACE_GUEST % ('a' * 14, 'b' * 14),
+            'BraceArgsEdge1': BRACE_GUEST % ('a' * 15, 'b' * 14),
+            # the raw return under the same signature, one and two columns past the line:
+            # `return` alone as well (forge 1.5.1 refused exec( / arguments / ) for the first)
+            'BraceRaw1': BRACE_RAW_GUEST % ('a' * 24, 'b' * 23),
+            'BraceRaw2': BRACE_RAW_GUEST % ('a' * 24, 'b' * 24),
             # the wrapped decode's inner exec(...) line: 120 columns before its `,`
             'CommaEdge': 'def main(%s: int, %s: int, %s: int) -> tuple[str, list[int], bool]:\n'
                          '    pass\n' % ('a' * 16, 'b' * 16, 'c' * 15),

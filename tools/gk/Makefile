@@ -9,6 +9,9 @@
 #   make port-check    bundled guest-crt/micropython/ (the MicroPython gkvm port) likewise, and
 #                      gk_python.py pins the same upstream commits as gas-analyzer's Makefile
 #   make quickstart-proof  the README quickstart replayed in a scratch dir outside the repo
+#   make native-example        rebuild src/examples/onchain-llm-native's guest + binding
+#   make native-example-check  … the committed binding must not move, then its forge suites
+#                              with the real guest behind GkVmFfiShim
 #
 # GK_RUN        gk-run sidecar binary       (default: sibling gas-analyzer release build)
 # GK_GUEST_CRT  gk-guest-crt + link.ld dir  (default: sibling gas-analyzer crates/gkvm/guest)
@@ -93,8 +96,26 @@ port-check:
 quickstart-proof:
 	GAS_ANALYZER="$(GAS_ANALYZER)" bash quickstart-proof.sh
 
+# src/examples/onchain-llm-native: guest/answer.py → guest.elf + gen/GkAnswer.sol. The binding
+# is committed, the 1 MB ELF is not — `native-example` rebuilds it (docker + the pinned
+# MicroPython) and regenerates the binding IN PLACE; `native-example-check` then requires that
+# the committed binding did not move (the build reproduces its PROGRAM_HASH) and runs the
+# consumer's suites with the real guest behind GkVmFfiShim.
+NATIVE_DIR := src/examples/onchain-llm-native
+NATIVE_OUT := cache/gkvm/build/native-answer
+
+native-example:
+	cd $(SDK_ROOT) && GK_GUEST_CRT= GK_MPY_SRC="$(GK_MPY_SRC)" $(PYTHON) -B tools/gk build \
+		$(NATIVE_DIR)/guest/answer.py --out $(NATIVE_OUT) --sol-out $(NATIVE_DIR)/gen
+
+native-example-check: need-gk-run native-example
+	cd $(SDK_ROOT) && git diff --exit-code -- $(NATIVE_DIR)/gen
+	@echo "native-example-check: rebuilt answer.py == committed gen/GkAnswer.sol"
+	cd $(SDK_ROOT) && GK_RUN="$(GK_RUN)" FOUNDRY_PROFILE=gkvm-ffi \
+		$(FORGE) test --match-contract 'GasKillerChatNative'
+
 need-gk-run:
 	@test -n "$(GK_RUN)" && test -x "$(GK_RUN)" || { \
 		echo "gk-run not found: build it (cargo build --release -p gas-analyzer-gkvm --bin gk-run) or pass GK_RUN=/abs/path"; exit 1; }
 
-.PHONY: test golden golden-check crt-check port-check quickstart-proof need-gk-run
+.PHONY: test golden golden-check crt-check port-check quickstart-proof native-example native-example-check need-gk-run
