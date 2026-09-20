@@ -171,7 +171,7 @@ zero-glue: native-example zero-glue-tasks
 
 zero-glue-check: native-example-check zero-glue-tasks
 	$(PYTHON) -B test_gk.py -v ZeroGlue
-	cd $(SDK_ROOT) && diff -u $(GOLDEN_DIR)/native_tasks.json $(ZERO_GLUE_SCRATCH)/native_tasks.json
+	cd $(SDK_ROOT) && $(PYTHON) -B tools/gk/fixture_diff.py $(GOLDEN_DIR)/native_tasks.json $(ZERO_GLUE_SCRATCH)/native_tasks.json
 	@echo "zero-glue-check: forge-leg tasks == committed fixture"
 	diff -u $(SDK_ROOT)/$(GOLDEN_DIR)/native_tasks.json "$(ZERO_GLUE_CONSUMER_COPY)"
 	@echo "zero-glue-check: gas-analyzer's copy == committed fixture"

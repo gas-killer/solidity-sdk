@@ -44,7 +44,7 @@ BUNDLED_CRT_HASH = '0xbf6dc72fd3b710101efae1c9e25a244c56b7dbf34802ea0134099a13cc
 # guest.json's `portHash` / `runtimeHash`: keccak256 of tools/gk/guest-crt/micropython's files
 # (gk_python.PORT_FILES order; synced from gas-analyzer's crates/gkvm/guest/micropython) and of
 # tools/gk/runtime/gk_runtime.py.
-BUNDLED_PORT_HASH = '0xbb1a8e98ecac2cff74745c0997efdd9f1c1793fe90fcc97739c1875d714eae48'
+BUNDLED_PORT_HASH = '0xdd4394f61355a361fa9081ddf5227f2cd1a95f4669949830fc3a70175e86d348'
 RUNTIME_HASH = '0x981736a36ea28cddb17019a257cb6c047b1692640029cb97b3af1b23e9b86b4f'
 
 # what `forge init` writes
