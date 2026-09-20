@@ -339,6 +339,16 @@ class Init(unittest.TestCase):
         # the verified gk-run install story: lockfile-pinned, both tiers named
         self.assertIn('cargo install --locked --path crates/gkvm --bin gk-run', readme)
         self.assertIn('--features portable-exec', readme)
+        # the honesty note: emulation only today, what live execution still needs, where it is tracked
+        self.assertIn('## What works today, and what does not', readme)
+        self.assertIn('`requiresGuestVm`', readme)
+        self.assertIn('`test/HelloGk.t.sol` asserts exactly that', readme)
+        for url in ('https://github.com/gas-killer/gas-analyzer/issues/197',
+                    'https://github.com/gas-killer/service/issues/451',
+                    'https://github.com/BreadchainCoop/sp1-contract-call/issues/22',
+                    'https://github.com/gas-killer/solidity-sdk/issues/84',
+                    'https://github.com/gas-killer/solidity-sdk/pull/85'):
+            self.assertIn(url, readme)
         for name, body in files.items():
             self.assertNotIn(b'{{', body, name)
 

@@ -61,9 +61,43 @@ links libgcc), no I/O beyond the hostcalls in `guest/crt/gkvm.h`.
 
 `forge clean` deletes `cache/` and with it the built ELFs — rebuild with `gk build`.
 
-## What runs where
+## What works today, and what does not
 
-In forge tests the guest really executes — through `GkVmFfiShim`, a test-only contract that
-shells out to `gk-run`. That is an emulation of the precompile for development. On a live chain
-the precompile address is an empty account, so `GkVm.exec` reverts `GkVmUnavailable`; guests
-run for real only inside Gas Killer operators' simulation environment.
+**Today a fresh project gets the forge emulation, and nothing else.** Read this before planning
+around a guest.
+
+What you have: in forge tests the guest really executes — `GkVmFfiShim`, a test-only contract,
+decodes the precompile's wire format and shells out to `gk-run`. Outputs, typed guest errors and
+cycle counts are the real ones (the sdk's golden fixtures hold the shim bit-identical to direct
+`gk-run`). One thing is approximate: unless the test pins it with `setCycleLimit`, the shim
+derives the cycle budget from `gasleft()` after its own overhead, so an out-of-cycles boundary
+does not sit exactly where an operator would put it.
+
+What you do not have: execution anywhere outside forge tests. The gkvm precompile never exists
+on a chain — not on mainnet, a testnet, a fork, or a vanilla anvil. Its address is an empty
+account there, so `GkVm.exec` reverts `GkVmUnavailable` (the always-on test in
+`{{TEST}}/HelloGk.t.sol` asserts exactly that). This is by design: guests run only inside Gas
+Killer operators' pinned simulation environment, and the chain only ever sees the signed state
+diff. For a consumer to be served by live operators, all of the following still has to happen —
+none of it has shipped:
+
+1. **The operator-side precompile lands.** It exists on unmerged gas-analyzer branches stacked
+   on draft PRs; a released gas-analyzer does not know the gkvm address.
+   Tracking: [gas-killer/gas-analyzer#197](https://github.com/gas-killer/gas-analyzer/issues/197).
+2. **The service rolls it out.** Operators must run the `local` executor with your guest ELF
+   (and any artifacts) installed, addressed by `programHash`. Not started.
+   Tracking: [gas-killer/service#451](https://github.com/gas-killer/service/issues/451).
+3. **Your consumer is registered with `requiresGuestVm`.** Without that gate, an operator that
+   lacks the program does not fail — it deterministically simulates the `GkVmUnavailable`
+   revert and could sign *that* as the transition. With it, such an operator abstains. The
+   gate is part of the same service work (#451).
+4. **Disputes.** Guest results are not yet bound into the fraud-proof path, so a guest-backed
+   transition is not slashable today. Tracking:
+   [BreadchainCoop/sp1-contract-call#22](https://github.com/BreadchainCoop/sp1-contract-call/issues/22).
+
+The design itself is still a draft
+([gas-killer/solidity-sdk#85](https://github.com/gas-killer/solidity-sdk/pull/85); sdk tracking:
+[gas-killer/solidity-sdk#84](https://github.com/gas-killer/solidity-sdk/issues/84)). The wire
+format, error selectors and address this scaffold uses are the pinned ones, but until the spec
+is ratified treat a `programHash` as provisional: it commits to the vendored crt, and a crt
+change changes every hash.
