@@ -3,8 +3,10 @@
 The sidecar- and compiler-dependent cases skip themselves when GK_RUN /
 GK_GUEST_CRT are absent, mirroring the forge shim tests.
 """
+import ast
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -948,6 +950,58 @@ class PythonEndToEnd(unittest.TestCase):
         print('  ' + ffi.stdout.decode().strip().replace('\n', '\n  '), file=sys.stderr)
         self.assertEqual(ffi.returncode, 0)
         self.assertIn(b'4 passed; 0 failed; 0 skipped', ffi.stdout)
+
+
+NATIVE_EXAMPLE = os.path.join(SDK_ROOT, 'src', 'examples', 'onchain-llm-native')
+
+
+def strip_sol_comments(text):
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+    return re.sub(r'//[^\n]*', '', text)
+
+
+class ZeroGlue(unittest.TestCase):
+    """The static half of `make zero-glue-check`: between answer.py's type hints and the
+    consumer's `GkAnswer.call(...)` nobody marshals anything by hand. (The dynamic half is the
+    forge leg ≡ gas-analyzer's local executor, byte for byte.)"""
+
+    def setUp(self):
+        with open(os.path.join(NATIVE_EXAMPLE, 'guest', 'answer.py')) as f:
+            self.guest = f.read()
+        with open(os.path.join(NATIVE_EXAMPLE, 'GasKillerChatNative.sol')) as f:
+            self.consumer = strip_sol_comments(f.read())
+        with open(os.path.join(NATIVE_EXAMPLE, 'gen', 'GkAnswer.sol')) as f:
+            self.binding = f.read()
+
+    def test_the_guest_is_plain_typed_python(self):
+        tree = ast.parse(self.guest)
+        imports = [n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]
+        self.assertEqual(imports, [], 'answer.py imports nothing: no gkvm, no codec, no struct')
+        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        self.assertFalse(names & {'gkvm', 'gk_runtime', 'struct', 'bytes', 'bytearray'},
+                         'answer.py touches no hostcall, codec or byte buffer')
+        sig = gk_python.analyze(self.guest, 'answer.py')
+        self.assertEqual([(n, t) for _, n, t in sig['params']],
+                         [('promptIds', 'uint256[]'), ('maxNew', 'uint256')])
+        self.assertEqual(tuple(sig['returns']), ('string', 'uint256[]'))
+
+    def test_the_binding_is_the_generators_output_verbatim(self):
+        program_hash = re.search(r'PROGRAM_HASH = (0x[0-9a-f]{64});', self.binding).group(1)
+        sig = gk_python.analyze(self.guest, 'answer.py')
+        self.assertEqual(
+            gk_python.render_binding('GkAnswer', program_hash,
+                                     'src/examples/onchain-llm-native/guest/answer.py',
+                                     '../../../gkvm/GkVm.sol', sig),
+            self.binding)
+
+    def test_the_consumer_only_calls_the_binding(self):
+        for glue in ('abi.decode', 'GkVm.exec', 'staticcall', 'GKVM_OK_TAG', 'abi.encodeWithSelector',
+                     'abi.encodeCall'):
+            self.assertNotIn(glue, self.consumer, 'hand-written marshalling: ' + glue)
+        self.assertEqual(self.consumer.count('GkAnswer.call(gkvm, artifactRoot, promptIds, maxNewTokens)'), 2)
+        # the only encoding left is the chat-root fold, which is the consumer's own commitment
+        fold = self.consumer.index('function computeChatRoot')
+        self.assertNotIn('abi.encode', self.consumer[:fold])
 
 
 if __name__ == '__main__':

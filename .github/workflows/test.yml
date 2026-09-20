@@ -95,8 +95,9 @@ jobs:
 
     env:
       # needs a gk-run with `--schedule sequential` + `--print-artifact-root`, and the
-      # MicroPython port the bundled copy is checked against (branch Rubydusa/gkvm-l1-micropython)
-      GK_RUN_REF: 0cc2fd4a0d97355344af8a6b9ae08c071e2eae86
+      # MicroPython port the bundled copy is checked against, and the zero-glue check's
+      # local-executor leg (branch Rubydusa/gkvm-m5-local-exec, on Rubydusa/gkvm-l1-micropython)
+      GK_RUN_REF: cc6693ec1cb42769996f011a71f8d4b076d4640f
 
     steps:
       - uses: actions/checkout@v4
@@ -125,8 +126,10 @@ jobs:
       - name: Bundled crt + MicroPython port == gas-analyzer's
         run: make -C tools/gk crt-check port-check GAS_ANALYZER="$GITHUB_WORKSPACE/gas-analyzer"
 
-      - name: answer.py — binding reproduces, consumer suites over the real guest
-        run: make -C tools/gk native-example-check GAS_ANALYZER="$GITHUB_WORKSPACE/gas-analyzer"
+      # native-example-check (binding reproduces, consumer suites over the real guest), then
+      # the recorded tasks == the fixture == gas-analyzer's copy, then gas-analyzer's local executor
+      - name: answer.py — zero-glue check (gk build → forge → local executor, same bytes)
+        run: make -C tools/gk zero-glue-check GAS_ANALYZER="$GITHUB_WORKSPACE/gas-analyzer"
 
       - name: stories260k.py — binding reproduces, the donor's story bit for bit
         run: make -C tools/gk native-stories-check GAS_ANALYZER="$GITHUB_WORKSPACE/gas-analyzer"

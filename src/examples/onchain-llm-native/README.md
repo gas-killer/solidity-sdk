@@ -29,6 +29,24 @@ ffi suite asserts the rebuilt image hashes to exactly that. Without `GK_RUN`,
 `GasKillerChatNativeFfiTest` skips and `GasKillerChatNativeTest` runs the consumer against a
 stand-in precompile that answers with the Solidity reference.
 
+### The zero-glue check
+
+```bash
+# answer.py → gk build → forge test → gas-analyzer's local executor, in one target
+# (needs the sibling gas-analyzer checkout on a branch that has crates/evmsketch/src/tests/gkvm_native.rs)
+make -C tools/gk zero-glue-check
+```
+
+"Nothing is written by hand" is checked, not asserted: the target lints `answer.py` (no
+imports, no hostcall, no codec), the consumer (no `abi.decode`, no `GkVm.exec`, its only
+`abi.encode` is the chat-root fold) and the binding (byte-equal to the generator's output for
+those type hints); records six `ask` tasks of the real guest behind `GkVmFfiShim` as encoded
+`StateUpdate` payloads (`test/fixtures/gkvm/native_tasks.json`, with the consumer's production
+bytecode); and then has gas-analyzer's local executor run that bytecode and calldata against
+the real gkvm precompile with the same image installed. Both legs must produce the same
+bytes — including the revert data of the task whose guest raises `ValueError`. What an operator
+would sign for this consumer is therefore a function of `answer.py` and the consumer alone.
+
 ## stories260K, in Python
 
 The second guest is a model: engine v1 of [`../onchain-llm`](../onchain-llm) — stories260K,

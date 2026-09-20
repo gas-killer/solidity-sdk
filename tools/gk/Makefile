@@ -15,6 +15,9 @@
 #   make native-stories-check  the stories260K Python demo: artifacts from the donor's hex
 #                              fixtures, guest + binding rebuilt (binding must not move), then
 #                              the real guest must tell the donor's story bit for bit
+#   make zero-glue             regenerate test/fixtures/gkvm/native_tasks.json (the forge leg)
+#   make zero-glue-check       answer.py → gk build → forge test → gas-analyzer's local executor:
+#                              same StateUpdate bytes on both legs, no hand-written marshalling
 #
 # GK_RUN        gk-run sidecar binary       (default: sibling gas-analyzer release build)
 # GK_GUEST_CRT  gk-guest-crt + link.ld dir  (default: sibling gas-analyzer crates/gkvm/guest)
@@ -146,9 +149,38 @@ native-stories-check: need-gk-run native-stories-artifacts native-stories
 	cd $(SDK_ROOT) && GK_RUN="$(GK_RUN)" GK_STORIES_LONG="$(if $(STORIES_LONG),true,false)" \
 		FOUNDRY_PROFILE=gkvm-ffi $(FORGE) test --match-contract 'GasKillerLLMNative' -vv
 
+# The zero-glue check: answer.py → gk build → forge test → local executor, nothing marshalled
+# by hand in between. `zero-glue-tasks` records every `ask` task of the real guest behind
+# GkVmFfiShim as the encoded StateUpdate payload (test/examples/OnchainChatNativeZeroGlue.t.sol);
+# `zero-glue-check` rebuilds the guest (the committed binding must not move), lints the three
+# hand-written files for marshalling, requires the recorded tasks to equal the committed
+# fixture AND gas-analyzer's copy, then runs gas-analyzer's local executor over the same
+# bytecode + calldata against the real precompile with the rebuilt image installed.
+# ZERO_GLUE_CARGO_FLAGS="--features gkvm-portable-exec" takes the consensus interpreter.
+ZERO_GLUE_SCRATCH := cache/gkvm/zero-glue
+ZERO_GLUE_CONSUMER_COPY := $(GAS_ANALYZER)/crates/evmsketch/tests/fixtures/gkvm/native_tasks.json
+
+zero-glue-tasks: need-gk-run
+	cd $(SDK_ROOT) && GK_RUN="$(GK_RUN)" FOUNDRY_PROFILE=gkvm-ffi \
+		$(FORGE) test --match-contract GasKillerChatNativeZeroGlueTest
+
+zero-glue: native-example zero-glue-tasks
+	cp $(SDK_ROOT)/$(ZERO_GLUE_SCRATCH)/native_tasks.json $(SDK_ROOT)/$(GOLDEN_DIR)/native_tasks.json
+
+zero-glue-check: native-example-check zero-glue-tasks
+	$(PYTHON) -B test_gk.py -v ZeroGlue
+	cd $(SDK_ROOT) && diff -u $(GOLDEN_DIR)/native_tasks.json $(ZERO_GLUE_SCRATCH)/native_tasks.json
+	@echo "zero-glue-check: forge-leg tasks == committed fixture"
+	diff -u $(SDK_ROOT)/$(GOLDEN_DIR)/native_tasks.json "$(ZERO_GLUE_CONSUMER_COPY)"
+	@echo "zero-glue-check: gas-analyzer's copy == committed fixture"
+	cd $(GAS_ANALYZER) && GK_NATIVE_ANSWER_ELF="$(SDK_ROOT)/$(NATIVE_OUT)/guest.elf" \
+		cargo test -p gas-analyzer-evmsketch --lib $(ZERO_GLUE_CARGO_FLAGS) gkvm_native -- --include-ignored
+	@echo "zero-glue-check: PASS — answer.py → gk build → forge test → local executor, same bytes"
+
 need-gk-run:
 	@test -n "$(GK_RUN)" && test -x "$(GK_RUN)" || { \
 		echo "gk-run not found: build it (cargo build --release -p gas-analyzer-gkvm --bin gk-run) or pass GK_RUN=/abs/path"; exit 1; }
 
 .PHONY: test golden golden-check crt-check port-check quickstart-proof native-example native-example-check \
-	native-stories-artifacts native-stories native-stories-check need-gk-run
+	native-stories-artifacts native-stories native-stories-check zero-glue-tasks zero-glue zero-glue-check \
+	need-gk-run
