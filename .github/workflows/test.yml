@@ -83,3 +83,50 @@ jobs:
 
       - name: Golden fixture diff + shim replay
         run: make -C tools/gk golden-check GAS_ANALYZER="$GITHUB_WORKSPACE/gas-analyzer"
+
+  # Python guests of src/examples/onchain-llm-native, rebuilt from source (docker + MicroPython
+  # at the pinned commit, cloned on first use): the committed bindings must reproduce, then the
+  # consumers' suites run with the real guests behind GkVmFfiShim — stories260k.py must tell the
+  # engine-v1 donor's 32-token story bit for bit over the mounted weight blobs (≈ 9.5G guest
+  # cycles; the 200-token vector is opt-in, STORIES_LONG=1).
+  gkvm-python-guests:
+    name: gkvm python guests
+    runs-on: ubuntu-latest
+
+    env:
+      # needs a gk-run with `--schedule sequential` + `--print-artifact-root`, and the
+      # MicroPython port the bundled copy is checked against (branch Rubydusa/gkvm-l1-micropython)
+      GK_RUN_REF: 0cc2fd4a0d97355344af8a6b9ae08c071e2eae86
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/checkout@v4
+        with:
+          repository: gas-killer/gas-analyzer
+          ref: ${{ env.GK_RUN_REF }}
+          path: gas-analyzer
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gas-analyzer
+
+      - name: Build gk-run
+        working-directory: gas-analyzer
+        run: cargo build --release -p gas-analyzer-gkvm --bin gk-run
+
+      - name: Bundled crt + MicroPython port == gas-analyzer's
+        run: make -C tools/gk crt-check port-check GAS_ANALYZER="$GITHUB_WORKSPACE/gas-analyzer"
+
+      - name: answer.py — binding reproduces, consumer suites over the real guest
+        run: make -C tools/gk native-example-check GAS_ANALYZER="$GITHUB_WORKSPACE/gas-analyzer"
+
+      - name: stories260k.py — binding reproduces, the donor's story bit for bit
+        run: make -C tools/gk native-stories-check GAS_ANALYZER="$GITHUB_WORKSPACE/gas-analyzer"

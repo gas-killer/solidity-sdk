@@ -12,6 +12,9 @@
 #   make native-example        rebuild src/examples/onchain-llm-native's guest + binding
 #   make native-example-check  … the committed binding must not move, then its forge suites
 #                              with the real guest behind GkVmFfiShim
+#   make native-stories-check  the stories260K Python demo: artifacts from the donor's hex
+#                              fixtures, guest + binding rebuilt (binding must not move), then
+#                              the real guest must tell the donor's story bit for bit
 #
 # GK_RUN        gk-run sidecar binary       (default: sibling gas-analyzer release build)
 # GK_GUEST_CRT  gk-guest-crt + link.ld dir  (default: sibling gas-analyzer crates/gkvm/guest)
@@ -114,8 +117,38 @@ native-example-check: need-gk-run native-example
 	cd $(SDK_ROOT) && GK_RUN="$(GK_RUN)" FOUNDRY_PROFILE=gkvm-ffi \
 		$(FORGE) test --match-contract 'GasKillerChatNative'
 
+# src/examples/onchain-llm-native's second guest: guest/stories260k.py, the engine-v1 donor
+# (../onchain-llm, stories260K) as a Python guest over artifact-mounted weights. The blobs are
+# the donor's committed hex fixtures, byte for byte; `native-stories-artifacts` writes them as
+# the two binary files gk-run mounts and prints their manifest-v3 root.
+STORIES_OUT := cache/gkvm/build/native-stories
+STORIES_ART := cache/gkvm/artifacts/stories260k
+STORIES_HEX := test/fixtures/onchain-llm
+UNHEX := import sys; open(sys.argv[2], "wb").write(bytes.fromhex(open(sys.argv[1]).read().strip()))
+
+native-stories-artifacts: need-gk-run
+	cd $(SDK_ROOT) && mkdir -p $(STORIES_ART) && \
+		$(PYTHON) -c '$(UNHEX)' $(STORIES_HEX)/weights.hex $(STORIES_ART)/weights.bin && \
+		$(PYTHON) -c '$(UNHEX)' $(STORIES_HEX)/tokenizer.hex $(STORIES_ART)/tokenizer.bin
+	cd $(SDK_ROOT) && "$(GK_RUN)" --print-artifact-root \
+		--artifact $(STORIES_ART)/weights.bin,$(STORIES_ART)/tokenizer.bin
+
+native-stories:
+	cd $(SDK_ROOT) && GK_GUEST_CRT= GK_MPY_SRC="$(GK_MPY_SRC)" $(PYTHON) -B tools/gk build \
+		$(NATIVE_DIR)/guest/stories260k.py --out $(STORIES_OUT) --sol-out $(NATIVE_DIR)/gen
+
+# The demo's gate: the committed binding reproduces, then the consumer's suites — the real
+# guest over the mounted blobs must tell the donor's 32-token story bit for bit (≈ 9.5G guest
+# cycles). STORIES_LONG=1 adds the 200-token vector (≈ 100G cycles: minutes, tier-dependent).
+native-stories-check: need-gk-run native-stories-artifacts native-stories
+	cd $(SDK_ROOT) && git diff --exit-code -- $(NATIVE_DIR)/gen/GkStories260k.sol
+	@echo "native-stories-check: rebuilt stories260k.py == committed gen/GkStories260k.sol"
+	cd $(SDK_ROOT) && GK_RUN="$(GK_RUN)" GK_STORIES_LONG="$(if $(STORIES_LONG),true,false)" \
+		FOUNDRY_PROFILE=gkvm-ffi $(FORGE) test --match-contract 'GasKillerLLMNative' -vv
+
 need-gk-run:
 	@test -n "$(GK_RUN)" && test -x "$(GK_RUN)" || { \
 		echo "gk-run not found: build it (cargo build --release -p gas-analyzer-gkvm --bin gk-run) or pass GK_RUN=/abs/path"; exit 1; }
 
-.PHONY: test golden golden-check crt-check port-check quickstart-proof native-example native-example-check need-gk-run
+.PHONY: test golden golden-check crt-check port-check quickstart-proof native-example native-example-check \
+	native-stories-artifacts native-stories native-stories-check need-gk-run
