@@ -6,15 +6,21 @@
 #                      committed ones byte for byte, then the forge ffi suites replay them
 #                      through GkVmFfiShim (shim output ≡ direct gk-run)
 #   make crt-check     bundled guest-crt/ is byte-identical to gas-analyzer's gk-guest-crt
+#   make port-check    bundled guest-crt/micropython/ (the MicroPython gkvm port) likewise, and
+#                      gk_python.py pins the same upstream commits as gas-analyzer's Makefile
 #   make quickstart-proof  the README quickstart replayed in a scratch dir outside the repo
 #
 # GK_RUN        gk-run sidecar binary       (default: sibling gas-analyzer release build)
 # GK_GUEST_CRT  gk-guest-crt + link.ld dir  (default: sibling gas-analyzer crates/gkvm/guest)
+# GK_MPY_SRC    MicroPython at the pinned commit, for the Python-guest build tests (default:
+#               sibling gas-analyzer target/gkvm-micropython/src — its `make fetch`; the
+#               tests skip without it rather than clone)
 
 SDK_ROOT := $(abspath $(CURDIR)/../..)
 GAS_ANALYZER ?= $(abspath $(SDK_ROOT)/../gas-analyzer)
 GK_RUN ?= $(wildcard $(GAS_ANALYZER)/target/release/gk-run)
 GK_GUEST_CRT ?= $(wildcard $(GAS_ANALYZER)/crates/gkvm/guest)
+GK_MPY_SRC ?= $(wildcard $(GAS_ANALYZER)/target/gkvm-micropython/src)
 PYTHON ?= python3
 FORGE ?= forge
 
@@ -37,8 +43,11 @@ cd $(SDK_ROOT) && $(PYTHON) -B tools/gk vectors $(GOLDEN_DIR)/bench-c.elf --gk-r
 	--input 0x00000000000f4240 --input 0x000000000000000a --input 0x01
 endef
 
+# TESTS= narrows the run (unittest names, e.g. TESTS="PythonUnits PythonBuild");
+# GK_TEST_FETCH=1 lets PythonFetch clone MicroPython from github (off by default: network)
 test:
-	GK_RUN="$(GK_RUN)" GK_GUEST_CRT="$(GK_GUEST_CRT)" $(PYTHON) -B test_gk.py -v
+	GK_RUN="$(GK_RUN)" GK_GUEST_CRT="$(GK_GUEST_CRT)" GK_MPY_SRC="$(GK_MPY_SRC)" \
+		GK_TEST_FETCH="$(GK_TEST_FETCH)" $(PYTHON) -B test_gk.py -v $(TESTS)
 
 golden: need-gk-run
 	$(call golden_vectors,$(GOLDEN_DIR))
@@ -62,6 +71,21 @@ crt-check:
 	done
 	@echo "crt-check: tools/gk/guest-crt == $(GK_GUEST_CRT) (4 files)"
 
+# Same lockstep for the MicroPython gkvm port (linked into every Python guest) and for the
+# upstream pin: a port or interpreter that differs from gas-analyzer's is a different
+# programHash for the same script.
+PORT_FILES := port.mk manifest.py mpconfigport.h mphalport.h gkport.h qstrdefsport.h main.c modgkvm.c gk_libc.c
+port-check:
+	@test -n "$(GK_GUEST_CRT)" || { echo "no gas-analyzer guest dir: pass GK_GUEST_CRT=/abs/path"; exit 1; }
+	@for f in $(PORT_FILES); do \
+		cmp guest-crt/micropython/$$f "$(GK_GUEST_CRT)/micropython/$$f" || exit 1; \
+	done
+	@for pin in MPY_TAG MPY_COMMIT MPY_LIB_COMMIT; do \
+		want=$$(sed -n "s/^$$pin := //p" "$(GK_GUEST_CRT)/micropython/Makefile"); \
+		grep -q "^$$pin = '$$want'$$" gk_python.py || { echo "port-check: $$pin != gas-analyzer's ($$want)"; exit 1; }; \
+	done
+	@echo "port-check: tools/gk/guest-crt/micropython == $(GK_GUEST_CRT)/micropython (9 files + 3 pins)"
+
 # The clean-directory proof: fresh forge project outside every checkout, only the commands
 # written in README.md + the scaffolded guest/README.md. Installs THIS checkout's HEAD commit
 # (SDK_SRC= takes the published `forge install` route instead); network + a recursive
@@ -73,4 +97,4 @@ need-gk-run:
 	@test -n "$(GK_RUN)" && test -x "$(GK_RUN)" || { \
 		echo "gk-run not found: build it (cargo build --release -p gas-analyzer-gkvm --bin gk-run) or pass GK_RUN=/abs/path"; exit 1; }
 
-.PHONY: test golden golden-check crt-check quickstart-proof need-gk-run
+.PHONY: test golden golden-check crt-check port-check quickstart-proof need-gk-run

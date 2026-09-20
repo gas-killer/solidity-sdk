@@ -8,6 +8,12 @@ Run from the solidity-sdk root:
         program   0x…  (keccak256 of the ELF)
         emitted   src/gen/GkHello.sol
 
+    python3 tools/gk build guest/answer.py
+        frozen    answer.py + gk_runtime.py + gk_entry.py  →  micropython-gkvm image
+        linked    cache/gkvm/build/answer/guest.elf
+        program   0x…
+        emitted   src/gen/GkAnswer.sol      (call(gkvm, artifactRoot, <main()'s arguments>))
+
     python3 tools/gk vectors cache/gkvm/build/hello/guest.elf --name hello \\
         --input 0x11223344 --input 0x
         emitted   test/fixtures/hello_vectors.json
@@ -22,7 +28,8 @@ From a forge project that installed the sdk (outputs then hang off the project):
     python3 lib/solidity-sdk/tools/gk build guest/hello.c
 
 `build` needs gk-guest-crt (--crt, GK_GUEST_CRT, the project's vendored guest/, else the
-copy bundled in tools/gk/guest-crt) and riscv64-unknown-elf-gcc or docker. `vectors` needs
+copy bundled in tools/gk/guest-crt) and riscv64-unknown-elf-gcc or docker; a Python guest
+also needs MicroPython at the pinned commit (--mpy-src, GK_MPY_SRC, else cloned). `vectors` needs
 the gk-run sidecar (--gk-run or GK_RUN). Python standard library only.
 
 See src/examples/onchain-llm/UNBOUNDED_V3_NATIVE.md (§ Writing programs).
@@ -48,7 +55,7 @@ def main(argv=None):
     sub = ap.add_subparsers(dest='cmd', required=True)
 
     b = sub.add_parser('build', help='guest source -> guest.elf + programHash + Solidity binding')
-    b.add_argument('source', help='guest source (.c)')
+    b.add_argument('source', help='guest source (.c, or .py — see gk_python.py)')
     b.add_argument('--out', help='build dir (default cache/gkvm/build/<name>)')
     b.add_argument('--sol-out', help='binding dir (default src/gen)')
     b.add_argument('--project', help='forge project to build into (default: the project the '
@@ -58,6 +65,14 @@ def main(argv=None):
                                  "vendored guest/, else the sdk's bundled copy)")
     b.add_argument('--compiler', default='auto', choices=['auto', 'native', 'docker'])
     b.add_argument('--no-binding', action='store_true', help='skip the Solidity binding')
+    b.add_argument('--mpy-src', help='Python guests: MicroPython checkout at the pinned commit '
+                                     '(default $GK_MPY_SRC, else fetched into '
+                                     'cache/gkvm/micropython/src)')
+    b.add_argument('--heap-bytes', type=int, help='Python guests: MicroPython heap baked into '
+                                                  'the image (default 16777216; part of '
+                                                  'programHash, and startup cycles scale with it)')
+    b.add_argument('--stack-bytes', type=int, help='Python guests: C-stack limit of the '
+                                                   'recursion check (default 1048576)')
 
     v = sub.add_parser('vectors', help='run a guest under gk-run, write golden vectors')
     v.add_argument('elf', help='guest ELF (from `gk build`)')
@@ -92,7 +107,9 @@ def main(argv=None):
             project = args.project or gk_build.find_project(os.getcwd(), args.sdk_root)
             gk_build.build(args.source, args.sdk_root, out=args.out, sol_out=args.sol_out,
                            crt=args.crt, name=args.name, compiler=args.compiler,
-                           emit_binding=not args.no_binding, project=project)
+                           emit_binding=not args.no_binding, project=project,
+                           mpy_src=args.mpy_src, heap_bytes=args.heap_bytes,
+                           stack_bytes=args.stack_bytes)
         elif args.cmd == 'init':
             gk_init.init(args.project, args.sdk_root, crt=args.crt, compiler=args.compiler,
                          build=not args.no_build, sdk_path=args.sdk_path)

@@ -1,8 +1,8 @@
 """`gk build` — guest source -> guest.elf -> programHash -> Solidity binding.
 
-C guest path (UNBOUNDED_V3 M2). The Python path (mpy-cross freeze into the
-MicroPython gkvm port, binding generated from type hints) is M5 and rejected
-here with a pointer rather than half-implemented.
+C guests (UNBOUNDED_V3 M2) build here; Python guests (M5: mpy-cross freeze into
+the MicroPython gkvm port, binding generated from main()'s type hints) share
+this entry point and the outputs, the path itself is gk_python.py.
 
 programHash = keccak256(guest.elf), so the build must be a pure function of
 (guest source, gk-guest-crt, compiler, flags). Two things make it one:
@@ -24,6 +24,7 @@ import re
 import shutil
 import subprocess
 
+import gk_python
 from gk_keccak import hex32, keccak256
 
 CC = 'riscv64-unknown-elf-gcc'
@@ -210,13 +211,19 @@ def _sol_import_path(sol_out, sdk_root, project=None):
     return rel if rel.startswith('.') else './' + rel
 
 
-def check_compiler(compiler):
-    """Resolve 'auto' and fail before any work when nothing can compile a guest."""
+def check_compiler(compiler, prefer_docker=False):
+    """Resolve 'auto' and fail before any work when nothing can compile a guest.
+
+    `prefer_docker`: Python guests — only the docker leg compiles MicroPython at fixed source
+    paths (and is the tested one), so 'auto' takes it whenever docker exists.
+    """
     if compiler not in ('auto', 'native', 'docker'):
         raise GkBuildError('--compiler is auto, native or docker')
     if compiler == 'auto':
         if not (shutil.which(CC) or shutil.which('docker')):
             raise GkBuildError('neither %s nor docker is on PATH' % CC)
+        if prefer_docker and shutil.which('docker'):
+            return 'docker'
         return 'native' if shutil.which(CC) else 'docker'
     tool = CC if compiler == 'native' else 'docker'
     if not shutil.which(tool):
@@ -224,38 +231,89 @@ def check_compiler(compiler):
     return compiler
 
 
+def _build_python(source, stem, sig, crt, out, compiler, log, root, mpy_src, heap_bytes,
+                  stack_bytes):
+    """The MicroPython leg of build(): -> (staged ELF path, cc version, guest.json extras)."""
+    port = gk_python.resolve_port()
+    mpy_src = gk_python.resolve_mpy_src(mpy_src, root, log=log)
+    stage_dir = os.path.join(out, 'stage')
+    guest_py, extra = gk_python.stage(source, sig, crt, CRT_FILES, port, stage_dir)
+    args = gk_python.make_args(guest_py, extra, heap_bytes, stack_bytes)
+    compile_leg = gk_python.compile_native if compiler == 'native' else gk_python.compile_docker
+    cc_version = compile_leg(stage_dir, mpy_src, args, CC)
+    frozen = [os.path.basename(source)] + (['gk_runtime.py', 'gk_entry.py'] if sig else [])
+    log('  frozen    %s  →  micropython-gkvm image (MicroPython %s, %s, %s)'
+        % (' + '.join(frozen), gk_python.MPY_TAG, compiler, cc_version))
+    extras = {
+        'guest': 'python-typed' if sig else 'python-raw',
+        'micropython': {'tag': gk_python.MPY_TAG, 'commit': gk_python.MPY_COMMIT},
+        'portHash': hex32(keccak256(b''.join(_read(os.path.join(port, f))
+                                             for f in gk_python.PORT_FILES))),
+        'makeArgs': args,
+    }
+    if sig:
+        extras['runtimeHash'] = hex32(keccak256(_read(gk_python.RUNTIME)))
+        extras['signature'] = {
+            'params': [{'name': p, 'solName': n, 'type': t} for p, n, t in sig['params']],
+            'returns': None if sig['returns'] is None else list(sig['returns']),
+        }
+    return gk_python.built_elf(stage_dir, guest_py), cc_version, extras
+
+
 def build(source, sdk_root, out=None, sol_out=None, crt=None, name=None,
-          compiler='auto', emit_binding=True, log=print, project=None):
+          compiler='auto', emit_binding=True, log=print, project=None, mpy_src=None,
+          heap_bytes=None, stack_bytes=None):
     """Build one guest. Returns the guest.json dict (also written next to the ELF).
 
     `project` = the forge project to build into (see find_project); default outputs, the
     vendored crt and the binding's import path hang off it instead of the sdk root.
+    `mpy_src` / `heap_bytes` / `stack_bytes` are Python-guest only (see gk_python.py).
     """
     root = project or sdk_root
     if not os.path.isfile(source):
         raise GkBuildError('no such guest source: %s' % source)
     stem, ext = os.path.splitext(os.path.basename(source))
-    if ext == '.py':
-        raise GkBuildError(
-            'Python guests need the MicroPython gkvm port (campaign lane L1 / milestone M5); '
-            'this gk builds C guests')
-    if ext != '.c':
-        raise GkBuildError('unsupported guest source %r (expected a .c file)' % ext)
-    compiler = check_compiler(compiler)
+    if ext not in ('.c', '.py'):
+        raise GkBuildError('unsupported guest source %r (expected a .c or .py file)' % ext)
+    python = ext == '.py'
+    sig = None
+    if python:
+        # everything the script itself can get wrong fails here, before any toolchain runs
+        try:
+            sig = gk_python.analyze(_read(source).decode('utf-8'), os.path.basename(source))
+            gk_python.check_stem(stem, sig is not None)
+        except UnicodeDecodeError:
+            raise GkBuildError('%s is not UTF-8' % source)
+        except gk_python.GkPythonError as e:
+            raise GkBuildError(str(e))
+    elif mpy_src or heap_bytes is not None or stack_bytes is not None:
+        raise GkBuildError('--mpy-src / --heap-bytes / --stack-bytes apply to Python guests only')
+    compiler = check_compiler(compiler, prefer_docker=python)
 
     crt = resolve_crt(crt, project)
     out = out or os.path.join(root, 'cache', 'gkvm', 'build', stem)
-    stage_dir = os.path.join(out, 'stage')
-    guest_rel = stage(source, crt, stage_dir)
-
-    cc_version = (compile_native if compiler == 'native' else compile_docker)(stage_dir, guest_rel)
+    extras = {}
+    if python:
+        try:
+            built, cc_version, extras = _build_python(source, stem, sig, crt, out, compiler,
+                                                      log, root, mpy_src, heap_bytes,
+                                                      stack_bytes)
+        except gk_python.GkPythonError as e:
+            raise GkBuildError(str(e))
+    else:
+        stage_dir = os.path.join(out, 'stage')
+        guest_rel = stage(source, crt, stage_dir)
+        compile_leg = compile_native if compiler == 'native' else compile_docker
+        cc_version = compile_leg(stage_dir, guest_rel)
+        built = os.path.join(stage_dir, 'guest.elf')
+        log('  compiled  %s + gk-guest-crt  (%s, %s)'
+            % (os.path.basename(source), compiler, cc_version))
 
     elf_path = os.path.join(out, 'guest.elf')
-    shutil.copyfile(os.path.join(stage_dir, 'guest.elf'), elf_path)
+    shutil.copyfile(built, elf_path)
     with open(elf_path, 'rb') as f:
         elf = f.read()
     program_hash = hex32(keccak256(elf))
-    log('  compiled  %s + gk-guest-crt  (%s, %s)' % (os.path.basename(source), compiler, cc_version))
     log('  linked    %s (riscv64im, %d bytes)' % (os.path.relpath(elf_path), len(elf)))
     log('  program   %s  (keccak256 of the ELF)' % program_hash)
 
@@ -270,6 +328,9 @@ def build(source, sdk_root, out=None, sol_out=None, crt=None, name=None,
         'cflags': CFLAGS,
         'compiler': compiler,
     }
+    if python:
+        del info['cflags']  # the port's flags live in port.mk, committed to by portHash
+        info.update(extras)
 
     if emit_binding:
         sol_out = sol_out or os.path.join(root, forge_dirs(root)[0], 'gen')
@@ -279,9 +340,12 @@ def build(source, sdk_root, out=None, sol_out=None, crt=None, name=None,
         source_rel = os.path.relpath(source, root).replace(os.sep, '/')
         if source_rel.startswith('..'):
             source_rel = os.path.basename(source)
+        import_path = _sol_import_path(sol_out, sdk_root, project)
         with open(sol_path, 'w') as f:
-            f.write(render_binding(name, program_hash, source_rel,
-                                   _sol_import_path(sol_out, sdk_root, project)))
+            if sig:
+                f.write(gk_python.render_binding(name, program_hash, source_rel, import_path, sig))
+            else:
+                f.write(render_binding(name, program_hash, source_rel, import_path))
         info['binding'] = name
         log('  emitted   %s' % os.path.relpath(sol_path))
 
