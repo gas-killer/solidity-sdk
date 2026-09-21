@@ -39,7 +39,7 @@ HELLO_11223344 = '0x474b564d2d48454c4c4f2d56310a44332211'
 # keccak256(crt0.S || gkvm.c || gkvm.h || link.ld) of tools/gk/guest-crt — guest.json's
 # `crtHash` for every guest built from the bundled copy. Synced from gas-analyzer f733d2b
 # (the keccak fast-path crt).
-BUNDLED_CRT_HASH = '0xbf6dc72fd3b710101efae1c9e25a244c56b7dbf34802ea0134099a13cc3b81d1'
+BUNDLED_CRT_HASH = '0x8c07f4c501a5d2e9d4d1459b87cc06837806c159c27e30c3ea7c785c21f4d3e9'
 
 # guest.json's `portHash` / `runtimeHash`: keccak256 of tools/gk/guest-crt/micropython's files
 # (gk_python.PORT_FILES order; synced from gas-analyzer's crates/gkvm/guest/micropython) and of
@@ -797,7 +797,7 @@ payload = gkvm.input()
 gkvm.output(b"GKVM-HELLO-V1\\n")
 gkvm.output(bytes(reversed(payload)))
 '''
-HELLO_PY_PROGRAM_HASH = '0x951aafd594c660f21820e50d98df0eb61d5d32d663212cf6f2408bd1cd145443'
+HELLO_PY_PROGRAM_HASH = '0x4055c9d63f25f2c67dc5f3bc8df3932d433d49a8f4e42cdf3220f631852374e7'
 HELLO_PY_CYCLES = 593442
 
 
