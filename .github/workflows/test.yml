@@ -50,11 +50,11 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # gas-analyzer commit the gk-run sidecar is built from (branch Rubydusa/gkvm-m6-host — the
+      # gas-analyzer commit the gk-run sidecar is built from (branch RonTuretzky/gkvm-m6-host — the
       # same ref as gkvm-python-guests: `make test` compares the bundled crt against this
       # checkout's, so it must carry the current gk-guest-crt); bump together with the fixtures
       # when the runner changes
-      GK_RUN_REF: 25fc8043530e99ba2519b38a094d1234498605b0
+      GK_RUN_REF: f8e6bebc797ee62c49cd2ed1805322458561bcad
 
     steps:
       - uses: actions/checkout@v4
@@ -98,9 +98,9 @@ jobs:
     env:
       # needs a gk-run with `--schedule sequential` + `--print-artifact-root`, and the
       # MicroPython port the bundled copy is checked against, and the zero-glue check's
-      # local-executor leg (branch Rubydusa/gkvm-m6-host; ≥ 25fc804 for the port's explicit
+      # local-executor leg (branch RonTuretzky/gkvm-m6-host; ≥ 25fc804 for the explicit
       # freeze order, which port-check compares against the bundled copy)
-      GK_RUN_REF: 25fc8043530e99ba2519b38a094d1234498605b0
+      GK_RUN_REF: f8e6bebc797ee62c49cd2ed1805322458561bcad
 
     steps:
       - uses: actions/checkout@v4
