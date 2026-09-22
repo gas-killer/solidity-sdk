@@ -214,11 +214,11 @@ parity: parity-tasks
 	cp $(SDK_ROOT)/$(PARITY_SCRATCH)/parity_tasks.json $(SDK_ROOT)/$(GOLDEN_DIR)/parity_tasks.json
 
 parity-check: parity-tasks
-	cd $(SDK_ROOT) && diff -u $(GOLDEN_DIR)/parity_tasks.json $(PARITY_SCRATCH)/parity_tasks.json
+	cd $(SDK_ROOT) && $(PYTHON) -B tools/gk/fixture_diff.py $(GOLDEN_DIR)/parity_tasks.json $(PARITY_SCRATCH)/parity_tasks.json
 	@echo "parity-check: ffi-leg tasks == committed fixture"
 	@# the precompile leg reads its own copy; when that checkout carries one, it must be this one
 	@if [ -f "$(PARITY_CONSUMER_COPY)" ]; then \
-		diff -u $(SDK_ROOT)/$(GOLDEN_DIR)/parity_tasks.json "$(PARITY_CONSUMER_COPY)" || exit 1; \
+		$(PYTHON) -B $(SDK_ROOT)/tools/gk/fixture_diff.py $(SDK_ROOT)/$(GOLDEN_DIR)/parity_tasks.json "$(PARITY_CONSUMER_COPY)" || exit 1; \
 		echo "parity-check: gas-analyzer's copy == committed fixture"; fi
 
 need-gk-run:
