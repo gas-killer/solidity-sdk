@@ -377,11 +377,23 @@ def resolve_port(port=None):
 # --- stage + compile ---------------------------------------------------------------------
 
 
+def empty_dir(stage_dir):
+    """Clear a stage dir IN PLACE rather than rmtree + recreate: Docker Desktop's file sharing
+    caches the bind-mounted directory by inode, and a directory recreated at the same path
+    seconds after a build shows up empty inside the next container ("crt/crt0.S: No such
+    file") — seen on a second `gk init` of the same project."""
+    if os.path.isdir(stage_dir):
+        for entry in os.listdir(stage_dir):
+            path = os.path.join(stage_dir, entry)
+            shutil.rmtree(path) if os.path.isdir(path) and not os.path.islink(path) else os.remove(path)
+    else:
+        os.makedirs(stage_dir)
+
+
 def stage(source, sig, crt, crt_files, port, stage_dir):
     """Lay out gas-analyzer's guest dir: crt/, link.ld, micropython/ (the port) with the
     scripts under micropython/guest/. Returns (GUEST_PY, GUEST_PY_EXTRA), port-relative."""
-    if os.path.isdir(stage_dir):
-        shutil.rmtree(stage_dir)
+    empty_dir(stage_dir)
     guest_dir = os.path.join(stage_dir, 'micropython', 'guest')
     os.makedirs(os.path.join(stage_dir, 'crt'))
     os.makedirs(guest_dir)

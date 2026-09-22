@@ -124,8 +124,7 @@ def resolve_crt(crt, project=None):
 
 def stage(source, crt, stage_dir):
     """Lay out the fixed build tree; returns the guest path relative to it."""
-    if os.path.isdir(stage_dir):
-        shutil.rmtree(stage_dir)
+    gk_python.empty_dir(stage_dir)
     os.makedirs(os.path.join(stage_dir, 'crt'))
     os.makedirs(os.path.join(stage_dir, 'guest'))
     for f in CRT_FILES:

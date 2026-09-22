@@ -20,6 +20,10 @@
 #                              same StateUpdate bytes on both legs, no hand-written marshalling
 #   make zero-glue-proof       … from fresh clones of both repos in a scratch dir, running only
 #                              the commands written in src/examples/onchain-llm-native/README.md
+#   make parity        regenerate test/fixtures/gkvm/parity_tasks.json: every golden vector as
+#                      a GkVmParityConsumer task through GkVmFfiShim, recorded as the encoded
+#                      StateUpdate payload (the ffi leg of gas-analyzer's ffi ≡ precompile suite)
+#   make parity-check  fresh parity tasks must equal the committed fixture byte for byte
 #
 # GK_RUN       gk-run sidecar binary       (default: sibling gas-analyzer release build)
 # GK_GUEST_CRT  gk-guest-crt + link.ld dir  (default: sibling gas-analyzer crates/gkvm/guest)
@@ -37,6 +41,8 @@ FORGE ?= forge
 
 GOLDEN_DIR := test/fixtures/gkvm
 GOLDEN_SCRATCH := cache/gkvm/golden
+PARITY_SCRATCH := cache/gkvm/parity
+PARITY_CONSUMER_COPY := $(GAS_ANALYZER)/crates/evmsketch/tests/fixtures/gkvm/parity_tasks.json
 
 # $(1) = output dir, relative to the sdk root. Every vector set the golden suite replays
 # (test/GkVmGolden.t.sol lists the same three files). bench-c retires 8 instructions per
@@ -186,6 +192,20 @@ zero-glue-check: native-example-check zero-glue-tasks
 # KEEP=1 keeps the scratch clones.
 zero-glue-proof:
 	GAS_ANALYZER_SRC="$(GAS_ANALYZER)" bash zero-glue-proof.sh
+parity-tasks: need-gk-run
+	cd $(SDK_ROOT) && GK_RUN="$(GK_RUN)" FOUNDRY_PROFILE=gkvm-ffi \
+		$(FORGE) test --match-contract GkVmParityTest
+
+parity: parity-tasks
+	cp $(SDK_ROOT)/$(PARITY_SCRATCH)/parity_tasks.json $(SDK_ROOT)/$(GOLDEN_DIR)/parity_tasks.json
+
+parity-check: parity-tasks
+	cd $(SDK_ROOT) && diff -u $(GOLDEN_DIR)/parity_tasks.json $(PARITY_SCRATCH)/parity_tasks.json
+	@echo "parity-check: ffi-leg tasks == committed fixture"
+	@# the precompile leg reads its own copy; when that checkout carries one, it must be this one
+	@if [ -f "$(PARITY_CONSUMER_COPY)" ]; then \
+		diff -u $(SDK_ROOT)/$(GOLDEN_DIR)/parity_tasks.json "$(PARITY_CONSUMER_COPY)" || exit 1; \
+		echo "parity-check: gas-analyzer's copy == committed fixture"; fi
 
 need-gk-run:
 	@test -n "$(GK_RUN)" && test -x "$(GK_RUN)" || { \
@@ -193,4 +213,4 @@ need-gk-run:
 
 .PHONY: test golden golden-check crt-check port-check quickstart-proof native-example native-example-check \
 	native-stories-artifacts native-stories native-stories-check zero-glue-tasks zero-glue zero-glue-check \
-	zero-glue-proof need-gk-run
+	zero-glue-proof parity-tasks parity parity-check need-gk-run

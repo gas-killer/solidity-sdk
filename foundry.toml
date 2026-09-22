@@ -19,6 +19,8 @@ fs_permissions = [
 ]
 # test/fixtures/gkvm/native_tasks.json records GasKillerChatNative's runtime bytecode, so this
 # profile's compiler output must not drift
+# test/fixtures/gkvm/parity_tasks.json records GkVmParityConsumer's runtime bytecode (and a
+# guest-gas constant tuned to it), so this profile's compiler output must not drift
 solc_version = "0.8.35"
 optimizer = false
 

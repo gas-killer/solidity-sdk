@@ -54,7 +54,7 @@ jobs:
       # same ref as gkvm-python-guests: `make test` compares the bundled crt against this
       # checkout's, so it must carry the current gk-guest-crt); bump together with the fixtures
       # when the runner changes
-      GK_RUN_REF: f8e6bebc797ee62c49cd2ed1805322458561bcad
+      GK_RUN_REF: 839cd94e37f1704069a62204b40305456a566b6a
 
     steps:
       - uses: actions/checkout@v4
@@ -100,7 +100,7 @@ jobs:
       # MicroPython port the bundled copy is checked against, and the zero-glue check's
       # local-executor leg (branch RonTuretzky/gkvm-m6-host; ≥ 25fc804 for the explicit
       # freeze order, which port-check compares against the bundled copy)
-      GK_RUN_REF: f8e6bebc797ee62c49cd2ed1805322458561bcad
+      GK_RUN_REF: 839cd94e37f1704069a62204b40305456a566b6a
 
     steps:
       - uses: actions/checkout@v4
@@ -136,3 +136,5 @@ jobs:
 
       - name: stories260k.py — binding reproduces, the donor's story bit for bit
         run: make -C tools/gk native-stories-check GAS_ANALYZER="$GITHUB_WORKSPACE/gas-analyzer"
+      - name: Parity task fixture diff (ffi leg of gas-analyzer's ffi ≡ precompile suite)
+        run: make -C tools/gk parity-check GAS_ANALYZER="$GITHUB_WORKSPACE/gas-analyzer"
