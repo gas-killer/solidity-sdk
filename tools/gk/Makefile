@@ -128,6 +128,20 @@ native-example-check: need-gk-run native-example
 	cd $(SDK_ROOT) && GK_RUN="$(GK_RUN)" FOUNDRY_PROFILE=gkvm-ffi \
 		$(FORGE) test --match-contract 'GasKillerChatNative'
 
+# The flagship consumer GasKillerChatQwen binds gas-analyzer's `qwen` C guest (the committed
+# crates/gkvm/tests/fixtures/qwen-c.elf). `gk build` on that source with the bundled crt must
+# reproduce the PROGRAM_HASH in gen/GkQwen.sol — one toolchain, one hash, in both repos.
+QWEN_SRC := $(GAS_ANALYZER)/crates/gkvm/guest/qwen/qwen.c
+QWEN_OUT := cache/gkvm/build/native-qwen
+
+native-qwen-check:
+	@test -f "$(QWEN_SRC)" || { echo "no gas-analyzer qwen guest at $(QWEN_SRC): pass GAS_ANALYZER=/abs/path"; exit 1; }
+	cd $(SDK_ROOT) && GK_GUEST_CRT= $(PYTHON) -B tools/gk build "$(QWEN_SRC)" --out $(QWEN_OUT) --no-binding
+	cd $(SDK_ROOT) && built=$$($(PYTHON) tools/gk hash $(QWEN_OUT)/guest.elf) && \
+		want=$$(grep -o 'PROGRAM_HASH = 0x[0-9a-f]*' $(NATIVE_DIR)/gen/GkQwen.sol | cut -d' ' -f3) && \
+		test "$$built" = "$$want" || { echo "native-qwen-check: built $$built != committed $$want"; exit 1; }
+	@echo "native-qwen-check: gk build of gas-analyzer's qwen.c == gen/GkQwen.sol PROGRAM_HASH"
+
 # src/examples/onchain-llm-native's second guest: guest/stories260k.py, the engine-v1 donor
 # (../onchain-llm, stories260K) as a Python guest over artifact-mounted weights. The blobs are
 # the donor's committed hex fixtures, byte for byte; `native-stories-artifacts` writes them as
@@ -212,5 +226,5 @@ need-gk-run:
 		echo "gk-run not found: build it (cargo build --release -p gas-analyzer-gkvm --bin gk-run) or pass GK_RUN=/abs/path"; exit 1; }
 
 .PHONY: test golden golden-check crt-check port-check quickstart-proof native-example native-example-check \
-	native-stories-artifacts native-stories native-stories-check zero-glue-tasks zero-glue zero-glue-check \
+	native-qwen-check native-stories-artifacts native-stories native-stories-check zero-glue-tasks zero-glue zero-glue-check \
 	zero-glue-proof parity-tasks parity parity-check need-gk-run

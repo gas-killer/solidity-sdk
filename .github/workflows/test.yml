@@ -134,6 +134,9 @@ jobs:
       - name: answer.py — zero-glue check (gk build → forge → local executor, same bytes)
         run: make -C tools/gk zero-glue-check GAS_ANALYZER="$GITHUB_WORKSPACE/gas-analyzer"
 
+      - name: qwen.c — gk build reproduces the flagship binding's PROGRAM_HASH
+        run: make -C tools/gk native-qwen-check GAS_ANALYZER="$GITHUB_WORKSPACE/gas-analyzer"
+
       - name: stories260k.py — binding reproduces, the donor's story bit for bit
         run: make -C tools/gk native-stories-check GAS_ANALYZER="$GITHUB_WORKSPACE/gas-analyzer"
       - name: Parity task fixture diff (ffi leg of gas-analyzer's ffi ≡ precompile suite)
