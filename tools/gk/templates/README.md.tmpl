@@ -58,6 +58,10 @@ Re-running `gk init` is safe: existing files are never overwritten.
    (`gk test` = `GK_RUN=<sidecar> FOUNDRY_PROFILE=gkvm-ffi forge test …`.) Without a sidecar
    the shim-backed tests skip (plain `forge test` stays green and ffi-free).
 
+4. **Run it on a local node** — `gk anvil` starts anvil with the gkvm precompile and every guest
+   built here installed; deploy the consumer with `GKVM_ADDRESS` (`0x3559…3c59`) as its `gkvm` and
+   `cast call` it. The precompile exists on that node and on no real chain (see below).
+
 ## Writing your own guest
 
 **Python:** add `guest/<name>.py` with a typed `main` (`int`, `bool`, `bytes`, `str`,

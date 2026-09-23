@@ -19,6 +19,11 @@ Needs `forge`, `python3` and docker (for the guest build). Everything else is on
     forge install gas-killer/solidity-sdk
     gk init --python          # guest/greet.py, its Solidity binding, a consumer and a test
     gk test                   # forge test — the Python really runs, behind the gkvm shim
+    gk anvil                  # a local node where GkVm.exec works (anvil + the precompile)
+    forge create src/GreetGk.sol:GreetGk --rpc-url http://127.0.0.1:8545 --private-key $ANVIL_KEY \
+        --broadcast --constructor-args 0x35597421749DeEad8ba95049eDEe0B94E66F3c59
+    cast call <address> "preview(string,uint256)(string)" world 2 --rpc-url http://127.0.0.1:8545
+    # → "hello world hello world" — the Python function, called through a contract on a chain
 
 `guest/greet.py` is a typed function; `gk build` turned its hints into `src/gen/GkGreet.sol`,
 and `src/GreetGk.sol` calls `GkGreet.call(gkvm, root, name, times)` like any library. Edit the
@@ -32,6 +37,11 @@ GitHub shorthand and remote URLs):
 
     git -c protocol.file.allow=always submodule add /path/to/solidity-sdk lib/solidity-sdk
     git submodule update --init --recursive lib/solidity-sdk
+
+`gk anvil` is anvil with the gkvm precompile (Phase B): every guest built in the project is
+installed, everything else is anvil's own command line. It is a developer node — the
+precompile exists there and on no real chain; operators run the same guest inside their own
+executor and the chain only ever sees the signed state diff.
 
 The `gk` command finds `lib/solidity-sdk/tools/gk` from anywhere inside the project (or
 `$GK_SDK`); without the installer, `python3 lib/solidity-sdk/tools/gk …` is the same thing

@@ -43,6 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gk_build  # noqa: E402
 import gk_init  # noqa: E402
 import gk_test  # noqa: E402
+import gk_anvil  # noqa: E402
 import gk_vectors  # noqa: E402
 from gk_keccak import hex32, keccak256  # noqa: E402
 
@@ -109,11 +110,18 @@ def main(argv=None):
                                     'gkvm-ffi profile); extra arguments go to forge')
     t.add_argument('forge_args', nargs=argparse.REMAINDER, help='passed to `forge test`')
 
+    a = sub.add_parser('anvil', help='start gk-anvil (anvil + the gkvm precompile) with every '
+                                     'guest built in this project installed; extra arguments '
+                                     'go to anvil')
+    a.add_argument('anvil_args', nargs=argparse.REMAINDER, help='passed to `gk-anvil`')
+
     # `gk test --match-contract X`: argparse would claim the forge options as gk's own, so
     # everything unknown after `test` goes to forge.
     args, unknown = ap.parse_known_args(argv)
     if args.cmd == 'test':
         args.forge_args = unknown + args.forge_args
+    elif args.cmd == 'anvil':
+        args.anvil_args = unknown + args.anvil_args
     elif unknown:
         ap.error('unrecognized arguments: %s' % ' '.join(unknown))
     try:
@@ -130,6 +138,9 @@ def main(argv=None):
         elif args.cmd == 'test':
             forge_args = args.forge_args[1:] if args.forge_args[:1] == ['--'] else args.forge_args
             return gk_test.run(args.sdk_root, forge_args)
+        elif args.cmd == 'anvil':
+            anvil_args = args.anvil_args[1:] if args.anvil_args[:1] == ['--'] else args.anvil_args
+            return gk_anvil.run(args.sdk_root, anvil_args)
         elif args.cmd == 'vectors':
             if bool(args.artifact) != bool(args.artifact_root):
                 raise gk_vectors.GkVectorsError(
