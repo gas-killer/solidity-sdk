@@ -311,6 +311,40 @@ def snapshot(root):
 class Init(unittest.TestCase):
     """The scaffold itself — no compiler, no forge (build=False)."""
 
+    def test_python_scaffold_is_the_same_shape_around_greet_py(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sdk = make_project(tmp)
+            actions = gk_init.init(tmp, sdk, build=False, log=quiet, python=True)
+            files = snapshot(tmp)
+            with open(os.path.join(tmp, 'guest', 'README.md')) as f:
+                readme = f.read()
+        self.assertIn('guest/greet.py', files)
+        self.assertIn('src/GreetGk.sol', files)
+        self.assertIn('test/GreetGk.t.sol', files)
+        self.assertNotIn('guest/hello.c', files)
+        self.assertIn(('created', 'guest/greet.py'), actions)
+        self.assertIn('def main(name: str, times: int) -> str:', files['guest/greet.py'].decode())
+        self.assertIn('GkGreet.call(gkvm, bytes32(0), name, times)', files['src/GreetGk.sol'].decode())
+        self.assertIn('| `guest/greet.py` |', readme)
+        self.assertIn('gk test --match-contract GreetGkTest', readme)
+        self.assertNotIn('{{', readme)
+
+    def test_gk_test_hands_forge_its_options(self):
+        import gk_test
+        seen = {}
+        real = gk_test.run
+        gk_test.run = lambda sdk_root, forge_args, log=print: seen.setdefault('args', list(forge_args)) and 0
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                'gk_cli', os.path.join(os.path.dirname(__file__), '__main__.py'))
+            cli = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(cli)
+            cli.main(['test', '--match-contract', 'GreetGkTest', '-vv'])
+        finally:
+            gk_test.run = real
+        self.assertEqual(seen['args'], ['--match-contract', 'GreetGkTest', '-vv'])
+
     def test_scaffolds_a_fresh_forge_project(self):
         with tempfile.TemporaryDirectory() as tmp:
             sdk = make_project(tmp)

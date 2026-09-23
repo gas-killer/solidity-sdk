@@ -8,39 +8,35 @@ Status: draft ([gas-killer/solidity-sdk#85](https://github.com/gas-killer/solidi
 What a fresh project gets today is the forge emulation only — the scaffolded `guest/README.md`
 spells out what does and does not work.
 
-## Quickstart: a guest in a fresh forge project
+## Quickstart: a Python function inside Solidity, in a fresh forge project
 
-Needs `forge`, `python3`, `cargo`, and either `riscv64-unknown-elf-gcc` or docker.
+Needs `forge`, `python3` and docker (for the guest build). Everything else is one line:
 
-1. **A forge project with the sdk installed:**
+    curl -fsSL https://raw.githubusercontent.com/gas-killer/gas-analyzer/RonTuretzky/gkvm-m6-host/install-gk.sh | sh
+    # → ~/.gk/bin/gk-run (prebuilt, sha256-verified), ~/.gk/bin/gk, and the guest toolchain image
 
-       forge init hello-gk
-       cd hello-gk
-       forge install gas-killer/solidity-sdk
+    forge init demo && cd demo
+    forge install gas-killer/solidity-sdk
+    gk init --python          # guest/greet.py, its Solidity binding, a consumer and a test
+    gk test                   # forge test — the Python really runs, behind the gkvm shim
 
-   Until the gkvm work is on the sdk's default branch (it is not yet), that last command
-   installs an sdk without `tools/gk`. Install from a checkout that has it instead — what
-   `forge install` does underneath, pointed at a local clone (`forge install` itself only
-   takes GitHub shorthand and remote URLs):
+`guest/greet.py` is a typed function; `gk build` turned its hints into `src/gen/GkGreet.sol`,
+and `src/GreetGk.sol` calls `GkGreet.call(gkvm, root, name, times)` like any library. Edit the
+`.py`, `gk build guest/greet.py`, `gk test` — that is the loop. `gk init` (without `--python`)
+scaffolds the C equivalent (`guest/hello.c`).
 
-       git -c protocol.file.allow=always submodule add /path/to/solidity-sdk lib/solidity-sdk
-       git submodule update --init --recursive lib/solidity-sdk
+Until the gkvm work is on the sdk's default branch, `forge install gas-killer/solidity-sdk`
+installs an sdk without `tools/gk`: install from a checkout that has it instead — what
+`forge install` does underneath, pointed at a local clone (`forge install` itself only takes
+GitHub shorthand and remote URLs):
 
-2. **Scaffold the guest:**
+    git -c protocol.file.allow=always submodule add /path/to/solidity-sdk lib/solidity-sdk
+    git submodule update --init --recursive lib/solidity-sdk
 
-       python3 lib/solidity-sdk/tools/gk init
-
-   This vendors the guest runtime into `guest/`, writes an example guest, a sample consumer, a
-   shim-wired test and `guest/README.md`, appends `[profile.gkvm-ffi]` to `foundry.toml` and the
-   `gk-sdk/` remapping to `remappings.txt`, and builds the example guest. Nothing existing is
-   overwritten; re-running is a no-op.
-
-3. **Continue with `guest/README.md`** in your project — its Quickstart builds the guest,
-   installs `gk-run` and runs the tests under the ffi profile.
-
-`make -C tools/gk quickstart-proof` replays exactly these steps, and then the scaffolded
-README's, in a scratch directory outside any checkout, and fails unless the shim-backed tests
-run (not skip) green. It refuses to run a command that is not written in one of the two READMEs.
+The `gk` command finds `lib/solidity-sdk/tools/gk` from anywhere inside the project (or
+`$GK_SDK`); without the installer, `python3 lib/solidity-sdk/tools/gk …` is the same thing
+with `GK_RUN` set by hand. The scaffolded `guest/README.md` covers the rest, including what a
+fresh project does and does not get today.
 
 ## Python guests
 

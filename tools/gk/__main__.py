@@ -42,6 +42,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import gk_build  # noqa: E402
 import gk_init  # noqa: E402
+import gk_test  # noqa: E402
 import gk_vectors  # noqa: E402
 from gk_keccak import hex32, keccak256  # noqa: E402
 
@@ -100,8 +101,21 @@ def main(argv=None):
     i.add_argument('--no-build', action='store_true',
                    help='skip building the example guest (its binding is then missing until '
                         '`gk build guest/hello.c`)')
+    i.add_argument('--python', action='store_true',
+                   help='scaffold a typed Python guest (guest/greet.py → GkGreet.sol) instead '
+                        'of the C one; needs docker (or the prebuilt toolchain image)')
 
-    args = ap.parse_args(argv)
+    t = sub.add_parser('test', help='forge test with the guest really executing (gk-run + the '
+                                    'gkvm-ffi profile); extra arguments go to forge')
+    t.add_argument('forge_args', nargs=argparse.REMAINDER, help='passed to `forge test`')
+
+    # `gk test --match-contract X`: argparse would claim the forge options as gk's own, so
+    # everything unknown after `test` goes to forge.
+    args, unknown = ap.parse_known_args(argv)
+    if args.cmd == 'test':
+        args.forge_args = unknown + args.forge_args
+    elif unknown:
+        ap.error('unrecognized arguments: %s' % ' '.join(unknown))
     try:
         if args.cmd == 'build':
             project = args.project or gk_build.find_project(os.getcwd(), args.sdk_root)
@@ -112,7 +126,10 @@ def main(argv=None):
                            stack_bytes=args.stack_bytes)
         elif args.cmd == 'init':
             gk_init.init(args.project, args.sdk_root, crt=args.crt, compiler=args.compiler,
-                         build=not args.no_build, sdk_path=args.sdk_path)
+                         build=not args.no_build, sdk_path=args.sdk_path, python=args.python)
+        elif args.cmd == 'test':
+            forge_args = args.forge_args[1:] if args.forge_args[:1] == ['--'] else args.forge_args
+            return gk_test.run(args.sdk_root, forge_args)
         elif args.cmd == 'vectors':
             if bool(args.artifact) != bool(args.artifact_root):
                 raise gk_vectors.GkVectorsError(

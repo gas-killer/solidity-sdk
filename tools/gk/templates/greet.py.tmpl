@@ -1,0 +1,15 @@
+# greet — a typed Python guest, scaffolded by `gk init --python`.
+#
+# `gk build guest/greet.py` turns the type hints below into {{SRC}}/gen/GkGreet.sol:
+#     GkGreet.call(gkvm, artifactRoot, name, times) → (string)
+# and {{SRC}}/{{CONSUMER}} calls it like any Solidity library. The function runs inside the
+# operators' simulation environment (the gkvm MicroPython port: unbounded integers, no floats,
+# no imports beyond the frozen stdlib subset) and never on the chain itself.
+#
+# A raised exception is a typed, deterministic guest error the consumer can catch.
+
+
+def main(name: str, times: int) -> str:
+    if times > 16:
+        raise ValueError("greet: times > 16")
+    return " ".join(["hello " + name] * times)

@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.4;
+
+import {GkGreet} from "{{BINDING_IMPORT}}";
+
+/// @title GreetGk
+/// @notice Sample gkvm consumer scaffolded by `gk init --python`: calls the Python function in
+///         `guest/greet.py` through the gkvm precompile and keeps its answer
+/// @dev `gkvm` is `GKVM_ADDRESS` ({{SDK_REMAP}}gkvm/GkVm.sol) in production and a `GkVmFfiShim` in
+///      forge tests. On a chain without the precompile — every real chain today — `preview` and
+///      `greet` revert `GkVmUnavailable`: the guest only ever runs inside the operators'
+///      simulation environment.
+contract GreetGk {
+    address public immutable gkvm;
+    string public lastGreeting;
+
+    event Greeted(string greeting);
+
+    constructor(address _gkvm) {
+        gkvm = _gkvm;
+    }
+
+    /// @notice `main(name, times)` from guest/greet.py — the Python function, called from Solidity
+    function preview(string memory name, uint256 times) public view returns (string memory) {
+        return GkGreet.call(gkvm, bytes32(0), name, times);
+    }
+
+    function greet(string calldata name, uint256 times) external {
+        string memory greeting = preview(name, times);
+        lastGreeting = greeting;
+        emit Greeted(greeting);
+    }
+}

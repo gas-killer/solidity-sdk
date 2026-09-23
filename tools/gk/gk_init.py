@@ -33,6 +33,18 @@ EXAMPLE_GUEST = 'hello.c'
 CONSUMER = 'HelloGk.sol'
 CONSUMER_TEST = 'HelloGk.t.sol'
 
+# `gk init --python`: the same scaffold around a typed Python guest
+EXAMPLES = {
+    False: {'guest': 'hello.c', 'stem': 'hello', 'consumer': 'HelloGk.sol',
+            'test': 'HelloGk.t.sol', 'contract': 'HelloGkTest',
+            'desc': 'example guest: answers `"GKVM-HELLO-V1\\n"` + the payload reversed',
+            'lang': 'C'},
+    True: {'guest': 'greet.py', 'stem': 'greet', 'consumer': 'GreetGk.sol',
+           'test': 'GreetGk.t.sol', 'contract': 'GreetGkTest',
+           'desc': 'example guest: a typed Python function, `main(name: str, times: int) -> str`',
+           'lang': 'Python'},
+}
+
 FFI_PROFILE = 'gkvm-ffi'
 FFI_PROFILE_BLOCK = '''\
 # TEST ONLY — gkvm ffi shim (%(remap)sgkvm/testing/GkVmFfiShim.sol): shells out to the `gk-run`
@@ -122,9 +134,11 @@ def resolve_sdk_path(project, sdk_root, sdk_path=None):
     return _posix(rel)
 
 
-def init(project, sdk_root, crt=None, compiler='auto', build=True, sdk_path=None, log=print):
+def init(project, sdk_root, crt=None, compiler='auto', build=True, sdk_path=None, log=print,
+         python=False):
     """Scaffold into `project`. Returns [(status, project-relative path)], in write order;
     status is created | kept | merged | built."""
+    example = EXAMPLES[bool(python)]
     project = os.path.abspath(project)
     toml_path = os.path.join(project, 'foundry.toml')
     if not os.path.isfile(toml_path):
@@ -140,7 +154,7 @@ def init(project, sdk_root, crt=None, compiler='auto', build=True, sdk_path=None
     ffi_profile_present = has_ffi_profile(toml_text)
     if build:
         try:
-            compiler = gk_build.check_compiler(compiler)
+            compiler = gk_build.check_compiler(compiler, prefer_docker=bool(python))
         except gk_build.GkBuildError as e:
             raise GkInitError('%s — install one, or scaffold without building: gk init '
                               '--no-build' % e)
@@ -150,14 +164,22 @@ def init(project, sdk_root, crt=None, compiler='auto', build=True, sdk_path=None
         raise GkInitError(str(e))
 
     src_dir, test_dir = gk_build.forge_dirs(project)
-    binding = os.path.join(project, src_dir, 'gen', gk_build.binding_name('hello') + '.sol')
-    consumer = os.path.join(project, src_dir, CONSUMER)
-    consumer_test = os.path.join(project, test_dir, CONSUMER_TEST)
+    binding = os.path.join(project, src_dir, 'gen',
+                           gk_build.binding_name(example['stem']) + '.sol')
+    consumer = os.path.join(project, src_dir, example['consumer'])
+    consumer_test = os.path.join(project, test_dir, example['test'])
     values = {
         'SDK_PATH': sdk_rel,
         'SDK_REMAP': gk_build.SDK_REMAP_PREFIX,
         'SRC': _posix(src_dir),
         'TEST': _posix(test_dir),
+        'EXAMPLE_GUEST': example['guest'],
+        'EXAMPLE_DESC': example['desc'],
+        'EXAMPLE_LANG': example['lang'],
+        'BINDING_NAME': gk_build.binding_name(example['stem']),
+        'CONSUMER': example['consumer'],
+        'CONSUMER_TEST': example['test'],
+        'TEST_CONTRACT': example['contract'],
     }
 
     actions = []
@@ -183,13 +205,14 @@ def init(project, sdk_root, crt=None, compiler='auto', build=True, sdk_path=None
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             shutil.copyfile(os.path.join(crt_src, f), dst)
             note('created', dst)
-    create(os.path.join(project, GUEST_DIR, EXAMPLE_GUEST), render(EXAMPLE_GUEST, values))
+    create(os.path.join(project, GUEST_DIR, example['guest']),
+           render(example['guest'], values))
     create(os.path.join(project, GUEST_DIR, 'README.md'), render('README.md', values))
 
     # ---- sample consumer + shim-wired test
-    create(consumer, render(CONSUMER, dict(
+    create(consumer, render(example['consumer'], dict(
         values, BINDING_IMPORT=_sol_rel(binding, os.path.dirname(consumer)))))
-    create(consumer_test, render(CONSUMER_TEST, dict(
+    create(consumer_test, render(example['test'], dict(
         values,
         BINDING_IMPORT=_sol_rel(binding, os.path.dirname(consumer_test)),
         CONSUMER_IMPORT=_sol_rel(consumer, os.path.dirname(consumer_test)))))
@@ -222,17 +245,17 @@ def init(project, sdk_root, crt=None, compiler='auto', build=True, sdk_path=None
         note('merged', ignore_path)
 
     # ---- the binding: only a build knows the programHash
-    guest = os.path.join(project, GUEST_DIR, EXAMPLE_GUEST)
+    guest = os.path.join(project, GUEST_DIR, example['guest'])
     if build:
         gk_build.build(guest, sdk_root, crt=os.path.join(project, GUEST_DIR), compiler=compiler,
                        sol_out=os.path.dirname(binding), log=log, project=project)
         actions.append(('built', _posix(os.path.relpath(binding, project))))
-        log('next: see %s/README.md — GK_RUN=/path/to/gk-run FOUNDRY_PROFILE=%s forge test'
-            % (GUEST_DIR, FFI_PROFILE))
+        log('next: `gk test` (or GK_RUN=/path/to/gk-run FOUNDRY_PROFILE=%s forge test) — see '
+            '%s/README.md' % (FFI_PROFILE, GUEST_DIR))
     elif not os.path.isfile(binding):
         log('next: python3 %s/tools/gk build %s/%s   (until then `forge build` fails: %s '
             'imports the binding that build generates)'
-            % (sdk_rel, GUEST_DIR, EXAMPLE_GUEST, _posix(os.path.relpath(consumer, project))))
+            % (sdk_rel, GUEST_DIR, example['guest'], _posix(os.path.relpath(consumer, project))))
     return actions
 
 
