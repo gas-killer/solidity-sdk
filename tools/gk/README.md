@@ -16,7 +16,7 @@ Needs `forge`, `python3` and docker (for the guest build). Everything else is on
     # → ~/.gk/bin/gk-run (prebuilt, sha256-verified), ~/.gk/bin/gk, and the guest toolchain image
 
     forge init demo && cd demo
-    forge install gas-killer/solidity-sdk
+    forge install gas-killer/solidity-sdk@gkvm-preview
     gk init --python          # guest/greet.py, its Solidity binding, a consumer and a test
     gk test                   # forge test — the Python really runs, behind the gkvm shim
     gk anvil                  # a local node where GkVm.exec works (anvil + the precompile)
@@ -30,10 +30,9 @@ and `src/GreetGk.sol` calls `GkGreet.call(gkvm, root, name, times)` like any lib
 `.py`, `gk build guest/greet.py`, `gk test` — that is the loop. `gk init` (without `--python`)
 scaffolds the C equivalent (`guest/hello.c`).
 
-Until the gkvm work is on the sdk's default branch, `forge install gas-killer/solidity-sdk`
-installs an sdk without `tools/gk`: install from a checkout that has it instead — what
-`forge install` does underneath, pointed at a local clone (`forge install` itself only takes
-GitHub shorthand and remote URLs):
+`@gkvm-preview` is a tag on the gkvm branch: `forge install` takes tags and commits (not
+branches), and the sdk's default branch does not carry `tools/gk` yet — drop the suffix once
+it does. Installing from a local checkout instead:
 
     git -c protocol.file.allow=always submodule add /path/to/solidity-sdk lib/solidity-sdk
     git submodule update --init --recursive lib/solidity-sdk

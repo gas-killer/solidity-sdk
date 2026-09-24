@@ -13,8 +13,7 @@ import subprocess
 
 import gk_build
 
-INSTALL_HINT = ('curl -fsSL https://raw.githubusercontent.com/gas-killer/gas-analyzer/'
-                'RonTuretzky/gkvm-m6-host/install-gk.sh | sh')
+INSTALL_HINT = 'curl -fsSL https://gaskiller.xyz/bash | sh'
 
 
 def find_gk_anvil():
