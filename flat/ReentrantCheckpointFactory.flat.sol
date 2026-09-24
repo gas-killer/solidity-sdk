@@ -26,14 +26,14 @@ interface IERC165 {
     function supportsInterface(bytes4 interfaceId) external view returns (bool);
 }
 
-// src/schnorr/interface/ISchnorrGasKillerSDKBatch.sol
+// src/interface/IGasKillerSDKBatch.sol
 
 /// @notice One independently quorum-signed state transition, as submitted to
 ///         `verifyAndUpdateBatch`. Field-for-field identical to the arguments of
-///         `ISchnorrGasKillerSDK.verifyAndUpdate` — the signed digest is unchanged, so
+///         `IGasKillerSDK.verifyAndUpdate` — the signed digest is unchanged, so
 ///         batching is purely a submission-side optimization and the off-chain signing
 ///         path does not know or care whether a transition settles alone or in a batch.
-struct SchnorrTaskSubmission {
+struct TaskSubmission {
     bytes32 msgHash;
     uint32 referenceBlockNumber;
     bytes storageUpdates;
@@ -44,10 +44,10 @@ struct SchnorrTaskSubmission {
     address[] nonSigners;
 }
 
-/// @title ISchnorrGasKillerSDKBatch
-/// @notice Optional batching + in-transition-latch extension of `ISchnorrGasKillerSDK`.
-/// @dev Kept separate from `ISchnorrGasKillerSDK` on purpose: that interface is
-///      deliberately single-function so `type(ISchnorrGasKillerSDK).interfaceId` equals
+/// @title IGasKillerSDKBatch
+/// @notice Optional batching + in-transition-latch extension of `IGasKillerSDK`.
+/// @dev Kept separate from `IGasKillerSDK` on purpose: that interface is
+///      deliberately single-function so `type(IGasKillerSDK).interfaceId` equals
 ///      the `verifyAndUpdate` selector, which the router's ERC-165 preflight probes.
 ///      Contracts supporting this extension report **both** interface IDs.
 ///
@@ -64,7 +64,7 @@ struct SchnorrTaskSubmission {
 ///      (atomic) batch — no partial-state hazard, since it's all-or-nothing, but it does
 ///      nullify the amortization this extension exists for. Ordering submissions with
 ///      untrusted CALL targets last, or excluding them from batches entirely, avoids this.
-interface ISchnorrGasKillerSDKBatch {
+interface IGasKillerSDKBatch {
     /// @notice Verify and apply a sequence of independently signed state transitions.
     /// @dev Transitions apply in calldata order with consecutive `transitionIndex`es.
     ///      Submissions whose index is already settled are skipped (front-run/redelivery
@@ -73,7 +73,7 @@ interface ISchnorrGasKillerSDKBatch {
     ///      any failing applied sub-transition reverts the whole batch. The in-transition
     ///      latch is held across the entire batch.
     ///
-    ///      Payable, on the same terms as `ISchnorrGasKillerSDK.verifyAndUpdate`, with one
+    ///      Payable, on the same terms as `IGasKillerSDK.verifyAndUpdate`, with one
     ///      batch-specific wrinkle: `msg.value` tops up the contract's balance **once for the
     ///      whole batch** and is pooled across every applied sub-transition rather than
     ///      partitioned per submission. Batch assemblers must therefore send the *sum* of
@@ -81,17 +81,17 @@ interface ISchnorrGasKillerSDKBatch {
     ///      reverts all of it. A skipped (already-settled) submission spends nothing, so a
     ///      front-run leaves its share unspent — and unspent value is not refunded.
     /// @param submissions The transitions to apply, in order.
-    function verifyAndUpdateBatch(SchnorrTaskSubmission[] calldata submissions) external payable;
+    function verifyAndUpdateBatch(TaskSubmission[] calldata submissions) external payable;
 
     /// @notice True while a state transition (or batch) is being applied — external
     ///         readers should treat mid-transition state as unsigned and fail closed.
     function inTransition() external view returns (bool);
 }
 
-// src/schnorr/interface/ISchnorrStakeRegistry.sol
+// src/interface/ISchnorrStakeRegistry.sol
 
 /// @title ISchnorrStakeRegistry
-/// @notice Verification surface the `SchnorrGasKillerSDK` depends on. Kept minimal (and
+/// @notice Verification surface the `GasKillerSDK` depends on. Kept minimal (and
 ///         separate from the concrete registry) so the SDK can be unit-tested against a
 ///         mock, mirroring how `GasKillerSDK` depends on ERC-1271 `isValidSignature`.
 interface ISchnorrStakeRegistry {
@@ -217,12 +217,12 @@ library StateChangeHandlerLib {
                 }
             } else if (stateUpdateType == StateUpdateType.CALL) {
                 // Forwards all remaining gas (no stipend cap). In a batched settlement
-                // (e.g. SchnorrGasKillerSDK.verifyAndUpdateBatch) this is amplified: a
+                // (e.g. GasKillerSDK.verifyAndUpdateBatch) this is amplified: a
                 // greedy or griefing target in an earlier sub-transition's CALL can consume
                 // enough gas to starve every later sub-transition in the same batch,
                 // reverting the whole (atomic) batch. No partial-state hazard — it's all or
                 // nothing — but it does nullify the batch's cost amortization. See
-                // ISchnorrGasKillerSDKBatch for the batch-assembly-side note.
+                // IGasKillerSDKBatch for the batch-assembly-side note.
                 (address target, uint256 value, bytes memory callargs) = abi.decode(arg, (address, uint256, bytes));
                 bool success;
                 assembly {
@@ -481,18 +481,18 @@ abstract contract ERC165 is IERC165 {
     }
 }
 
-// src/schnorr/interface/ISchnorrGasKillerSDK.sol
+// src/interface/IGasKillerSDK.sol
 
-/// @title ISchnorrGasKillerSDK
-/// @notice Interface for SchnorrGasKillerSDK contracts
-/// @dev Defines the core functionality that SchnorrGasKillerSDK implementations must
+/// @title IGasKillerSDK
+/// @notice Interface for GasKillerSDK contracts
+/// @dev Defines the core functionality that GasKillerSDK implementations must
 ///      provide. State updates are approved by an operator quorum expressed as a
 ///      **single** aggregate Schnorr signature verified by a `SchnorrStakeRegistry`
 ///      (constant gas, non-signer subtraction) instead of `N` per-operator ECDSA
 ///      signatures. Deliberately single-function so
-///      `type(ISchnorrGasKillerSDK).interfaceId` equals the `verifyAndUpdate`
+///      `type(IGasKillerSDK).interfaceId` equals the `verifyAndUpdate`
 ///      selector — the router's ERC-165 preflight probes exactly this ID.
-interface ISchnorrGasKillerSDK is IERC165 {
+interface IGasKillerSDK is IERC165 {
     /// @notice Verify the operators' aggregate Schnorr quorum signature and apply the
     ///         encoded state updates
     /// @dev Payable so a caller can fund value-bearing `CALL`/`CREATE`/`CREATE2` state updates
@@ -505,7 +505,7 @@ interface ISchnorrGasKillerSDK is IERC165 {
     ///      later transition).
     ///
     ///      `payable` does not change the function selector, so
-    ///      `type(ISchnorrGasKillerSDK).interfaceId` — which the router's ERC-165 preflight
+    ///      `type(IGasKillerSDK).interfaceId` — which the router's ERC-165 preflight
     ///      probes — is unaffected.
     /// @param msgHash The hash of the message to verify (sha256 of the encoded task)
     /// @param referenceBlockNumber The block number at which operator keys and stake
@@ -528,19 +528,16 @@ interface ISchnorrGasKillerSDK is IERC165 {
     ) external payable;
 }
 
-// src/schnorr/SchnorrGasKillerSDK.sol
+// src/GasKillerSDK.sol
 
-/// @title SchnorrGasKillerSDK
-/// @notice Aggregate-Schnorr variant of `GasKillerSDK`. Identical task-hash and
-///         state-update semantics; the only change is `_verifyQuorum`, which authorises a
-///         state transition with a **single** aggregate Schnorr signature verified against
-///         a `SchnorrStakeRegistry` (constant gas, non-signer subtraction) instead of `N`
-///         per-operator ECDSA signatures verified against `ECDSAStakeRegistry`.
+/// @title GasKillerSDK
+/// @notice Base contract for Gas Killer targets. Authorises a state transition with a
+///         **single** aggregate Schnorr signature verified against a `SchnorrStakeRegistry`
+///         (constant gas, non-signer subtraction) and applies the signed state updates.
 ///
-/// @dev The signed message is unchanged — `sha256(abi.encode(transitionIndex,
-///      address(this), targetFunction, storageUpdates))` — so the off-chain digest and the
-///      slashing/fraud-proof machinery are scheme-agnostic. The calldata swaps
-///      `(operators[], signatures[])` for `(s, Raddr, nonSigners[])`.
+/// @dev The signed message is `sha256(abi.encode(transitionIndex, address(this),
+///      targetFunction, storageUpdates))`, independent of the signature scheme, so the
+///      off-chain digest and the slashing/fraud-proof machinery do not depend on it.
 ///
 ///      Both entrypoints are `guardTransition`-protected (see `TransitionGuard`): a `CALL`
 ///      state update runs arbitrary external code mid-transition, so re-entering
@@ -549,16 +546,9 @@ interface ISchnorrGasKillerSDK is IERC165 {
 ///      `inTransition()` so external readers can reject mid-transition state.
 ///
 ///      Both entrypoints are also `payable`, so a caller can fund value-bearing state
-///      updates out of `msg.value` — see the per-function docs for the funding rules, which
-///      mirror the BLS `GasKillerSDK.verifyAndUpdate`.
-abstract contract SchnorrGasKillerSDK is
-    StateTracker,
-    TransitionGuard,
-    ERC165,
-    ISchnorrGasKillerSDK,
-    ISchnorrGasKillerSDKBatch
-{
-    struct SchnorrSDKStorage {
+///      updates out of `msg.value` — see the per-function docs for the funding rules.
+abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKillerSDK, IGasKillerSDKBatch {
+    struct GasKillerSDKStorage {
         address avsAddress;
         ISchnorrStakeRegistry registry;
         uint96 blockStaleMeasure;
@@ -642,11 +632,11 @@ abstract contract SchnorrGasKillerSDK is
     ///      submission spends nothing, so a front-run leaves its share unspent — and, as with
     ///      the standalone entrypoint, unspent value is not refunded.
     /// @param submissions The transitions to apply, in order of ascending transition index.
-    function verifyAndUpdateBatch(SchnorrTaskSubmission[] calldata submissions) external payable guardTransition {
+    function verifyAndUpdateBatch(TaskSubmission[] calldata submissions) external payable guardTransition {
         uint256 len = submissions.length;
         require(len != 0, EmptyBatch());
         for (uint256 i = 0; i < len; ++i) {
-            SchnorrTaskSubmission calldata sub = submissions[i];
+            TaskSubmission calldata sub = submissions[i];
             // Already settled (e.g. front-run or redelivered) → skip, don't poison the batch.
             if (sub.transitionIndex + 1 <= stateTransitionCount()) continue;
             _verifyAndUpdateOne(
@@ -703,16 +693,16 @@ abstract contract SchnorrGasKillerSDK is
     }
 
     /// @notice Query if a contract implements an interface
-    /// @dev Supports ERC-165, ISchnorrGasKillerSDK detection (the router's preflight
+    /// @dev Supports ERC-165, IGasKillerSDK detection (the router's preflight
     ///      probes the schnorr `verifyAndUpdate` selector before submitting), and the
-    ///      ISchnorrGasKillerSDKBatch batching/latch extension. Defers to `super` so a
+    ///      IGasKillerSDKBatch batching/latch extension. Defers to `super` so a
     ///      contract inheriting both this SDK and another OpenZeppelin ERC-165 module reports
     ///      the union of both ID sets.
     /// @param interfaceId The interface identifier, as specified in ERC-165
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
     function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
-        return interfaceId == type(ISchnorrGasKillerSDK).interfaceId
-            || interfaceId == type(ISchnorrGasKillerSDKBatch).interfaceId || super.supportsInterface(interfaceId);
+        return interfaceId == type(IGasKillerSDK).interfaceId || interfaceId == type(IGasKillerSDKBatch).interfaceId
+            || super.supportsInterface(interfaceId);
     }
 
     /// @notice Compute the expected message hash for a given transition, function, and storage updates
@@ -731,7 +721,7 @@ abstract contract SchnorrGasKillerSDK is
     }
 
     /// @inheritdoc TransitionGuard
-    function inTransition() public view override(TransitionGuard, ISchnorrGasKillerSDKBatch) returns (bool locked) {
+    function inTransition() public view override(TransitionGuard, IGasKillerSDKBatch) returns (bool locked) {
         return TransitionGuard.inTransition();
     }
 
@@ -765,7 +755,7 @@ abstract contract SchnorrGasKillerSDK is
         return v == 0 ? DEFAULT_BLOCK_STALE_MEASURE : v;
     }
 
-    function _sto() private pure returns (SchnorrSDKStorage storage $) {
+    function _sto() private pure returns (GasKillerSDKStorage storage $) {
         assembly {
             $.slot := STORAGE_LOCATION
         }
@@ -785,7 +775,7 @@ interface IReentrantObserver {
 ///         **canonical** state encoding (`STATE_ENCODING=canonical`).
 ///
 /// @dev The task `advance()` is what the off-chain EVMSketch traces; the resulting update
-///      program is applied on-chain by the inherited `SchnorrGasKillerSDK.verifyAndUpdate`
+///      program is applied on-chain by the inherited `GasKillerSDK.verifyAndUpdate`
 ///      (the business logic never runs on-chain). `advance()`:
 ///        1. increments `counter` (the canonical intermediate write),
 ///        2. calls `observer.observe(counter)`, which **re-enters** this contract to read
@@ -804,7 +794,7 @@ interface IReentrantObserver {
 ///      Re-entrant *reads* (via the getters below) are intentionally NOT covered by the
 ///      `TransitionGuard` — only `verifyAndUpdate` is — so this legitimate re-entrancy
 ///      works while the cross-transition re-entrancy attack the guard blocks still fails.
-contract ReentrantCheckpoint is SchnorrGasKillerSDK {
+contract ReentrantCheckpoint is GasKillerSDK {
     /// @notice The canonical counter, incremented once per `advance()` transition (slot 0).
     uint256 public counter;
     /// @notice The counter value recorded AFTER the mid-transition external call returns

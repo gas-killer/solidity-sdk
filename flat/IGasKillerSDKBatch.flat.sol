@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.27;
 
-// src/schnorr/interface/ISchnorrGasKillerSDKBatch.sol
+// src/interface/IGasKillerSDKBatch.sol
 
 /// @notice One independently quorum-signed state transition, as submitted to
 ///         `verifyAndUpdateBatch`. Field-for-field identical to the arguments of
-///         `ISchnorrGasKillerSDK.verifyAndUpdate` — the signed digest is unchanged, so
+///         `IGasKillerSDK.verifyAndUpdate` — the signed digest is unchanged, so
 ///         batching is purely a submission-side optimization and the off-chain signing
 ///         path does not know or care whether a transition settles alone or in a batch.
-struct SchnorrTaskSubmission {
+struct TaskSubmission {
     bytes32 msgHash;
     uint32 referenceBlockNumber;
     bytes storageUpdates;
@@ -19,10 +19,10 @@ struct SchnorrTaskSubmission {
     address[] nonSigners;
 }
 
-/// @title ISchnorrGasKillerSDKBatch
-/// @notice Optional batching + in-transition-latch extension of `ISchnorrGasKillerSDK`.
-/// @dev Kept separate from `ISchnorrGasKillerSDK` on purpose: that interface is
-///      deliberately single-function so `type(ISchnorrGasKillerSDK).interfaceId` equals
+/// @title IGasKillerSDKBatch
+/// @notice Optional batching + in-transition-latch extension of `IGasKillerSDK`.
+/// @dev Kept separate from `IGasKillerSDK` on purpose: that interface is
+///      deliberately single-function so `type(IGasKillerSDK).interfaceId` equals
 ///      the `verifyAndUpdate` selector, which the router's ERC-165 preflight probes.
 ///      Contracts supporting this extension report **both** interface IDs.
 ///
@@ -39,7 +39,7 @@ struct SchnorrTaskSubmission {
 ///      (atomic) batch — no partial-state hazard, since it's all-or-nothing, but it does
 ///      nullify the amortization this extension exists for. Ordering submissions with
 ///      untrusted CALL targets last, or excluding them from batches entirely, avoids this.
-interface ISchnorrGasKillerSDKBatch {
+interface IGasKillerSDKBatch {
     /// @notice Verify and apply a sequence of independently signed state transitions.
     /// @dev Transitions apply in calldata order with consecutive `transitionIndex`es.
     ///      Submissions whose index is already settled are skipped (front-run/redelivery
@@ -48,7 +48,7 @@ interface ISchnorrGasKillerSDKBatch {
     ///      any failing applied sub-transition reverts the whole batch. The in-transition
     ///      latch is held across the entire batch.
     ///
-    ///      Payable, on the same terms as `ISchnorrGasKillerSDK.verifyAndUpdate`, with one
+    ///      Payable, on the same terms as `IGasKillerSDK.verifyAndUpdate`, with one
     ///      batch-specific wrinkle: `msg.value` tops up the contract's balance **once for the
     ///      whole batch** and is pooled across every applied sub-transition rather than
     ///      partitioned per submission. Batch assemblers must therefore send the *sum* of
@@ -56,7 +56,7 @@ interface ISchnorrGasKillerSDKBatch {
     ///      reverts all of it. A skipped (already-settled) submission spends nothing, so a
     ///      front-run leaves its share unspent — and unspent value is not refunded.
     /// @param submissions The transitions to apply, in order.
-    function verifyAndUpdateBatch(SchnorrTaskSubmission[] calldata submissions) external payable;
+    function verifyAndUpdateBatch(TaskSubmission[] calldata submissions) external payable;
 
     /// @notice True while a state transition (or batch) is being applied — external
     ///         readers should treat mid-transition state as unsigned and fail closed.

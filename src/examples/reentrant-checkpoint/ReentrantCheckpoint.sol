@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.27;
 
-import {SchnorrGasKillerSDK} from "../../schnorr/SchnorrGasKillerSDK.sol";
+import {GasKillerSDK} from "../../GasKillerSDK.sol";
 
 interface IReentrantObserver {
     function observe(uint256 expectedCounter) external;
@@ -14,7 +14,7 @@ interface IReentrantObserver {
 ///         **canonical** state encoding (`STATE_ENCODING=canonical`).
 ///
 /// @dev The task `advance()` is what the off-chain EVMSketch traces; the resulting update
-///      program is applied on-chain by the inherited `SchnorrGasKillerSDK.verifyAndUpdate`
+///      program is applied on-chain by the inherited `GasKillerSDK.verifyAndUpdate`
 ///      (the business logic never runs on-chain). `advance()`:
 ///        1. increments `counter` (the canonical intermediate write),
 ///        2. calls `observer.observe(counter)`, which **re-enters** this contract to read
@@ -33,7 +33,7 @@ interface IReentrantObserver {
 ///      Re-entrant *reads* (via the getters below) are intentionally NOT covered by the
 ///      `TransitionGuard` — only `verifyAndUpdate` is — so this legitimate re-entrancy
 ///      works while the cross-transition re-entrancy attack the guard blocks still fails.
-contract ReentrantCheckpoint is SchnorrGasKillerSDK {
+contract ReentrantCheckpoint is GasKillerSDK {
     /// @notice The canonical counter, incremented once per `advance()` transition (slot 0).
     uint256 public counter;
     /// @notice The counter value recorded AFTER the mid-transition external call returns

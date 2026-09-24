@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.27;
 
-// src/schnorr/libraries/SchnorrVerify.sol
+// src/libraries/SchnorrVerify.sol
 
 /// @title SchnorrVerify
 /// @notice Constant-gas verification of an aggregate secp256k1 Schnorr signature using the

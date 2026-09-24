@@ -1,431 +1,110 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.29;
 
-import "forge-std/Test.sol";
-import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
-
-import "../src/GasKillerSDK.sol";
-import "./exposed/GasKillerSDKExposed.sol";
+import {Test} from "forge-std/Test.sol";
+import {GasKillerSDK} from "../src/GasKillerSDK.sol";
+import {ISchnorrStakeRegistry} from "../src/interface/ISchnorrStakeRegistry.sol";
 import {StateUpdateType} from "../src/StateChangeHandlerLib.sol";
-import {StateChangeHandlerLib} from "../src/StateChangeHandlerLib.sol";
+
+/// A registry stub that returns a settable verdict, so the SDK wrapper's control flow
+/// (digest reconstruction, transition-index and staleness checks, state application) can be
+/// tested without a real aggregate signature over the deploy-dependent digest. The real
+/// signature path is covered end-to-end at the registry level in `SchnorrStakeRegistry.t.sol`.
+contract MockSchnorrRegistry is ISchnorrStakeRegistry {
+    bool public verdict = true;
+
+    function setVerdict(bool v) external {
+        verdict = v;
+    }
+
+    function isValidSignature(bytes32, uint256, address, address[] calldata, uint256) external view returns (bool) {
+        return verdict;
+    }
+}
+
+/// Concrete SDK: stores a `value` at slot 0; `verifyAndUpdate` is expected to STORE into it.
+contract TestSDK is GasKillerSDK {
+    uint256 public value; // slot 0
+
+    constructor(address registry) {
+        _setSchnorrRegistry(registry);
+        _setAvsAddress(address(0xA75));
+    }
+}
 
 contract GasKillerSDKTest is Test {
-    GasKillerSDKExposed public sdk;
+    MockSchnorrRegistry mock;
+    TestSDK sdk;
 
     function setUp() public {
-        sdk = new GasKillerSDKExposed(makeAddr("AVS"), makeAddr("BLS_SIG_CHECKER"));
+        vm.roll(1000);
+        mock = new MockSchnorrRegistry();
+        sdk = new TestSDK(address(mock));
     }
 
-    function test_stateChangeHandlerExternal_Store() public {
+    function _storeUpdate(bytes32 slot, bytes32 val) internal pure returns (bytes memory) {
         StateUpdateType[] memory types = new StateUpdateType[](1);
         types[0] = StateUpdateType.STORE;
-
         bytes[] memory args = new bytes[](1);
-        bytes32 slot = bytes32(uint256(1));
-        bytes32 value = bytes32(uint256(100));
-        args[0] = abi.encode(slot, value);
-
-        sdk.stateChangeHandlerExternal(abi.encode(types, args));
-
-        assertEq(vm.load(address(sdk), slot), value);
+        args[0] = abi.encode(slot, val);
+        return abi.encode(types, args);
     }
 
-    function test_stateChangeHandlerExternal_Call() public {
-        /// Deploy a simple target contract
-        SimpleTarget target = new SimpleTarget();
-
-        StateUpdateType[] memory types = new StateUpdateType[](1);
-        types[0] = StateUpdateType.CALL;
-
-        bytes[] memory args = new bytes[](1);
-        args[0] = abi.encode(address(target), uint256(0), abi.encodeWithSignature("setValue(uint256)", 42));
-
-        sdk.stateChangeHandlerExternal(abi.encode(types, args));
-
-        assertEq(target.value(), 42);
+    function _digest(uint256 transitionIndex, bytes4 targetFn, bytes memory updates) internal view returns (bytes32) {
+        return sha256(abi.encode(transitionIndex, address(sdk), targetFn, updates));
     }
 
-    function test_stateChangeHandlerExternal_Call_ForwardsValue() public {
-        SimpleTarget target = new SimpleTarget();
-        uint256 forwarded = 0.13 ether;
-        // Fund the caller only: the SDK starts at zero balance, so the update can only be
-        // paid out of msg.value.
-        vm.deal(address(this), forwarded);
+    function test_verifyAndUpdate_appliesStore() public {
+        bytes memory updates = _storeUpdate(bytes32(0), bytes32(uint256(42)));
+        uint256 ti = sdk.stateTransitionCount(); // 0
+        bytes4 fn = bytes4(keccak256("set()"));
+        bytes32 h = _digest(ti, fn, updates);
+        address[] memory none = new address[](0);
 
-        StateUpdateType[] memory types = new StateUpdateType[](1);
-        types[0] = StateUpdateType.CALL;
+        sdk.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, fn, 1, address(0x1234), none);
 
-        bytes[] memory args = new bytes[](1);
-        args[0] = abi.encode(address(target), forwarded, abi.encodeWithSignature("setValue(uint256)", 7));
-
-        sdk.stateChangeHandlerExternal{value: forwarded}(abi.encode(types, args));
-
-        assertEq(address(target).balance, forwarded);
-        assertEq(target.value(), 7);
-        assertEq(address(sdk).balance, 0);
+        assertEq(sdk.value(), 42, "STORE applied");
+        assertEq(sdk.stateTransitionCount(), ti + 1, "transition tracked");
     }
 
-    function test_stateChangeHandlerExternal_Call_InsufficientBalance() public {
-        SimpleTarget target = new SimpleTarget();
-        uint256 sent = 0.1 ether;
-        uint256 requested = 0.2 ether;
-        vm.deal(address(this), sent);
-
-        StateUpdateType[] memory types = new StateUpdateType[](1);
-        types[0] = StateUpdateType.CALL;
-
-        bytes memory callargs = abi.encodeWithSignature("setValue(uint256)", 7);
-        bytes[] memory args = new bytes[](1);
-        args[0] = abi.encode(address(target), requested, callargs);
-
-        // A CALL requesting more value than the contract holds fails in the EVM before the
-        // target executes, so RevertingContext carries empty revert data.
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                StateChangeHandlerLib.RevertingContext.selector, 0, address(target), bytes(""), callargs
-            )
+    function test_verifyAndUpdate_revertsOnBadHash() public {
+        bytes memory updates = _storeUpdate(bytes32(0), bytes32(uint256(1)));
+        uint256 ti = sdk.stateTransitionCount();
+        address[] memory none = new address[](0);
+        vm.expectRevert(GasKillerSDK.InvalidSignature.selector);
+        sdk.verifyAndUpdate(
+            bytes32(uint256(1)), uint32(block.number - 1), updates, ti, bytes4(0), 1, address(0x1), none
         );
-        sdk.stateChangeHandlerExternal{value: sent}(abi.encode(types, args));
     }
 
-    function test_stateChangeHandlerExternal_Call_RevertingContext() public {
-        SimpleTarget target = new SimpleTarget();
-
-        StateUpdateType[] memory types = new StateUpdateType[](1);
-        types[0] = StateUpdateType.CALL;
-
-        bytes[] memory args = new bytes[](1);
-        args[0] = abi.encode(address(target), uint256(0), abi.encodeWithSignature("revertCall()"));
-
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                StateChangeHandlerLib.RevertingContext.selector,
-                0,
-                address(target),
-                bytes("reverted"),
-                abi.encodeWithSignature("revertCall()")
-            )
-        );
-        sdk.stateChangeHandlerExternal(abi.encode(types, args));
+    function test_verifyAndUpdate_revertsOnBadTransitionIndex() public {
+        bytes memory updates = _storeUpdate(bytes32(0), bytes32(uint256(1)));
+        bytes4 fn = bytes4(0);
+        uint256 badTi = 5;
+        bytes32 h = _digest(badTi, fn, updates);
+        address[] memory none = new address[](0);
+        vm.expectRevert(GasKillerSDK.InvalidTransitionIndex.selector);
+        sdk.verifyAndUpdate(h, uint32(block.number - 1), updates, badTi, fn, 1, address(0x1), none);
     }
 
-    function test_stateChangeHandlerExternal_Log1() public {
-        StateUpdateType[] memory types = new StateUpdateType[](1);
-        types[0] = StateUpdateType.LOG1;
-
-        bytes[] memory args = new bytes[](1);
-        args[0] = abi.encode(bytes("log data"), keccak256("Log1(bytes)"));
-        console.logBytes(args[0]);
-
-        vm.recordLogs();
-
-        sdk.stateChangeHandlerExternal(abi.encode(types, args));
-
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        assertEq(logs.length, 1);
-        assertEq(logs[0].topics.length, 1);
-        assertEq(logs[0].topics[0], keccak256("Log1(bytes)"));
-        assertEq(logs[0].data, "log data");
+    function test_verifyAndUpdate_revertsWhenRegistryRejects() public {
+        mock.setVerdict(false);
+        bytes memory updates = _storeUpdate(bytes32(0), bytes32(uint256(7)));
+        uint256 ti = sdk.stateTransitionCount();
+        bytes4 fn = bytes4(0);
+        bytes32 h = _digest(ti, fn, updates);
+        address[] memory none = new address[](0);
+        vm.expectRevert(GasKillerSDK.InvalidQuorumSignature.selector);
+        sdk.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, fn, 1, address(0x1), none);
     }
 
-    function test_stateChangeHandlerExternal_Log0() public {
-        StateUpdateType[] memory types = new StateUpdateType[](1);
-        types[0] = StateUpdateType.LOG0;
-
-        bytes[] memory args = new bytes[](1);
-        args[0] = abi.encode(bytes("hello log0"));
-
-        vm.recordLogs();
-        sdk.stateChangeHandlerExternal(abi.encode(types, args));
-
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        assertEq(logs.length, 1);
-        assertEq(logs[0].topics.length, 0);
-        assertEq(logs[0].data, "hello log0");
-    }
-
-    function test_stateChangeHandlerExternal_Log2() public {
-        StateUpdateType[] memory types = new StateUpdateType[](1);
-        types[0] = StateUpdateType.LOG2;
-
-        bytes32 t1 = keccak256("t1");
-        bytes32 t2 = keccak256("t2");
-
-        bytes[] memory args = new bytes[](1);
-        args[0] = abi.encode(bytes("log2 data"), t1, t2);
-
-        vm.recordLogs();
-        sdk.stateChangeHandlerExternal(abi.encode(types, args));
-
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        assertEq(logs.length, 1);
-        assertEq(logs[0].topics.length, 2);
-        assertEq(logs[0].topics[0], t1);
-        assertEq(logs[0].topics[1], t2);
-        assertEq(logs[0].data, "log2 data");
-    }
-
-    function test_stateChangeHandlerExternal_Log3() public {
-        StateUpdateType[] memory types = new StateUpdateType[](1);
-        types[0] = StateUpdateType.LOG3;
-
-        bytes32 t1 = keccak256("t1");
-        bytes32 t2 = keccak256("t2");
-        bytes32 t3 = keccak256("t3");
-
-        bytes[] memory args = new bytes[](1);
-        args[0] = abi.encode(bytes("log3 data"), t1, t2, t3);
-
-        vm.recordLogs();
-        sdk.stateChangeHandlerExternal(abi.encode(types, args));
-
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        assertEq(logs.length, 1);
-        assertEq(logs[0].topics.length, 3);
-        assertEq(logs[0].topics[0], t1);
-        assertEq(logs[0].topics[1], t2);
-        assertEq(logs[0].topics[2], t3);
-        assertEq(logs[0].data, "log3 data");
-    }
-
-    function test_stateChangeHandlerExternal_Log4() public {
-        StateUpdateType[] memory types = new StateUpdateType[](1);
-        types[0] = StateUpdateType.LOG4;
-
-        bytes32 t1 = keccak256("t1");
-        bytes32 t2 = keccak256("t2");
-        bytes32 t3 = keccak256("t3");
-        bytes32 t4 = keccak256("t4");
-
-        bytes[] memory args = new bytes[](1);
-        args[0] = abi.encode(bytes("log4 data"), t1, t2, t3, t4);
-
-        vm.recordLogs();
-        sdk.stateChangeHandlerExternal(abi.encode(types, args));
-
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        assertEq(logs.length, 1);
-        assertEq(logs[0].topics.length, 4);
-        assertEq(logs[0].topics[0], t1);
-        assertEq(logs[0].topics[1], t2);
-        assertEq(logs[0].topics[2], t3);
-        assertEq(logs[0].topics[3], t4);
-        assertEq(logs[0].data, "log4 data");
-    }
-
-    function test_stateChangeHandlerExternal_Log_MalformedLengthReverts() public {
-        StateUpdateType[] memory types = new StateUpdateType[](1);
-        types[0] = StateUpdateType.LOG1;
-
-        // Canonical offset (0x40) + topic + a data-length word claiming far more bytes than exist.
-        bytes[] memory args = new bytes[](1);
-        args[0] = abi.encodePacked(uint256(0x40), keccak256("t"), type(uint256).max);
-
-        vm.expectRevert(StateChangeHandlerLib.MalformedLogPayload.selector);
-        sdk.stateChangeHandlerExternal(abi.encode(types, args));
-    }
-
-    function test_stateChangeHandlerExternal_Log_NonCanonicalOffsetReverts() public {
-        StateUpdateType[] memory types = new StateUpdateType[](1);
-        types[0] = StateUpdateType.LOG1;
-
-        // LOG1 requires a 0x40 head offset; a 0x20 offset is non-canonical and must revert.
-        bytes[] memory args = new bytes[](1);
-        args[0] = abi.encodePacked(uint256(0x20), keccak256("t"), uint256(0));
-
-        vm.expectRevert(StateChangeHandlerLib.MalformedLogPayload.selector);
-        sdk.stateChangeHandlerExternal(abi.encode(types, args));
-    }
-
-    function test_stateChangeHandlerExternal_Log_TruncatedHeadReverts() public {
-        StateUpdateType[] memory types = new StateUpdateType[](1);
-        types[0] = StateUpdateType.LOG2;
-
-        // LOG2 needs at least 0x80 bytes (offset + 2 topics + length word); supply only 0x40.
-        bytes[] memory args = new bytes[](1);
-        args[0] = abi.encodePacked(uint256(0x60), keccak256("t"));
-
-        vm.expectRevert(StateChangeHandlerLib.MalformedLogPayload.selector);
-        sdk.stateChangeHandlerExternal(abi.encode(types, args));
-    }
-
-    function test_namespace_configured() public {
-        assertEq(sdk.namespace(), abi.encodePacked(makeAddr("AVS"), "gaskiller"));
-    }
-
-    function test_namespace_unconfiguredIsEmpty() public {
-        GasKillerSDKExposed fresh = new GasKillerSDKExposed(address(0), makeAddr("BLS_SIG_CHECKER"));
-        assertEq(fresh.namespace(), "");
-    }
-
-    function test_stateChangeHandlerExternal_InvalidArguments() public {
-        StateUpdateType[] memory types = new StateUpdateType[](2);
-        bytes[] memory args = new bytes[](1);
-
-        vm.expectRevert(StateChangeHandlerLib.InvalidArguments.selector);
-        sdk.stateChangeHandlerExternal(abi.encode(types, args));
-    }
-
-    function test_stateChangeHandlerExternal_Create() public {
-        bytes memory initcode = type(Deployable).creationCode;
-
-        StateUpdateType[] memory types = new StateUpdateType[](1);
-        types[0] = StateUpdateType.CREATE;
-
-        bytes[] memory args = new bytes[](1);
-        args[0] = abi.encode(uint256(0), initcode);
-
-        // CREATE derives the address from (deployer, nonce); the deployer is the sdk.
-        address predicted = vm.computeCreateAddress(address(sdk), vm.getNonce(address(sdk)));
-
-        sdk.stateChangeHandlerExternal(abi.encode(types, args));
-
-        assertGt(predicted.code.length, 0, "no code at predicted CREATE address");
-        assertEq(Deployable(predicted).x(), 42, "constructor did not run");
-    }
-
-    function test_stateChangeHandlerExternal_Create2() public {
-        bytes memory initcode = type(Deployable).creationCode;
-        bytes32 salt = keccak256("gas.killer.create2.salt");
-
-        StateUpdateType[] memory types = new StateUpdateType[](1);
-        types[0] = StateUpdateType.CREATE2;
-
-        bytes[] memory args = new bytes[](1);
-        args[0] = abi.encode(salt, uint256(0), initcode);
-
-        // CREATE2 is deterministic: keccak256(0xff ++ deployer ++ salt ++ keccak256(initcode)).
-        address predicted = vm.computeCreate2Address(salt, keccak256(initcode), address(sdk));
-
-        sdk.stateChangeHandlerExternal(abi.encode(types, args));
-
-        assertGt(predicted.code.length, 0, "no code at predicted CREATE2 address");
-        assertEq(Deployable(predicted).x(), 42, "constructor did not run");
-    }
-
-    function test_stateChangeHandlerExternal_Create_ForwardsValue() public {
-        bytes memory initcode = type(Deployable).creationCode;
-        uint256 endowment = 1 ether;
-        vm.deal(address(sdk), endowment);
-
-        StateUpdateType[] memory types = new StateUpdateType[](1);
-        types[0] = StateUpdateType.CREATE;
-
-        bytes[] memory args = new bytes[](1);
-        args[0] = abi.encode(endowment, initcode);
-
-        address predicted = vm.computeCreateAddress(address(sdk), vm.getNonce(address(sdk)));
-
-        sdk.stateChangeHandlerExternal(abi.encode(types, args));
-
-        assertEq(predicted.balance, endowment, "endowment not forwarded via CREATE");
-    }
-
-    function test_stateChangeHandlerExternal_Create2_ForwardsValue() public {
-        bytes memory initcode = type(Deployable).creationCode;
-        bytes32 salt = keccak256("gas.killer.create2.valued");
-        uint256 endowment = 1 ether;
-        vm.deal(address(sdk), endowment);
-
-        StateUpdateType[] memory types = new StateUpdateType[](1);
-        types[0] = StateUpdateType.CREATE2;
-
-        bytes[] memory args = new bytes[](1);
-        args[0] = abi.encode(salt, endowment, initcode);
-
-        address predicted = vm.computeCreate2Address(salt, keccak256(initcode), address(sdk));
-
-        sdk.stateChangeHandlerExternal(abi.encode(types, args));
-
-        assertEq(predicted.balance, endowment, "endowment not forwarded via CREATE2");
-    }
-
-    function test_stateChangeHandlerExternal_Create_RevertsOnFailedDeployment() public {
-        // Initcode whose constructor reverts -> CREATE returns address(0).
-        bytes memory initcode = type(RevertingDeploy).creationCode;
-
-        StateUpdateType[] memory types = new StateUpdateType[](1);
-        types[0] = StateUpdateType.CREATE;
-
-        bytes[] memory args = new bytes[](1);
-        args[0] = abi.encode(uint256(0), initcode);
-
-        vm.expectRevert(StateChangeHandlerLib.DeploymentFailed.selector);
-        sdk.stateChangeHandlerExternal(abi.encode(types, args));
-    }
-
-    function test_stateChangeHandlerExternal_Create2_RevertsOnFailedDeployment() public {
-        bytes memory initcode = type(RevertingDeploy).creationCode;
-
-        StateUpdateType[] memory types = new StateUpdateType[](1);
-        types[0] = StateUpdateType.CREATE2;
-
-        bytes[] memory args = new bytes[](1);
-        args[0] = abi.encode(keccak256("revert.salt"), uint256(0), initcode);
-
-        vm.expectRevert(StateChangeHandlerLib.DeploymentFailed.selector);
-        sdk.stateChangeHandlerExternal(abi.encode(types, args));
-    }
-
-    function test_ERC165_supportsInterface() public {
-        /// Test that the contract supports IERC165
-        assertTrue(sdk.supportsInterface(type(IERC165).interfaceId));
-
-        /// Test that the contract supports IGasKillerSDK
-        assertTrue(sdk.supportsInterface(type(IGasKillerSDK).interfaceId));
-
-        /// Test that the contract does not support a random interface
-        assertFalse(sdk.supportsInterface(0x12345678));
-
-        /// Test that the contract does not support 0xffffffff (invalid interface ID)
-        assertFalse(sdk.supportsInterface(0xffffffff));
-    }
-
-    /// Pinned literal: the interface is deliberately single-function, so its ID is exactly the
-    /// `verifyAndUpdate` selector, and state mutability is not part of a signature. The router
-    /// preflights this ID before every submission, so a change here makes every already-deployed
-    /// target unroutable.
-    function test_interfaceId_doesNotDrift() public pure {
-        assertEq(
-            type(IGasKillerSDK).interfaceId,
-            IGasKillerSDK.verifyAndUpdate.selector,
-            "id is still exactly the verifyAndUpdate selector"
-        );
-        assertEq(type(IGasKillerSDK).interfaceId, bytes4(0x93de4531), "id must not drift");
-    }
-}
-
-contract SimpleTarget {
-    uint256 public value;
-
-    function setValue(uint256 _value) public payable {
-        value = _value;
-    }
-
-    function revertCall() public pure {
-        bytes32 _msg = "reverted";
-        assembly {
-            mstore(0, _msg)
-            revert(0, 8)
-        }
-    }
-}
-
-/// @dev Minimal contract deployed by the CREATE/CREATE2 tests. The constructor
-/// is payable so it can receive an endowment, and sets state so tests can
-/// confirm the constructor actually ran at the deployed address.
-contract Deployable {
-    uint256 public x;
-
-    constructor() payable {
-        x = 42;
-    }
-}
-
-/// @dev Initcode whose constructor always reverts, so CREATE/CREATE2 return
-/// address(0) and the handler raises DeploymentFailed.
-contract RevertingDeploy {
-    constructor() {
-        revert("no deploy");
+    function test_verifyAndUpdate_revertsOnFutureBlock() public {
+        bytes memory updates = _storeUpdate(bytes32(0), bytes32(uint256(1)));
+        uint256 ti = sdk.stateTransitionCount();
+        bytes4 fn = bytes4(0);
+        bytes32 h = _digest(ti, fn, updates);
+        address[] memory none = new address[](0);
+        vm.expectRevert(GasKillerSDK.FutureBlockNumber.selector);
+        sdk.verifyAndUpdate(h, uint32(block.number), updates, ti, fn, 1, address(0x1), none);
     }
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.27;
 
-// src/schnorr/libraries/Secp256k1.sol
+// src/libraries/Secp256k1.sol
 
 /// @title Secp256k1
 /// @notice Minimal affine secp256k1 point arithmetic over the base field, used by

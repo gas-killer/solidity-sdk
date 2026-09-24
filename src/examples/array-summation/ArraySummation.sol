@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.13;
+pragma solidity ^0.8.27;
 
 import {GasKillerSDK} from "../../GasKillerSDK.sol";
 
 /// @title ArraySummation
 /// @notice Example Gas Killer SDK consumer that maintains an on-chain array and computes sums off-chain
-/// @dev Demonstrates how to integrate GasKillerSDK: the `sum` and `setArrayElement` functions
-///      are guarded by `trackState` so off-chain operators can propose the state update via
-///      `verifyAndUpdate` rather than running the computation on-chain.
+/// @dev `verifyAndUpdate` is inherited from `GasKillerSDK`, so state updates are approved by
+///      a single aggregate Schnorr signature verified against a `SchnorrStakeRegistry`.
 contract ArraySummation is GasKillerSDK {
     /// @notice Thrown when constructor arguments would produce an unusable contract
     error InvalidConfiguration();
@@ -34,14 +33,20 @@ contract ArraySummation is GasKillerSDK {
     uint256[] public values;
 
     /// @notice Deploy a new ArraySummation contract and initialise the array
-    /// @param _avsAddress The AVS service manager address used for BLS quorum validation
-    /// @param _blsSigChecker The BLS signature checker contract address
+    /// @param _avsAddress The AVS service manager address this contract is scoped to
+    /// @param _schnorrStakeRegistry The Schnorr stake registry verifying aggregate operator quorums
     /// @param _arraySize Number of elements to generate; must be > 0
     /// @param _maxValue Exclusive upper bound for element values; must be > 0
     /// @param _seed Seed for pseudorandom generation; 0 falls back to `block.timestamp`
-    constructor(address _avsAddress, address _blsSigChecker, uint256 _arraySize, uint256 _maxValue, uint256 _seed) {
+    constructor(
+        address _avsAddress,
+        address _schnorrStakeRegistry,
+        uint256 _arraySize,
+        uint256 _maxValue,
+        uint256 _seed
+    ) {
         _setAvsAddress(_avsAddress);
-        _setBlsSignatureChecker(_blsSigChecker);
+        _setSchnorrRegistry(_schnorrStakeRegistry);
 
         if (_arraySize == 0 || _maxValue == 0) {
             revert InvalidConfiguration();

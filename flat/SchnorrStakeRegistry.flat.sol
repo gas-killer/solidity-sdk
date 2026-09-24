@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.27;
 
-// src/schnorr/interface/ISchnorrStakeRegistry.sol
+// src/interface/ISchnorrStakeRegistry.sol
 
 /// @title ISchnorrStakeRegistry
-/// @notice Verification surface the `SchnorrGasKillerSDK` depends on. Kept minimal (and
+/// @notice Verification surface the `GasKillerSDK` depends on. Kept minimal (and
 ///         separate from the concrete registry) so the SDK can be unit-tested against a
 ///         mock, mirroring how `GasKillerSDK` depends on ERC-1271 `isValidSignature`.
 interface ISchnorrStakeRegistry {
@@ -23,7 +23,7 @@ interface ISchnorrStakeRegistry {
     ) external view returns (bool);
 }
 
-// src/schnorr/libraries/SchnorrVerify.sol
+// src/libraries/SchnorrVerify.sol
 
 /// @title SchnorrVerify
 /// @notice Constant-gas verification of an aggregate secp256k1 Schnorr signature using the
@@ -73,7 +73,7 @@ library SchnorrVerify {
     }
 }
 
-// src/schnorr/libraries/Secp256k1.sol
+// src/libraries/Secp256k1.sol
 
 /// @title Secp256k1
 /// @notice Minimal affine secp256k1 point arithmetic over the base field, used by
@@ -161,7 +161,7 @@ library Secp256k1 {
     }
 }
 
-// src/schnorr/SchnorrStakeRegistry.sol
+// src/SchnorrStakeRegistry.sol
 
 /// @title SchnorrStakeRegistry
 /// @notice Stake registry for the **aggregate Schnorr** quorum scheme — the Schnorr

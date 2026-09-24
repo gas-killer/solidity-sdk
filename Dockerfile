@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Deploy image for gas-killer/solidity-sdk demo targets (e.g. ArraySummation).
 # Carries forge + jq + the SDK contracts so a Kubernetes job can deploy a
-# correctly-wired target (real BLSSignatureChecker) against a freshly-deployed AVS.
+# target wired to the AVS's SchnorrStakeRegistry.
 # See script/DeployArraySummation.s.sol and the service chart's deploy-target-job.yaml.
 FROM debian:bookworm-slim
 
