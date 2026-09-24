@@ -5,7 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {ReentrantCheckpoint} from "../../src/examples/reentrant-checkpoint/ReentrantCheckpoint.sol";
 import {ReentrantObserver} from "../../src/examples/reentrant-checkpoint/ReentrantObserver.sol";
 import {ReentrantCheckpointFactory} from "../../src/examples/reentrant-checkpoint/ReentrantCheckpointFactory.sol";
-import {ISchnorrStakeRegistry} from "../../src/schnorr/interface/ISchnorrStakeRegistry.sol";
+import {ISchnorrStakeRegistry} from "../../src/interface/ISchnorrStakeRegistry.sol";
 import {StateUpdateType, StateChangeHandlerLib} from "../../src/StateChangeHandlerLib.sol";
 
 /// Registry stub that approves any signature — this suite exercises the

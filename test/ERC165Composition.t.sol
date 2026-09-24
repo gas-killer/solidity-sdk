@@ -9,9 +9,7 @@ import {IERC721Metadata} from "@openzeppelin/contracts/token/ERC721/extensions/I
 
 import {GasKillerSDK} from "../src/GasKillerSDK.sol";
 import {IGasKillerSDK} from "../src/interface/IGasKillerSDK.sol";
-import {SchnorrGasKillerSDK} from "../src/schnorr/SchnorrGasKillerSDK.sol";
-import {ISchnorrGasKillerSDK} from "../src/schnorr/interface/ISchnorrGasKillerSDK.sol";
-import {ISchnorrGasKillerSDKBatch} from "../src/schnorr/interface/ISchnorrGasKillerSDKBatch.sol";
+import {IGasKillerSDKBatch} from "../src/interface/IGasKillerSDKBatch.sol";
 
 /// A target that inherits the SDK and an OpenZeppelin module, resolving the clash the way
 /// every OpenZeppelin module documents: one override that defers entirely to `super`.
@@ -33,14 +31,6 @@ contract Erc721FirstNft is ERC721, GasKillerSDK {
     }
 }
 
-contract SchnorrSdkFirstNft is SchnorrGasKillerSDK, ERC721 {
-    constructor() ERC721("SchnorrSdkFirst", "SSF") {}
-
-    function supportsInterface(bytes4 interfaceId) public view override(SchnorrGasKillerSDK, ERC721) returns (bool) {
-        return super.supportsInterface(interfaceId);
-    }
-}
-
 /// The router gates every submission on an ERC-165 probe, so an SDK interface ID that a
 /// target fails to report is indistinguishable from a target that does not implement the
 /// SDK at all: the round is rejected before any signature is checked. A target composing
@@ -50,6 +40,7 @@ contract ERC165CompositionTest is Test {
         SdkFirstNft target = new SdkFirstNft();
 
         assertTrue(target.supportsInterface(type(IGasKillerSDK).interfaceId), "gas killer id");
+        assertTrue(target.supportsInterface(type(IGasKillerSDKBatch).interfaceId), "batch id");
         assertTrue(target.supportsInterface(type(IERC721).interfaceId), "erc721 id");
         assertTrue(target.supportsInterface(type(IERC721Metadata).interfaceId), "erc721 metadata id");
         assertTrue(target.supportsInterface(type(IERC165).interfaceId), "erc165 id");
@@ -60,17 +51,7 @@ contract ERC165CompositionTest is Test {
         Erc721FirstNft target = new Erc721FirstNft();
 
         assertTrue(target.supportsInterface(type(IGasKillerSDK).interfaceId), "gas killer id");
-        assertTrue(target.supportsInterface(type(IERC721).interfaceId), "erc721 id");
-        assertTrue(target.supportsInterface(type(IERC721Metadata).interfaceId), "erc721 metadata id");
-        assertTrue(target.supportsInterface(type(IERC165).interfaceId), "erc165 id");
-        assertFalse(target.supportsInterface(0xffffffff), "invalid id");
-    }
-
-    function test_schnorrSdkFirst_reportsUnionOfInterfaceIds() public {
-        SchnorrSdkFirstNft target = new SchnorrSdkFirstNft();
-
-        assertTrue(target.supportsInterface(type(ISchnorrGasKillerSDK).interfaceId), "schnorr gas killer id");
-        assertTrue(target.supportsInterface(type(ISchnorrGasKillerSDKBatch).interfaceId), "schnorr batch id");
+        assertTrue(target.supportsInterface(type(IGasKillerSDKBatch).interfaceId), "batch id");
         assertTrue(target.supportsInterface(type(IERC721).interfaceId), "erc721 id");
         assertTrue(target.supportsInterface(type(IERC721Metadata).interfaceId), "erc721 metadata id");
         assertTrue(target.supportsInterface(type(IERC165).interfaceId), "erc165 id");

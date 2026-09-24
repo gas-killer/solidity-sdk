@@ -1,54 +1,53 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.27;
 
-import {
-    IBLSSignatureChecker,
-    IBLSSignatureCheckerTypes
-} from "@eigenlayer-middleware/interfaces/IBLSSignatureChecker.sol";
 import {ERC165} from "@openzeppelin/contracts/utils/introspection/ERC165.sol";
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
-
 import {IGasKillerSDK} from "./interface/IGasKillerSDK.sol";
+import {IGasKillerSDKBatch, TaskSubmission} from "./interface/IGasKillerSDKBatch.sol";
 import {StateTracker} from "./StateTracker.sol";
 import {TransitionGuard} from "./TransitionGuard.sol";
 import {StateChangeHandlerLib, StateUpdateType} from "./StateChangeHandlerLib.sol";
+import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
 
 /// @title GasKillerSDK
-/// @notice Base SDK for implementing Gas Killer functionality in contracts
-/// @dev Inherit from this contract to add Gas Killer capabilities to your contract.
+/// @notice Base contract for Gas Killer targets. Authorises a state transition with a
+///         **single** aggregate Schnorr signature verified against a `SchnorrStakeRegistry`
+///         (constant gas, non-signer subtraction) and applies the signed state updates.
 ///
-///      `verifyAndUpdate` is `guardTransition`-protected (see `TransitionGuard`): a `CALL`
+/// @dev The signed message is `sha256(abi.encode(transitionIndex, address(this),
+///      targetFunction, storageUpdates))`, independent of the signature scheme, so the
+///      off-chain digest and the slashing/fraud-proof machinery do not depend on it.
+///
+///      Both entrypoints are `guardTransition`-protected (see `TransitionGuard`): a `CALL`
 ///      state update runs arbitrary external code mid-transition, so re-entering
-///      `verifyAndUpdate` with the *next* transition's valid quorum signature would
-///      otherwise interleave two signed transitions. The same transient flag is queryable
-///      as `inTransition()` so external readers can reject mid-transition state.
-abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKillerSDK {
-    /// @custom:storage-location erc7201:gaskiller.GasKillerSDK.storage
+///      `verifyAndUpdate` with the *next* transition's valid signature would otherwise
+///      interleave two signed transitions. The same transient flag is queryable as
+///      `inTransition()` so external readers can reject mid-transition state.
+///
+///      Both entrypoints are also `payable`, so a caller can fund value-bearing state
+///      updates out of `msg.value` — see the per-function docs for the funding rules.
+abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKillerSDK, IGasKillerSDKBatch {
     struct GasKillerSDKStorage {
-        /// @notice Deprecated. Maintained to preserve storage layout. Now derived on read by `namespace()`
-        bytes __deprecated_namespace;
-        /// @notice The AVS service manager address
         address avsAddress;
-        /// @notice The BLS signature checker contract used to verify operator signatures
-        IBLSSignatureChecker blsSignatureChecker;
-        /// @notice Maximum number of blocks a reference block may lag behind the current block
-        uint256 blockStaleMeasure;
+        ISchnorrStakeRegistry registry;
+        uint96 blockStaleMeasure;
     }
 
-    // keccak256(abi.encode(uint256(keccak256("gaskiller.GasKillerSDK.storage")) - 1)) & ~bytes32(uint256(0xff));
-    bytes32 private constant GAS_KILLER_SDK_STORAGE_LOCATION =
-        0x321ebf629ed2e1e368f0890e8fdd95cf9a2ae5961b66a1805f0b2ec84e21d000;
+    // keccak256(abi.encode(uint256(keccak256("gaskiller.SchnorrGasKillerSDK.storage")) - 1)) & ~bytes32(uint256(0xff))
+    bytes32 private constant STORAGE_LOCATION = 0x1d6f9f139320a34a32f3b29eb8638270178e831962a74100c9e8b433f21e1200;
 
-    /// @notice Denominator used when evaluating stake percentage thresholds (representing 100%)
-    uint8 public constant THRESHOLD_DENOMINATOR = 100;
-
-    /// @notice Minimum percentage of quorum stake that must have signed to approve a state update (QUORUM_THRESHOLD/THRESHOLD_DENOMINATOR)
-    uint8 public constant QUORUM_THRESHOLD = 66;
-
-    /// @notice Default maximum age (in blocks) a reference block is considered valid when none is configured
     uint256 private constant DEFAULT_BLOCK_STALE_MEASURE = 300;
 
-    /// @notice Verify BLS quorum signatures and apply the encoded state updates
+    error FutureBlockNumber();
+    error StaleBlockNumber();
+    error InvalidTransitionIndex();
+    error InvalidSignature();
+    error InvalidQuorumSignature();
+    error EmptyBatch();
+    error BlockStaleMeasureOverflow();
+
+    /// @notice Verify an aggregate Schnorr quorum signature and apply the state updates.
     /// @dev Payable so a caller can fund value-bearing `CALL`/`CREATE`/`CREATE2` state updates
     ///      out of `msg.value`. The value each update moves is fixed inside the quorum-signed
     ///      `storageUpdates`, so `msg.value` only tops up this contract's balance — it cannot
@@ -58,62 +57,137 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKil
     ///      this contract. Inheriting contracts whose callers may over-send must provide their
     ///      own recovery path (e.g. a withdrawal function, or a refund executed as a signed
     ///      CALL update in a later transition).
-    /// @param msgHash The hash of the message to verify
-    /// @param quorumNumbers The quorum numbers to check signatures for
-    /// @param referenceBlockNumber The block number to use as reference for operator set
-    /// @param storageUpdates The storage updates to verify
-    /// @param transitionIndex The transition index
-    /// @param targetFunction The target function selector
-    /// @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
+    /// @param msgHash             the task digest (recomputed and checked below).
+    /// @param referenceBlockNumber block at which stake/keys are evaluated by the registry.
+    /// @param storageUpdates      ABI-encoded `(StateUpdateType[], bytes[])`.
+    /// @param transitionIndex     expected `stateTransitionCount() - 1`.
+    /// @param targetFunction      selector bound into the digest.
+    /// @param s                   aggregate Schnorr response scalar.
+    /// @param Raddr               aggregate nonce address `address(R)`.
+    /// @param nonSigners          operators that did not sign, strictly ascending.
     function verifyAndUpdate(
         bytes32 msgHash,
-        bytes calldata quorumNumbers,
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
         bytes4 targetFunction,
-        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
-    ) external payable guardTransition trackState {
-        GasKillerSDKStorage storage $ = _getGasKillerSDKStorage();
+        uint256 s,
+        address Raddr,
+        address[] calldata nonSigners
+    ) external payable guardTransition {
+        _verifyAndUpdateOne(
+            msgHash, referenceBlockNumber, storageUpdates, transitionIndex, targetFunction, s, Raddr, nonSigners
+        );
+    }
 
-        // Check block number validity
+    /// @notice Verify and apply a sequence of independently signed state transitions in
+    ///         one transaction, amortizing the intrinsic and cold-access costs across the
+    ///         batch (sub-transitions after the first verify at warm-access prices).
+    /// @dev Each applied submission is checked exactly as a standalone `verifyAndUpdate`
+    ///      would check it — same digest, same registry verification — so batching changes
+    ///      nothing for the off-chain signing path. Transitions apply in order; the
+    ///      `guardTransition` latch is held across the whole batch, and any failing
+    ///      sub-transition reverts the entire batch.
+    ///
+    ///      A submission whose `transitionIndex` is already settled is SKIPPED (not
+    ///      validated, not applied) rather than reverting the batch: settlement is
+    ///      permissionless, so a third party who lifts one submission from the mempool
+    ///      and settles it standalone could otherwise nullify the whole batch with one
+    ///      cheap front-run. An index can only ever be consumed by a quorum-signed
+    ///      transition for this contract, so a skipped item's transition has already
+    ///      happened. Reverts (`InvalidTransitionIndex`) only on a genuine gap — an index
+    ///      above the next expected one.
+    ///
+    ///      Batch assemblers: a `CALL` state update forwards all remaining gas to its target
+    ///      with no cap (see `StateChangeHandlerLib`). A greedy/griefing target in an early
+    ///      sub-transition can therefore starve every later one in the same batch, reverting
+    ///      the whole (atomic) batch — no partial-state hazard, but it does nullify the
+    ///      amortization this function exists for.
+    ///
+    ///      Payable on the same terms as `verifyAndUpdate`, with one batch-specific wrinkle:
+    ///      `msg.value` tops up this contract's balance **once for the whole batch** and is
+    ///      pooled across every applied sub-transition rather than partitioned per submission.
+    ///      Assemblers must send the *sum* of what the applied submissions spend; since the
+    ///      batch is atomic, a shortfall anywhere reverts all of it. A skipped (already-settled)
+    ///      submission spends nothing, so a front-run leaves its share unspent — and, as with
+    ///      the standalone entrypoint, unspent value is not refunded.
+    /// @param submissions The transitions to apply, in order of ascending transition index.
+    function verifyAndUpdateBatch(TaskSubmission[] calldata submissions) external payable guardTransition {
+        uint256 len = submissions.length;
+        require(len != 0, EmptyBatch());
+        for (uint256 i = 0; i < len; ++i) {
+            TaskSubmission calldata sub = submissions[i];
+            // Already settled (e.g. front-run or redelivered) → skip, don't poison the batch.
+            if (sub.transitionIndex + 1 <= stateTransitionCount()) continue;
+            _verifyAndUpdateOne(
+                sub.msgHash,
+                sub.referenceBlockNumber,
+                sub.storageUpdates,
+                sub.transitionIndex,
+                sub.targetFunction,
+                sub.s,
+                sub.Raddr,
+                sub.nonSigners
+            );
+        }
+    }
+
+    /// @dev The single-transition settlement path shared by both entrypoints. Callers must
+    ///      hold the `guardTransition` latch.
+    function _verifyAndUpdateOne(
+        bytes32 msgHash,
+        uint32 referenceBlockNumber,
+        bytes calldata storageUpdates,
+        uint256 transitionIndex,
+        bytes4 targetFunction,
+        uint256 s,
+        address Raddr,
+        address[] calldata nonSigners
+    ) private trackState {
         require(referenceBlockNumber < block.number, FutureBlockNumber());
         require((uint256(referenceBlockNumber) + _getBlockStaleMeasure()) >= block.number, StaleBlockNumber());
 
-        // Verify transition index and message hash
         require(transitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
         bytes32 expectedHash = sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
         require(expectedHash == msgHash, InvalidSignature());
 
-        // Verify the signatures using checkSignatures
-        (IBLSSignatureCheckerTypes.QuorumStakeTotals memory stakeTotals,) = $.blsSignatureChecker
-            .checkSignatures(msgHash, quorumNumbers, referenceBlockNumber, nonSignerStakesAndSignature);
+        _verifyQuorum(msgHash, s, Raddr, nonSigners, referenceBlockNumber);
 
-        // Check that signatories own at least 66% of each quorum
-        uint256 quorumCount = quorumNumbers.length;
-        for (uint256 i = 0; i < quorumCount; ++i) {
-            require(
-                stakeTotals.signedStakeForQuorum[i] * THRESHOLD_DENOMINATOR
-                    >= stakeTotals.totalStakeForQuorum[i] * QUORUM_THRESHOLD,
-                InsufficientQuorumThreshold()
-            );
-        }
-
-        // Apply the state changes
         _stateChangeHandler(storageUpdates);
     }
 
+    function _verifyQuorum(
+        bytes32 msgHash,
+        uint256 s,
+        address Raddr,
+        address[] calldata nonSigners,
+        uint32 referenceBlockNumber
+    ) private view {
+        bool ok = _sto().registry.isValidSignature(msgHash, s, Raddr, nonSigners, referenceBlockNumber);
+        require(ok, InvalidQuorumSignature());
+    }
+
+    function _stateChangeHandler(bytes calldata storageUpdates) internal {
+        (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
+        StateChangeHandlerLib._runStateUpdates(types, args);
+    }
+
     /// @notice Query if a contract implements an interface
-    /// @dev Supports ERC-165 and IGasKillerSDK interface detection. Defers to `super` so a
+    /// @dev Supports ERC-165, IGasKillerSDK detection (the router's preflight
+    ///      probes the schnorr `verifyAndUpdate` selector before submitting), and the
+    ///      IGasKillerSDKBatch batching/latch extension. Defers to `super` so a
     ///      contract inheriting both this SDK and another OpenZeppelin ERC-165 module reports
     ///      the union of both ID sets.
     /// @param interfaceId The interface identifier, as specified in ERC-165
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
     function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
-        return interfaceId == type(IGasKillerSDK).interfaceId || super.supportsInterface(interfaceId);
+        return interfaceId == type(IGasKillerSDK).interfaceId || interfaceId == type(IGasKillerSDKBatch).interfaceId
+            || super.supportsInterface(interfaceId);
     }
 
     /// @notice Compute the expected message hash for a given transition, function, and storage updates
+    /// @dev Exact mirror of the ECDSA `GasKillerSDK.getMessageHash` — the digest is
+    ///      scheme-agnostic, so off-chain parity checks work unchanged.
     /// @param transitionIndex The transition index
     /// @param targetFunction The target function selector
     /// @param storageUpdates The ABI-encoded storage updates
@@ -126,75 +200,44 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKil
         return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
     }
 
-    /// @notice Return the configured AVS service manager address
-    /// @return The AVS address
+    /// @inheritdoc TransitionGuard
+    function inTransition() public view override(TransitionGuard, IGasKillerSDKBatch) returns (bool locked) {
+        return TransitionGuard.inTransition();
+    }
+
+    function schnorrRegistry() external view returns (address) {
+        return address(_sto().registry);
+    }
+
     function avsAddress() external view returns (address) {
-        return _getGasKillerSDKStorage().avsAddress;
+        return _sto().avsAddress;
     }
 
-    /// @notice Return the configured BLS signature checker address
-    /// @return The BLS signature checker address
-    function blsSignatureChecker() external view returns (address) {
-        return address(_getGasKillerSDKStorage().blsSignatureChecker);
-    }
-
-    /// @notice Return the namespace bytes derived from the AVS address
-    /// @dev Computed on read as `abi.encodePacked(avsAddress, "gaskiller")`, avoiding a dynamic-bytes SSTORE
-    ///      at configuration time. Returns empty bytes when the AVS address is unset.
-    /// @return The namespace
-    function namespace() external view returns (bytes memory) {
-        address _avsAddress = _getGasKillerSDKStorage().avsAddress;
-        if (_avsAddress == address(0)) {
-            return "";
-        }
-        return abi.encodePacked(_avsAddress, "gaskiller");
-    }
-
-    /// @notice Return the configured block stale measure (or the default if unset)
-    /// @return The block stale measure
     function blockStaleMeasure() external view returns (uint256) {
         return _getBlockStaleMeasure();
     }
 
-    /// @notice Decode and execute ABI-encoded storage updates
-    /// @param storageUpdates ABI-encoded `(StateUpdateType[], bytes[])` pair
-    function _stateChangeHandler(bytes calldata storageUpdates) internal {
-        (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        StateChangeHandlerLib._runStateUpdates(types, args);
-    }
-
-    /// @notice Set the AVS address
-    /// @dev `namespace()` derives its value from `avsAddress` on read, so no additional storage write happens here.
-    /// @param _avsAddress The new AVS service manager address
     function _setAvsAddress(address _avsAddress) internal {
-        _getGasKillerSDKStorage().avsAddress = _avsAddress;
+        _sto().avsAddress = _avsAddress;
     }
 
-    /// @notice Set the BLS signature checker contract
-    /// @param _blsSignatureChecker The new BLS signature checker address
-    function _setBlsSignatureChecker(address _blsSignatureChecker) internal {
-        GasKillerSDKStorage storage $ = _getGasKillerSDKStorage();
-        $.blsSignatureChecker = IBLSSignatureChecker(_blsSignatureChecker);
+    function _setSchnorrRegistry(address _registry) internal {
+        _sto().registry = ISchnorrStakeRegistry(_registry);
     }
 
-    /// @notice Set the maximum number of blocks a reference block may lag behind the current block
-    /// @param _blockStaleMeasure The new block stale measure value
     function _setBlockStaleMeasure(uint256 _blockStaleMeasure) internal {
-        _getGasKillerSDKStorage().blockStaleMeasure = _blockStaleMeasure;
+        require(_blockStaleMeasure <= type(uint96).max, BlockStaleMeasureOverflow());
+        _sto().blockStaleMeasure = uint96(_blockStaleMeasure);
     }
 
-    /// @notice Return the block stale measure, falling back to the default when unset
-    /// @return The effective block stale measure
     function _getBlockStaleMeasure() internal view returns (uint256) {
-        uint256 value = _getGasKillerSDKStorage().blockStaleMeasure;
-        return value == 0 ? DEFAULT_BLOCK_STALE_MEASURE : value;
+        uint256 v = _sto().blockStaleMeasure;
+        return v == 0 ? DEFAULT_BLOCK_STALE_MEASURE : v;
     }
 
-    /// @notice Load the ERC-7201 storage struct for GasKillerSDK
-    /// @return $ The GasKillerSDK storage struct
-    function _getGasKillerSDKStorage() private pure returns (GasKillerSDKStorage storage $) {
+    function _sto() private pure returns (GasKillerSDKStorage storage $) {
         assembly {
-            $.slot := GAS_KILLER_SDK_STORAGE_LOCATION
+            $.slot := STORAGE_LOCATION
         }
     }
 }

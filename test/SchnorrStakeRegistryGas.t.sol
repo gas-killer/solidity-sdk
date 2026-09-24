@@ -2,7 +2,7 @@
 pragma solidity ^0.8.29;
 
 import {Test, console2} from "forge-std/Test.sol";
-import {SchnorrStakeRegistry} from "../src/schnorr/SchnorrStakeRegistry.sol";
+import {SchnorrStakeRegistry} from "../src/SchnorrStakeRegistry.sol";
 
 /// @notice Gas benchmarks for `SchnorrStakeRegistry.isValidSignature`, measured in BOTH
 ///         access contexts, because the two differ ~3x and quoting one as the other has

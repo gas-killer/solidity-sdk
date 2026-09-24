@@ -3,7 +3,7 @@ name: Publish deploy image
 # Builds the solidity-sdk deploy image (forge + contracts) and pushes it to GHCR on
 # push/tag/manual events; pull requests build only (no push), so forked PRs with a
 # read-only GITHUB_TOKEN still validate. The service chart's deploy-target job uses the
-# image to deploy a demo target wired to a real BLSSignatureChecker.
+# image to deploy a demo target wired to a SchnorrStakeRegistry.
 on:
   push:
     branches:

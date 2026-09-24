@@ -2,7 +2,7 @@
 pragma solidity ^0.8.27;
 
 /// @title ISchnorrStakeRegistry
-/// @notice Verification surface the `SchnorrGasKillerSDK` depends on. Kept minimal (and
+/// @notice Verification surface the `GasKillerSDK` depends on. Kept minimal (and
 ///         separate from the concrete registry) so the SDK can be unit-tested against a
 ///         mock, mirroring how `GasKillerSDK` depends on ERC-1271 `isValidSignature`.
 interface ISchnorrStakeRegistry {

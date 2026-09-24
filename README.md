@@ -6,47 +6,36 @@
 
 > **Disclaimer:** This code is experimental and has not been audited. It is provided as-is, without warranty of any kind. The authors and contributors accept no liability for any loss of funds or damages arising from the use of this software in production. **Use at your own risk.**
 
-Solidity SDK for integrating Gas Killer functionality into EigenLayer AVS contracts. Inherit from `GasKillerSDK` to let off-chain operators propose and verify state updates via BLS signature aggregation instead of running expensive computations on-chain.
+Solidity SDK for integrating Gas Killer functionality into EigenLayer AVS contracts. Inherit from `GasKillerSDK` to let off-chain operators propose and verify state updates, approved by a single aggregate Schnorr signature, instead of running expensive computations on-chain.
 
 > 📖 **Integrating this into your own contract?** Start with the
 > [Solidity Reference](https://gaskiller.xyz/docs/solidity/integrate) in the Gas Killer docs — it covers
 > installation, the live addresses to configure, `trackState` semantics and storage-layout rules, and a
-> revert-selector lookup table. This README is the SDK's own reference: verification schemes, chain
+> revert-selector lookup table. This README is the SDK's own reference: verification, chain
 > requirements, operator-set mechanics, and the code-level contract.
 
 ## Overview
 
-Contracts that inherit GasKillerSDK expose a public `verifyAndUpdate` function, which enables expensive state-changing computations to be performed off-chain. Operators sign a payload describing the resulting state updates, the router aggregates the BLS signatures once a quorum threshold is reached, and the result is submitted on-chain through `verifyAndUpdate`.
+Contracts that inherit GasKillerSDK expose a public `verifyAndUpdate` function, which enables expensive state-changing computations to be performed off-chain. Operators sign a payload describing the resulting state updates, the router aggregates their Schnorr (MuSig2) signatures once a quorum threshold is reached, and the result is submitted on-chain through `verifyAndUpdate`.
 
-## Verification schemes
+## Verification
 
-The SDK offers two interchangeable ways to authorise a state transition. Both sign the same task
-digest and share the same `StateTracker` / `StateChangeHandlerLib` state-update machinery — they
-differ only in how an operator quorum's approval is verified on-chain:
-
-- **BLS** (`GasKillerSDK`) — verifies an aggregated BLS signature against an EigenLayer
-  `IBLSSignatureChecker`, passing per-operator non-signer stakes.
-- **Aggregate Schnorr** (`SchnorrGasKillerSDK`) — verifies a **single** aggregate secp256k1
-  Schnorr signature against a `SchnorrStakeRegistry` in constant gas (one `ecrecover`, non-signer
-  subtraction). Rogue-key-safe via a registration proof of possession.
-
-A transitional `DualSchemeGasKillerSDK` carries both at once for the service's BLS-to-Schnorr
-cutover, and is scheduled for removal after it: see
-[Migrating from BLS to Schnorr](#migrating-from-bls-to-schnorr). New integrations should inherit
-one of the two bases above.
+`GasKillerSDK` verifies a **single** aggregate secp256k1 Schnorr signature against a
+`SchnorrStakeRegistry` in constant gas: one `ecrecover`, with non-signers subtracted from the
+cached aggregate key. Registration requires a proof of possession, which makes the aggregate
+rogue-key-safe.
 
 ## Chain requirements
 
-`TransitionGuard` (used by the base `GasKillerSDK.verifyAndUpdate` and the Schnorr scheme's
-`verifyAndUpdate`/`verifyAndUpdateBatch`, see `src/TransitionGuard.sol`) is a
-reentrancy/in-transition guard built on EIP-1153
-transient storage, and has no fallback path for a pre-Cancun EVM — deploying it to a chain
+`TransitionGuard` (used by `GasKillerSDK.verifyAndUpdate` and `verifyAndUpdateBatch`, see
+`src/TransitionGuard.sol`) is a reentrancy/in-transition guard built on EIP-1153 transient
+storage, and has no fallback path for a pre-Cancun EVM — deploying it to a chain
 without EIP-1153 breaks settlement itself, not just the guard. `foundry.toml` pins
 `evm_version = "cancun"` accordingly. Ethereum mainnet has supported EIP-1153 since Dencun;
 before deploying to any other chain (in particular an L2 settlement target), confirm it has
 activated the equivalent of Cancun/EIP-1153.
 
-## Operator-set changes (Schnorr)
+## Operator-set changes
 
 `SchnorrStakeRegistry` stores a single *current* aggregate key and total weight rather than a
 per-block history. Any change to the operator set — registration **or** deregistration —
@@ -122,50 +111,11 @@ Consequences for integrators:
   mutation timing and each consumer's staleness bound, so keeping the two consistent is
   deployment discipline rather than a contract guarantee.
 
-## Migrating from BLS to Schnorr
-
-Everything in this section is transitional. `src/migration/` and `test/migration/` are scheduled
-for removal once the cutover has settled, and this section goes with them.
-
-`DualSchemeGasKillerSDK` settles under either verification scheme. Both `verifyAndUpdate`
-overloads are permanently live and both scheme interface IDs are permanently reported, so there is
-no mode, no switch and no transaction at cutover: the service probes only the scheme its own fleet
-runs, so a target that accepts both is already finished and starts settling Schnorr rounds when
-that fleet restarts. Inherit it in place of either scheme-specific base for the duration of the
-migration, then move to `SchnorrGasKillerSDK`.
-
-```solidity
-import {DualSchemeGasKillerSDK} from "gas-killer-sdk/migration/DualSchemeGasKillerSDK.sol";
-
-contract MyContract is DualSchemeGasKillerSDK {
-    constructor(address _avs, address _blsSigChecker, address _schnorrRegistry) {
-        _setAvsAddress(_avs);
-        // Wire both verifiers. That is the whole integration.
-        _setBlsSignatureChecker(_blsSigChecker);
-        _setSchnorrRegistry(_schnorrRegistry);
-    }
-}
-```
-
-Both verifiers have to be wired. A fleet running the scheme whose verifier is unset routes to the
-target and then fails to settle against it, which is the failure mode this base exists to prevent.
-
-`DualSchemeGasKillerSDK`'s NatSpec covers the rest. The two things to read before deploying one are
-there: the transition counter is shared, so the two schemes settle into one sequence in any order,
-and while both paths are live either operator set's quorum can settle, so the target's trust
-assumption is the union of the two.
-
-`src/migration/examples/DualSchemeArraySummation.sol` is a demo target, deployed by
-`script/DeployDualSchemeArraySummation.s.sol` with `AVS_ADDRESS`, `SIG_CHECKER_ADDRESS` and
-`SCHNORR_STAKE_REGISTRY_ADDRESS`. It provisions neither verifier, for the reasons given under
-[Deploy SchnorrArraySummation](#deploy-schnorrarraysummation-demo).
-
 ## Funding value-bearing state updates
 
 A `CALL`, `CREATE` or `CREATE2` state update can move ETH, and it is paid out of the settling
-contract's own balance. Every settlement entrypoint is therefore `payable` — `GasKillerSDK.verifyAndUpdate`
-under the BLS scheme, and `SchnorrGasKillerSDK.verifyAndUpdate`/`verifyAndUpdateBatch` under the
-Schnorr one — so a pass-through caller (deposit-then-forward, intent settler, swap router) can fund
+contract's own balance. Both settlement entrypoints, `verifyAndUpdate` and `verifyAndUpdateBatch`, are therefore
+`payable`, so a pass-through caller (deposit-then-forward, intent settler, swap router) can fund
 the transition from `msg.value` instead of having to pre-fund the contract.
 
 `msg.value` cannot redirect value: how much each update moves, and to whom, is fixed inside the
@@ -191,20 +141,14 @@ described above — spends nothing, so its share simply lands in the retained-su
 ## Repository Structure
 
 - **`src/`** — Core SDK contracts
-  - `GasKillerSDK.sol` — Abstract base for the BLS scheme; inherit this in your AVS consumer
-  - `StateTracker.sol` — Tracks state transitions via an ERC-7201 storage slot (scheme-agnostic)
-  - `StateChangeHandlerLib.sol` — Executes batched `STORE`, `CALL`, and `LOG` operations (scheme-agnostic)
-  - `interface/IGasKillerSDK.sol` — Public interface for the BLS scheme
-  - `interface/IStateUpdateTypes.sol` — Alloy-compatible struct definitions
-- **`src/schnorr/`** — Aggregate-Schnorr scheme
-  - `SchnorrGasKillerSDK.sol` — Abstract base; inherit this for the Schnorr scheme
+  - `GasKillerSDK.sol` — Abstract base; inherit this in your consumer
   - `SchnorrStakeRegistry.sol` — Aggregate-key registry with proof-of-possession registration and non-signer subtraction
-  - `interface/` — `ISchnorrGasKillerSDK` and `ISchnorrStakeRegistry`
+  - `StateTracker.sol` — Tracks state transitions via an ERC-7201 storage slot
+  - `StateChangeHandlerLib.sol` — Executes batched `STORE`, `CALL`, `LOG` and `CREATE` operations
+  - `TransitionGuard.sol` — EIP-1153 reentrancy / in-transition latch
+  - `interface/` — `IGasKillerSDK`, `IGasKillerSDKBatch`, `ISchnorrStakeRegistry`, and the Alloy-compatible `IStateUpdateTypes`
   - `libraries/` — `Secp256k1` (affine point math) and `SchnorrVerify` (constant-gas `ecrecover`-trick verify)
-- **`src/migration/`**: Transitional dual-scheme code, for the BLS-to-Schnorr cutover only. This directory and `test/migration/` are scheduled for removal once the migration is done
-  - `DualSchemeGasKillerSDK.sol`: Abstract base implementing both verification paths, both permanently live
-  - `examples/DualSchemeArraySummation.sol`: Demo app settling under either scheme
-- **`src/examples/array-summation/`** — Demo apps: `ArraySummation`(`Factory`) (BLS) and `SchnorrArraySummation`(`Factory`) (Schnorr)
+- **`src/examples/`** — Demo apps: `ArraySummation`(`Factory`) and `ReentrantCheckpoint`(`Factory`)
 - **`script/`** — Deployment scripts
 - **`test/`** — Unit and integration tests
 
@@ -237,9 +181,9 @@ import {GasKillerSDK} from "gas-killer-sdk/GasKillerSDK.sol";
 contract MyContract is GasKillerSDK {
     uint256 public storedValue;
 
-    constructor(address _avsAddress, address _blsSigChecker) {
+    constructor(address _avsAddress, address _schnorrRegistry) {
         _setAvsAddress(_avsAddress);
-        _setBlsSignatureChecker(_blsSigChecker);
+        _setSchnorrRegistry(_schnorrRegistry);
     }
 
     function updateValue(uint256 newValue) external trackState {
@@ -253,9 +197,10 @@ Operators then settle a transition through `verifyAndUpdate`, which requires tha
 - the reference block is below the current block and within `blockStaleMeasure` blocks of it,
 - `transitionIndex + 1` matches the current `stateTransitionCount`,
 - the recomputed message hash matches the one signed,
-- at least `QUORUM_THRESHOLD` (66%) of **each** quorum's stake signed.
+- the aggregate signature verifies against the registry, and the signers hold at least the
+  registry's `thresholdNum / thresholdDen` share of its total weight.
 
-**The AVS and `BLSSignatureChecker` addresses to configure live in
+**The AVS and `SchnorrStakeRegistry` addresses to configure live in
 [Configuration](https://gaskiller.xyz/docs/solidity/configuration).** They are properties of a
 particular AVS deployment rather than constants of the protocol, so they are maintained there and
 deliberately not repeated in this repo.
@@ -296,23 +241,11 @@ forge test
 
 ### Deploy ArraySummation (demo)
 
+Verified against a `SchnorrStakeRegistry`, so it settles against a fleet running
+`SIGNATURE_SCHEME=schnorr`.
+
 ```bash
 forge script script/DeployArraySummation.s.sol --rpc-url <rpc_url> --private-key <private_key> --broadcast
-```
-
-Required environment variables: `AVS_ADDRESS`, `SIG_CHECKER_ADDRESS`, `ARRAY_SIZE`, `MAX_VALUE`, `ARRAY_SEED`
-
-`SIG_CHECKER_ADDRESS` is optional: left unset, the script deploys a `BLSSignatureChecker`
-against `REGISTRY_COORDINATOR_ADDRESS` so the target is correct by construction.
-
-### Deploy SchnorrArraySummation (demo)
-
-The aggregate-Schnorr counterpart, verified against a `SchnorrStakeRegistry` rather than a
-`BLSSignatureChecker`. A target verifies exactly one scheme's proof, so this one settles only
-against a fleet running `SIGNATURE_SCHEME=schnorr`.
-
-```bash
-forge script script/DeploySchnorrArraySummation.s.sol --rpc-url <rpc_url> --private-key <private_key> --broadcast
 ```
 
 Required environment variables: `AVS_ADDRESS`, `SCHNORR_STAKE_REGISTRY_ADDRESS`, `ARRAY_SIZE`, `MAX_VALUE`, `ARRAY_SEED`

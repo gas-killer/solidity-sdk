@@ -3,20 +3,20 @@ pragma solidity ^0.8.13;
 
 import {Script, console} from "forge-std/Script.sol";
 import {ArraySummation} from "../src/examples/array-summation/ArraySummation.sol";
-import {BLSSignatureChecker} from "@eigenlayer-middleware/BLSSignatureChecker.sol";
-import {ISlashingRegistryCoordinator} from "@eigenlayer-middleware/interfaces/ISlashingRegistryCoordinator.sol";
 
 /// @title DeployArraySummation
-/// @notice Deploys an ArraySummation demo target wired to a REAL BLSSignatureChecker.
-/// @dev `verifyAndUpdate` calls `checkSignatures` on the target's configured signature checker.
-///      That checker must NOT be the `BLSSigCheckOperatorStateRetriever` (the router's off-chain
-///      helper, recorded as `blsSigCheck` in avs_deploy.json) — that contract has no
-///      `checkSignatures`, so a target wired to it reverts with empty `0x` during verifyAndUpdate.
-///      To make the demo target correct-by-construction:
-///        - if `SIG_CHECKER_ADDRESS` is unset, a fresh `BLSSignatureChecker` is deployed against
-///          `REGISTRY_COORDINATOR_ADDRESS`;
-///        - any provided checker is validated to expose `registryCoordinator()` (which the
-///          retriever does not) and, when `REGISTRY_COORDINATOR_ADDRESS` is set, to match it.
+/// @notice Deploys an ArraySummation demo target wired to an existing SchnorrStakeRegistry.
+/// @dev Settles only against a fleet running `SIGNATURE_SCHEME=schnorr`.
+///
+///      This script never provisions its verifier. A registry is an operator
+///      set, not a stateless checker: it is deployed once and every operator registers a
+///      secp256k1 key against it with a proof of possession, which is what the service's
+///      `setup_schnorr_operators` binary does. Deploying a second registry here would produce a
+///      target verifying against an empty operator set.
+///
+///      Registration order is load-bearing. Every registration advances the registry's
+///      `effectiveBlock` watermark and verification fail-closes for reference blocks behind it,
+///      so the whole operator set must already be registered when this runs.
 contract DeployArraySummation is Script {
     ArraySummation public arraySummation;
 
@@ -24,35 +24,28 @@ contract DeployArraySummation is Script {
 
     function run() public {
         address avsAddress = vm.envOr("AVS_ADDRESS", address(0));
-        address sigChecker = vm.envOr("SIG_CHECKER_ADDRESS", address(0));
-        address registryCoordinator = vm.envOr("REGISTRY_COORDINATOR_ADDRESS", address(0));
+        address stakeRegistry = vm.envOr("SCHNORR_STAKE_REGISTRY_ADDRESS", address(0));
         uint256 arraySize = vm.envOr("ARRAY_SIZE", uint256(1000));
         uint256 maxValue = vm.envOr("MAX_VALUE", uint256(10000));
         uint256 seed = vm.envOr("ARRAY_SEED", uint256(block.timestamp));
 
         // The AVS address scopes the target's namespace and must be set explicitly.
         require(avsAddress != address(0), "AVS_ADDRESS must be set");
+        require(stakeRegistry != address(0), "SCHNORR_STAKE_REGISTRY_ADDRESS must be set");
+
+        // Reject an address that cannot verify a quorum before it is baked into an immutable
+        // target. A target wired to the wrong contract reverts inside verifyAndUpdate, where the
+        // cause is far harder to read than it is here.
+        _validateRegistry(stakeRegistry);
 
         vm.startBroadcast();
 
-        // When no checker is provided, deploy one bound to the registry coordinator so the
-        // target is correct-by-construction rather than relying on a passed-in address.
-        if (sigChecker == address(0)) {
-            require(registryCoordinator != address(0), "Set SIG_CHECKER_ADDRESS or REGISTRY_COORDINATOR_ADDRESS");
-            sigChecker = address(new BLSSignatureChecker(ISlashingRegistryCoordinator(registryCoordinator)));
-            console.log("Deployed BLSSignatureChecker at:", sigChecker);
-        }
-
-        // Reject a checker that cannot actually verify signatures (e.g. the
-        // BLSSigCheckOperatorStateRetriever, which has no registryCoordinator()/checkSignatures).
-        _validateChecker(sigChecker, registryCoordinator);
-
-        arraySummation = new ArraySummation(avsAddress, sigChecker, arraySize, maxValue, seed);
+        arraySummation = new ArraySummation(avsAddress, stakeRegistry, arraySize, maxValue, seed);
 
         vm.stopBroadcast();
 
         console.log("ArraySummation deployed at:", address(arraySummation));
-        console.log("BLS signature checker:", sigChecker);
+        console.log("Schnorr stake registry:", stakeRegistry);
         console.log("AVS Address:", avsAddress);
         console.log("Array size:", arraySize);
         console.log("Max value:", maxValue);
@@ -62,21 +55,17 @@ contract DeployArraySummation is Script {
         console.log(string.concat("DEPLOYED_TARGET=", vm.toString(address(arraySummation))));
     }
 
-    /// @notice Ensure `sigChecker` is a real BLSSignatureChecker, not the operator-state retriever.
-    /// @dev Uses a low-level staticcall so the check is independent of the getter's return type.
-    /// @param sigChecker The address the target will call `checkSignatures` on
-    /// @param registryCoordinator Expected registry coordinator; skipped when address(0)
-    function _validateChecker(address sigChecker, address registryCoordinator) internal view {
-        require(sigChecker.code.length > 0, "SIG_CHECKER_ADDRESS has no code");
-        (bool ok, bytes memory ret) = sigChecker.staticcall(abi.encodeWithSignature("registryCoordinator()"));
+    /// @notice Ensure `stakeRegistry` is a real SchnorrStakeRegistry.
+    /// @dev Uses a low-level staticcall on `nextPossibleMutationBlock()`, which the registry
+    ///      exposes, so passing some other AVS contract by mistake fails here rather than at
+    ///      settlement.
+    /// @param stakeRegistry The address the target will verify aggregate signatures against
+    function _validateRegistry(address stakeRegistry) internal view {
+        require(stakeRegistry.code.length > 0, "SCHNORR_STAKE_REGISTRY_ADDRESS has no code");
+        (bool ok, bytes memory ret) = stakeRegistry.staticcall(abi.encodeWithSignature("nextPossibleMutationBlock()"));
         require(
             ok && ret.length >= 32,
-            "SIG_CHECKER_ADDRESS is not a BLSSignatureChecker (no registryCoordinator) - did you pass the blsSigCheck retriever?"
+            "SCHNORR_STAKE_REGISTRY_ADDRESS is not a SchnorrStakeRegistry (no nextPossibleMutationBlock)"
         );
-        if (registryCoordinator != address(0)) {
-            require(
-                abi.decode(ret, (address)) == registryCoordinator, "checker not wired to REGISTRY_COORDINATOR_ADDRESS"
-            );
-        }
     }
 }

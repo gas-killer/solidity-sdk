@@ -2,9 +2,9 @@
 pragma solidity ^0.8.29;
 
 import {Test, console2} from "forge-std/Test.sol";
-import {SchnorrStakeRegistry} from "../src/schnorr/SchnorrStakeRegistry.sol";
-import {SchnorrVerify} from "../src/schnorr/libraries/SchnorrVerify.sol";
-import {Secp256k1} from "../src/schnorr/libraries/Secp256k1.sol";
+import {SchnorrStakeRegistry} from "../src/SchnorrStakeRegistry.sol";
+import {SchnorrVerify} from "../src/libraries/SchnorrVerify.sol";
+import {Secp256k1} from "../src/libraries/Secp256k1.sol";
 
 /// @notice Rust⇄Solidity parity + gas benchmark for the aggregate-Schnorr quorum.
 ///

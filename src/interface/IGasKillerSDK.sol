@@ -1,37 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.27;
 
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
-import {IBLSSignatureCheckerTypes} from "@eigenlayer-middleware/interfaces/IBLSSignatureChecker.sol";
 
 /// @title IGasKillerSDK
 /// @notice Interface for GasKillerSDK contracts
-/// @dev Defines the core functionality that GasKillerSDK implementations must provide
+/// @dev Defines the core functionality that GasKillerSDK implementations must
+///      provide. State updates are approved by an operator quorum expressed as a
+///      **single** aggregate Schnorr signature verified by a `SchnorrStakeRegistry`
+///      (constant gas, non-signer subtraction) instead of `N` per-operator ECDSA
+///      signatures. Deliberately single-function so
+///      `type(IGasKillerSDK).interfaceId` equals the `verifyAndUpdate`
+///      selector — the router's ERC-165 preflight probes exactly this ID.
 interface IGasKillerSDK is IERC165 {
-    // Custom errors
-
-    /// @notice Thrown when `transitionIndex + 1` does not equal the current `stateTransitionCount`
-    error InvalidTransitionIndex();
-
-    /// @notice Thrown when the reconstructed message hash does not match `msgHash`
-    error InvalidSignature();
-
-    /// @notice Thrown when the provided storage updates cannot be decoded or applied
-    error InvalidStorageUpdates();
-
-    /// @notice Thrown when an unrecognised state update operation type is encountered
-    error InvalidOperation();
-
-    /// @notice Thrown when signatories hold less than `QUORUM_THRESHOLD`% of stake for any quorum
-    error InsufficientQuorumThreshold();
-
-    /// @notice Thrown when `referenceBlockNumber` is older than `blockStaleMeasure` blocks ago
-    error StaleBlockNumber();
-
-    /// @notice Thrown when `referenceBlockNumber` is greater than or equal to the current block number
-    error FutureBlockNumber();
-
-    /// @notice Verify BLS quorum signatures and apply the encoded state updates
+    /// @notice Verify the operators' aggregate Schnorr quorum signature and apply the
+    ///         encoded state updates
     /// @dev Payable so a caller can fund value-bearing `CALL`/`CREATE`/`CREATE2` state updates
     ///      out of `msg.value`. The value each update moves is fixed inside the quorum-signed
     ///      `storageUpdates`, so `msg.value` only tops up the contract's balance — it cannot
@@ -40,20 +23,27 @@ interface IGasKillerSDK is IERC165 {
     ///      in the contract, and recovering it is the responsibility of the inheriting contract
     ///      (e.g. a withdrawal function, or a refund executed as a signed CALL update in a
     ///      later transition).
-    /// @param msgHash The hash of the message to verify
-    /// @param quorumNumbers The quorum numbers to check signatures for
-    /// @param referenceBlockNumber The block number to use as reference for operator set
-    /// @param storageUpdates The storage updates to verify
+    ///
+    ///      `payable` does not change the function selector, so
+    ///      `type(IGasKillerSDK).interfaceId` — which the router's ERC-165 preflight
+    ///      probes — is unaffected.
+    /// @param msgHash The hash of the message to verify (sha256 of the encoded task)
+    /// @param referenceBlockNumber The block number at which operator keys and stake
+    ///        weights are evaluated by the stake registry
+    /// @param storageUpdates The storage updates to verify and apply
     /// @param transitionIndex The transition index
     /// @param targetFunction The target function selector
-    /// @param nonSignerStakesAndSignature The non-signer stakes and signature data computed off-chain
+    /// @param s Aggregate Schnorr response scalar
+    /// @param Raddr Aggregate nonce address `address(R)`
+    /// @param nonSigners Operators that did not sign, in strictly ascending order
     function verifyAndUpdate(
         bytes32 msgHash,
-        bytes calldata quorumNumbers,
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
         bytes4 targetFunction,
-        IBLSSignatureCheckerTypes.NonSignerStakesAndSignature calldata nonSignerStakesAndSignature
+        uint256 s,
+        address Raddr,
+        address[] calldata nonSigners
     ) external payable;
 }
