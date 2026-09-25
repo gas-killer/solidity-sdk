@@ -20,6 +20,10 @@
 #                              same StateUpdate bytes on both legs, no hand-written marshalling
 #   make zero-glue-proof       … from fresh clones of both repos in a scratch dir, running only
 #                              the commands written in src/examples/onchain-llm-native/README.md
+#   make parity        regenerate test/fixtures/gkvm/parity_tasks.json: every golden vector as
+#                      a GkVmParityConsumer task through GkVmFfiShim, recorded as the encoded
+#                      StateUpdate payload (the ffi leg of gas-analyzer's ffi ≡ precompile suite)
+#   make parity-check  fresh parity tasks must equal the committed fixture byte for byte
 #
 # GK_RUN       gk-run sidecar binary       (default: sibling gas-analyzer release build)
 # GK_GUEST_CRT  gk-guest-crt + link.ld dir  (default: sibling gas-analyzer crates/gkvm/guest)
@@ -37,6 +41,8 @@ FORGE ?= forge
 
 GOLDEN_DIR := test/fixtures/gkvm
 GOLDEN_SCRATCH := cache/gkvm/golden
+PARITY_SCRATCH := cache/gkvm/parity
+PARITY_CONSUMER_COPY := $(GAS_ANALYZER)/crates/evmsketch/tests/fixtures/gkvm/parity_tasks.json
 
 # $(1) = output dir, relative to the sdk root. Every vector set the golden suite replays
 # (test/GkVmGolden.t.sol lists the same three files). bench-c retires 8 instructions per
@@ -122,6 +128,20 @@ native-example-check: need-gk-run native-example
 	cd $(SDK_ROOT) && GK_RUN="$(GK_RUN)" FOUNDRY_PROFILE=gkvm-ffi \
 		$(FORGE) test --match-contract 'GasKillerChatNative'
 
+# The flagship consumer GasKillerChatQwen binds gas-analyzer's `qwen` C guest (the committed
+# crates/gkvm/tests/fixtures/qwen-c.elf). `gk build` on that source with the bundled crt must
+# reproduce the PROGRAM_HASH in gen/GkQwen.sol — one toolchain, one hash, in both repos.
+QWEN_SRC := $(GAS_ANALYZER)/crates/gkvm/guest/qwen/qwen.c
+QWEN_OUT := cache/gkvm/build/native-qwen
+
+native-qwen-check:
+	@test -f "$(QWEN_SRC)" || { echo "no gas-analyzer qwen guest at $(QWEN_SRC): pass GAS_ANALYZER=/abs/path"; exit 1; }
+	cd $(SDK_ROOT) && GK_GUEST_CRT= $(PYTHON) -B tools/gk build "$(QWEN_SRC)" --out $(QWEN_OUT) --no-binding
+	cd $(SDK_ROOT) && built=$$($(PYTHON) tools/gk hash $(QWEN_OUT)/guest.elf) && \
+		want=$$(grep -o 'PROGRAM_HASH = 0x[0-9a-f]*' $(NATIVE_DIR)/gen/GkQwen.sol | cut -d' ' -f3) && \
+		test "$$built" = "$$want" || { echo "native-qwen-check: built $$built != committed $$want"; exit 1; }
+	@echo "native-qwen-check: gk build of gas-analyzer's qwen.c == gen/GkQwen.sol PROGRAM_HASH"
+
 # src/examples/onchain-llm-native's second guest: guest/stories260k.py, the engine-v1 donor
 # (../onchain-llm, stories260K) as a Python guest over artifact-mounted weights. The blobs are
 # the donor's committed hex fixtures, byte for byte; `native-stories-artifacts` writes them as
@@ -171,7 +191,7 @@ zero-glue: native-example zero-glue-tasks
 
 zero-glue-check: native-example-check zero-glue-tasks
 	$(PYTHON) -B test_gk.py -v ZeroGlue
-	cd $(SDK_ROOT) && diff -u $(GOLDEN_DIR)/native_tasks.json $(ZERO_GLUE_SCRATCH)/native_tasks.json
+	cd $(SDK_ROOT) && $(PYTHON) -B tools/gk/fixture_diff.py $(GOLDEN_DIR)/native_tasks.json $(ZERO_GLUE_SCRATCH)/native_tasks.json
 	@echo "zero-glue-check: forge-leg tasks == committed fixture"
 	diff -u $(SDK_ROOT)/$(GOLDEN_DIR)/native_tasks.json "$(ZERO_GLUE_CONSUMER_COPY)"
 	@echo "zero-glue-check: gas-analyzer's copy == committed fixture"
@@ -186,11 +206,25 @@ zero-glue-check: native-example-check zero-glue-tasks
 # KEEP=1 keeps the scratch clones.
 zero-glue-proof:
 	GAS_ANALYZER_SRC="$(GAS_ANALYZER)" bash zero-glue-proof.sh
+parity-tasks: need-gk-run
+	cd $(SDK_ROOT) && GK_RUN="$(GK_RUN)" FOUNDRY_PROFILE=gkvm-ffi \
+		$(FORGE) test --match-contract GkVmParityTest
+
+parity: parity-tasks
+	cp $(SDK_ROOT)/$(PARITY_SCRATCH)/parity_tasks.json $(SDK_ROOT)/$(GOLDEN_DIR)/parity_tasks.json
+
+parity-check: parity-tasks
+	cd $(SDK_ROOT) && $(PYTHON) -B tools/gk/fixture_diff.py $(GOLDEN_DIR)/parity_tasks.json $(PARITY_SCRATCH)/parity_tasks.json
+	@echo "parity-check: ffi-leg tasks == committed fixture"
+	@# the precompile leg reads its own copy; when that checkout carries one, it must be this one
+	@if [ -f "$(PARITY_CONSUMER_COPY)" ]; then \
+		$(PYTHON) -B $(SDK_ROOT)/tools/gk/fixture_diff.py $(SDK_ROOT)/$(GOLDEN_DIR)/parity_tasks.json "$(PARITY_CONSUMER_COPY)" || exit 1; \
+		echo "parity-check: gas-analyzer's copy == committed fixture"; fi
 
 need-gk-run:
 	@test -n "$(GK_RUN)" && test -x "$(GK_RUN)" || { \
 		echo "gk-run not found: build it (cargo build --release -p gas-analyzer-gkvm --bin gk-run) or pass GK_RUN=/abs/path"; exit 1; }
 
 .PHONY: test golden golden-check crt-check port-check quickstart-proof native-example native-example-check \
-	native-stories-artifacts native-stories native-stories-check zero-glue-tasks zero-glue zero-glue-check \
-	zero-glue-proof need-gk-run
+	native-qwen-check native-stories-artifacts native-stories native-stories-check zero-glue-tasks zero-glue zero-glue-check \
+	zero-glue-proof parity-tasks parity parity-check need-gk-run

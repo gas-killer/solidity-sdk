@@ -124,8 +124,7 @@ def resolve_crt(crt, project=None):
 
 def stage(source, crt, stage_dir):
     """Lay out the fixed build tree; returns the guest path relative to it."""
-    if os.path.isdir(stage_dir):
-        shutil.rmtree(stage_dir)
+    gk_python.empty_dir(stage_dir)
     os.makedirs(os.path.join(stage_dir, 'crt'))
     os.makedirs(os.path.join(stage_dir, 'guest'))
     for f in CRT_FILES:
@@ -171,15 +170,20 @@ def compile_native(stage_dir, guest_rel):
 
 
 def compile_docker(stage_dir, guest_rel):
+    # the prebuilt toolchain image when docker has it (same packages, no apt-get), else
+    # ubuntu:24.04 + apt-get — identical bytes either way
+    image = gk_python.toolchain_image()
+    setup = ('set -e; ' if image else
+             'set -e; apt-get update -qq >/dev/null; apt-get install -y -qq %s >/dev/null; '
+             % DOCKER_PACKAGE)
     script = (
-        'set -e; apt-get update -qq >/dev/null; '
-        'apt-get install -y -qq %s >/dev/null; '
+        setup +
         '%s; %s --version | head -n1 > cc.version; '
         'chown %d:%d *.o guest.elf cc.version'
-        % (DOCKER_PACKAGE, '; '.join(' '.join(c) for c in compile_commands(guest_rel)), CC,
+        % ('; '.join(' '.join(c) for c in compile_commands(guest_rel)), CC,
            os.getuid(), os.getgid()))
     _run(['docker', 'run', '--rm', '-v', '%s:/build' % os.path.abspath(stage_dir),
-          '-w', '/build', DOCKER_IMAGE, 'bash', '-c', script])
+          '-w', '/build', image or DOCKER_IMAGE, 'bash', '-c', script])
     with open(os.path.join(stage_dir, 'cc.version')) as f:
         return f.read().strip()
 
@@ -235,7 +239,7 @@ def _build_python(source, stem, sig, crt, out, compiler, log, root, mpy_src, hea
                   stack_bytes):
     """The MicroPython leg of build(): -> (staged ELF path, cc version, guest.json extras)."""
     port = gk_python.resolve_port()
-    mpy_src = gk_python.resolve_mpy_src(mpy_src, root, log=log)
+    mpy_src = gk_python.resolve_mpy_src(mpy_src, root, log=log, compiler=compiler)
     stage_dir = os.path.join(out, 'stage')
     guest_py, extra = gk_python.stage(source, sig, crt, CRT_FILES, port, stage_dir)
     args = gk_python.make_args(guest_py, extra, heap_bytes, stack_bytes)

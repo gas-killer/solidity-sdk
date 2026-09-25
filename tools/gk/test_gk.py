@@ -39,12 +39,12 @@ HELLO_11223344 = '0x474b564d2d48454c4c4f2d56310a44332211'
 # keccak256(crt0.S || gkvm.c || gkvm.h || link.ld) of tools/gk/guest-crt — guest.json's
 # `crtHash` for every guest built from the bundled copy. Synced from gas-analyzer f733d2b
 # (the keccak fast-path crt).
-BUNDLED_CRT_HASH = '0xbf6dc72fd3b710101efae1c9e25a244c56b7dbf34802ea0134099a13cc3b81d1'
+BUNDLED_CRT_HASH = '0x8c07f4c501a5d2e9d4d1459b87cc06837806c159c27e30c3ea7c785c21f4d3e9'
 
 # guest.json's `portHash` / `runtimeHash`: keccak256 of tools/gk/guest-crt/micropython's files
 # (gk_python.PORT_FILES order; synced from gas-analyzer's crates/gkvm/guest/micropython) and of
 # tools/gk/runtime/gk_runtime.py.
-BUNDLED_PORT_HASH = '0xbb1a8e98ecac2cff74745c0997efdd9f1c1793fe90fcc97739c1875d714eae48'
+BUNDLED_PORT_HASH = '0xdd4394f61355a361fa9081ddf5227f2cd1a95f4669949830fc3a70175e86d348'
 RUNTIME_HASH = '0x981736a36ea28cddb17019a257cb6c047b1692640029cb97b3af1b23e9b86b4f'
 
 # what `forge init` writes
@@ -310,6 +310,40 @@ def snapshot(root):
 
 class Init(unittest.TestCase):
     """The scaffold itself — no compiler, no forge (build=False)."""
+
+    def test_python_scaffold_is_the_same_shape_around_greet_py(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sdk = make_project(tmp)
+            actions = gk_init.init(tmp, sdk, build=False, log=quiet, python=True)
+            files = snapshot(tmp)
+            with open(os.path.join(tmp, 'guest', 'README.md')) as f:
+                readme = f.read()
+        self.assertIn('guest/greet.py', files)
+        self.assertIn('src/GreetGk.sol', files)
+        self.assertIn('test/GreetGk.t.sol', files)
+        self.assertNotIn('guest/hello.c', files)
+        self.assertIn(('created', 'guest/greet.py'), actions)
+        self.assertIn('def main(name: str, times: int) -> str:', files['guest/greet.py'].decode())
+        self.assertIn('GkGreet.call(gkvm, bytes32(0), name, times)', files['src/GreetGk.sol'].decode())
+        self.assertIn('| `guest/greet.py` |', readme)
+        self.assertIn('gk test --match-contract GreetGkTest', readme)
+        self.assertNotIn('{{', readme)
+
+    def test_gk_test_hands_forge_its_options(self):
+        import gk_test
+        seen = {}
+        real = gk_test.run
+        gk_test.run = lambda sdk_root, forge_args, log=print: seen.setdefault('args', list(forge_args)) and 0
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                'gk_cli', os.path.join(os.path.dirname(__file__), '__main__.py'))
+            cli = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(cli)
+            cli.main(['test', '--match-contract', 'GreetGkTest', '-vv'])
+        finally:
+            gk_test.run = real
+        self.assertEqual(seen['args'], ['--match-contract', 'GreetGkTest', '-vv'])
 
     def test_scaffolds_a_fresh_forge_project(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -797,7 +831,7 @@ payload = gkvm.input()
 gkvm.output(b"GKVM-HELLO-V1\\n")
 gkvm.output(bytes(reversed(payload)))
 '''
-HELLO_PY_PROGRAM_HASH = '0x951aafd594c660f21820e50d98df0eb61d5d32d663212cf6f2408bd1cd145443'
+HELLO_PY_PROGRAM_HASH = '0x4055c9d63f25f2c67dc5f3bc8df3932d433d49a8f4e42cdf3220f631852374e7'
 HELLO_PY_CYCLES = 593442
 
 

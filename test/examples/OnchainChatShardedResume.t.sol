@@ -12,8 +12,12 @@ import {MockBLSSignatureChecker} from "./OnchainLLM.t.sol";
 ///      lockstep. Only CHAT_DOMAIN / CHAT_ROOT_SLOT / RESUME_DOMAIN differ between the
 ///      0.6B and 35B consumers — the ABI and behavior tested here are identical.
 interface IShardedChat {
-    function fulfil(uint32[] calldata promptIds, uint256 maxNewTokens, uint32[] calldata answerIds, bytes32 pipelineRoot)
-        external;
+    function fulfil(
+        uint32[] calldata promptIds,
+        uint256 maxNewTokens,
+        uint32[] calldata answerIds,
+        bytes32 pipelineRoot
+    ) external;
     function fulfilResumed(
         uint32[] calldata promptIds,
         uint256 maxNewTokens,

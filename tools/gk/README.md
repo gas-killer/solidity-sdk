@@ -8,39 +8,44 @@ Status: draft ([gas-killer/solidity-sdk#85](https://github.com/gas-killer/solidi
 What a fresh project gets today is the forge emulation only — the scaffolded `guest/README.md`
 spells out what does and does not work.
 
-## Quickstart: a guest in a fresh forge project
+## Quickstart: a Python function inside Solidity, in a fresh forge project
 
-Needs `forge`, `python3`, `cargo`, and either `riscv64-unknown-elf-gcc` or docker.
+Needs `forge`, `python3` and docker (for the guest build). Everything else is one line:
 
-1. **A forge project with the sdk installed:**
+    curl -fsSL https://gaskiller.xyz/bash | sh
+    # → ~/.gk/bin/gk-run (prebuilt, sha256-verified), ~/.gk/bin/gk, and the guest toolchain image
 
-       forge init hello-gk
-       cd hello-gk
-       forge install gas-killer/solidity-sdk
+    forge init demo && cd demo
+    forge install gas-killer/solidity-sdk@gkvm-preview
+    gk init --python          # guest/greet.py, its Solidity binding, a consumer and a test
+    gk test                   # forge test — the Python really runs, behind the gkvm shim
+    gk anvil                  # a local node where GkVm.exec works (anvil + the precompile)
+    forge create src/GreetGk.sol:GreetGk --rpc-url http://127.0.0.1:8545 --private-key $ANVIL_KEY \
+        --broadcast --constructor-args 0x35597421749DeEad8ba95049eDEe0B94E66F3c59
+    cast call <address> "preview(string,uint256)(string)" world 2 --rpc-url http://127.0.0.1:8545
+    # → "hello world hello world" — the Python function, called through a contract on a chain
 
-   Until the gkvm work is on the sdk's default branch (it is not yet), that last command
-   installs an sdk without `tools/gk`. Install from a checkout that has it instead — what
-   `forge install` does underneath, pointed at a local clone (`forge install` itself only
-   takes GitHub shorthand and remote URLs):
+`guest/greet.py` is a typed function; `gk build` turned its hints into `src/gen/GkGreet.sol`,
+and `src/GreetGk.sol` calls `GkGreet.call(gkvm, root, name, times)` like any library. Edit the
+`.py`, `gk build guest/greet.py`, `gk test` — that is the loop. `gk init` (without `--python`)
+scaffolds the C equivalent (`guest/hello.c`).
 
-       git -c protocol.file.allow=always submodule add /path/to/solidity-sdk lib/solidity-sdk
-       git submodule update --init --recursive lib/solidity-sdk
+`@gkvm-preview` is a tag on the gkvm branch: `forge install` takes tags and commits (not
+branches), and the sdk's default branch does not carry `tools/gk` yet — drop the suffix once
+it does. Installing from a local checkout instead:
 
-2. **Scaffold the guest:**
+    git -c protocol.file.allow=always submodule add /path/to/solidity-sdk lib/solidity-sdk
+    git submodule update --init --recursive lib/solidity-sdk
 
-       python3 lib/solidity-sdk/tools/gk init
+`gk anvil` is anvil with the gkvm precompile (Phase B): every guest built in the project is
+installed, everything else is anvil's own command line. It is a developer node — the
+precompile exists there and on no real chain; operators run the same guest inside their own
+executor and the chain only ever sees the signed state diff.
 
-   This vendors the guest runtime into `guest/`, writes an example guest, a sample consumer, a
-   shim-wired test and `guest/README.md`, appends `[profile.gkvm-ffi]` to `foundry.toml` and the
-   `gk-sdk/` remapping to `remappings.txt`, and builds the example guest. Nothing existing is
-   overwritten; re-running is a no-op.
-
-3. **Continue with `guest/README.md`** in your project — its Quickstart builds the guest,
-   installs `gk-run` and runs the tests under the ffi profile.
-
-`make -C tools/gk quickstart-proof` replays exactly these steps, and then the scaffolded
-README's, in a scratch directory outside any checkout, and fails unless the shim-backed tests
-run (not skip) green. It refuses to run a command that is not written in one of the two READMEs.
+The `gk` command finds `lib/solidity-sdk/tools/gk` from anywhere inside the project (or
+`$GK_SDK`); without the installer, `python3 lib/solidity-sdk/tools/gk …` is the same thing
+with `GK_RUN` set by hand. The scaffolded `guest/README.md` covers the rest, including what a
+fresh project does and does not get today.
 
 ## Python guests
 
@@ -83,3 +88,26 @@ shape tested without `via_ir`; expect "stack too deep" not far beyond it.
 ## In this repository
 
 `make -C tools/gk test | golden | golden-check | crt-check | port-check` — see the Makefile header.
+
+## Hosts: x86_64 Linux, aarch64, Apple silicon
+
+Everything above runs unchanged on an Apple-silicon Mac (verified 2026-09-20: macOS, Docker
+Desktop, forge 1.5.1, system bash 3.2) — `make test`, `golden-check`, `crt-check`,
+`port-check`, `zero-glue-check`, `native-stories-check`, and `gk init` / `gk build` for C and
+Python guests. What differs by host:
+
+- **One executor tier.** SP1's jit is x86_64-only; elsewhere a plain `cargo build --release -p
+  gas-analyzer-gkvm --bin gk-run` already yields the portable interpreter (`gk-run --print-tier`
+  → `interp`), no feature flag needed. Outputs and cycle counts are identical across tiers and
+  architectures — the committed vectors were recorded on x86_64 and replay bit for bit on arm64
+  — but the interpreter is several times slower than the jit (measured with the 80,000,157-cycle
+  bench guest: ≈ 259 Mcycles/s on an M-series Mac's interpreter, against ≈ 72 interp / ≈ 780 jit
+  on the x86_64 laptop the vectors were recorded on), so wall-clock numbers taken on such a
+  host say nothing about the jit tier.
+- **Guest builds go through Docker** on every host (`ubuntu:24.04` +
+  `gcc-riscv64-unknown-elf`); Docker Desktop must be running. `programHash` is host-independent:
+  an arm64 container produces the same ELF bytes as an x86_64 one, and the frozen-module order
+  of Python guests is fixed by a generated manifest rather than by the filesystem.
+- **Fixtures that carry contract bytecode** (`native_tasks.json`) are compared with
+  `fixture_diff.py`, which ignores solc's metadata trailer: its hash covers forge's
+  auto-detected remappings, which depend on which nested submodules are checked out.

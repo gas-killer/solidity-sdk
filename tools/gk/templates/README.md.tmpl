@@ -8,11 +8,11 @@ contract runs through the gkvm precompile with `GkVm.exec`; its identity on-chai
 
 | path | what | yours to edit? |
 | --- | --- | --- |
-| `guest/hello.c` | example guest: answers `"GKVM-HELLO-V1\n"` + the payload reversed | yes |
+| `guest/{{EXAMPLE_GUEST}}` | {{EXAMPLE_DESC}} | yes |
 | `guest/crt/`, `guest/link.ld` | gk-guest-crt, vendored: entry code, hostcalls (`gkvm.h`), linker script. Part of every guest's `programHash` | no — changing it changes every programHash |
-| `{{SRC}}/gen/GkHello.sol` | generated binding (`PROGRAM_HASH` + `call`) | no — `gk build` rewrites it |
-| `{{SRC}}/HelloGk.sol` | sample consumer | yes |
-| `{{TEST}}/HelloGk.t.sol` | test wired to `GkVmFfiShim` | yes |
+| `{{SRC}}/gen/{{BINDING_NAME}}.sol` | generated binding (`PROGRAM_HASH` + `call`) | no — `gk build` rewrites it |
+| `{{SRC}}/{{CONSUMER}}` | sample consumer | yes |
+| `{{TEST}}/{{CONSUMER_TEST}}` | test wired to `GkVmFfiShim` | yes |
 | `foundry.toml` | `[profile.gkvm-ffi]` appended (`ffi = true` lives there and nowhere else) | — |
 | `remappings.txt` | `{{SDK_REMAP}}={{SDK_PATH}}/src/` | — |
 | `.gitignore` | `cache/gkvm/` (build outputs, shim spill files) | — |
@@ -21,16 +21,21 @@ Re-running `gk init` is safe: existing files are never overwritten.
 
 ## Quickstart
 
-1. **Build the guest** (needs `riscv64-unknown-elf-gcc`, or docker — the build then runs in
-   `ubuntu:24.04`):
+1. **Build the guest** (docker: the prebuilt `ghcr.io/gas-killer/gk-toolchain` image, or
+   `ubuntu:24.04` + apt-get when it cannot be pulled; C guests also build with a host
+   `riscv64-unknown-elf-gcc`):
 
-       python3 {{SDK_PATH}}/tools/gk build guest/hello.c
+       python3 {{SDK_PATH}}/tools/gk build guest/{{EXAMPLE_GUEST}}
 
-   → `cache/gkvm/build/hello/guest.elf` + `{{SRC}}/gen/GkHello.sol`. The build is reproducible:
-   same source + crt + compiler → same `programHash`.
+   → `cache/gkvm/build/<name>/guest.elf` + `{{SRC}}/gen/{{BINDING_NAME}}.sol`. The build is
+   reproducible: same source + crt + toolchain → same `programHash`.
 
 2. **Get `gk-run`**, the sidecar that executes guests (the same binary the operator path wraps).
-   From a checkout of `gas-killer/gas-analyzer`:
+   One line (prebuilt, sha256-verified; also installs a `gk` command on `~/.gk/bin`):
+
+       curl -fsSL https://gaskiller.xyz/bash | sh
+
+   Or from a checkout of `gas-killer/gas-analyzer`:
 
        cargo install --locked --path crates/gkvm --bin gk-run    # → ~/.cargo/bin/gk-run
 
@@ -46,15 +51,25 @@ Re-running `gk init` is safe: existing files are never overwritten.
 
        cargo install --locked --git https://github.com/gas-killer/gas-analyzer gas-analyzer-gkvm --bin gk-run
 
-3. **Run the tests** under the ffi profile:
+3. **Run the tests** with the guest really executing:
 
-       GK_RUN=$(command -v gk-run) FOUNDRY_PROFILE=gkvm-ffi forge test --match-contract HelloGkTest
+       gk test --match-contract {{TEST_CONTRACT}}
 
-   Without `GK_RUN` the shim-backed tests skip (plain `forge test` stays green and ffi-free).
+   (`gk test` = `GK_RUN=<sidecar> FOUNDRY_PROFILE=gkvm-ffi forge test …`.) Without a sidecar
+   the shim-backed tests skip (plain `forge test` stays green and ffi-free).
+
+4. **Run it on a local node** — `gk anvil` starts anvil with the gkvm precompile and every guest
+   built here installed; deploy the consumer with `GKVM_ADDRESS` (`0x3559…3c59`) as its `gkvm` and
+   `cast call` it. The precompile exists on that node and on no real chain (see below).
 
 ## Writing your own guest
 
-Add `guest/<name>.c` (`#include "gkvm.h"`; `gk_input_read` → compute → `gk_output_write`;
+**Python:** add `guest/<name>.py` with a typed `main` (`int`, `bool`, `bytes`, `str`,
+`list[...]`, `tuple[...]` returns), then `gk build guest/<name>.py` — the type hints become
+the binding's Solidity signature. Runs under the gkvm MicroPython port: unbounded integers, no
+floats, no imports beyond the frozen stdlib subset. `gk init --python` scaffolds one.
+
+**C:** add `guest/<name>.c` (`#include "gkvm.h"`; `gk_input_read` → compute → `gk_output_write`;
 `gk_abort` for a typed, deterministic failure), then `gk build guest/<name>.c` and import
 `{{SRC}}/gen/Gk<Name>.sol`. Guests are freestanding rv64im C: no libc, no floating point (nothing
 links libgcc), no I/O beyond the hostcalls in `guest/crt/gkvm.h`.

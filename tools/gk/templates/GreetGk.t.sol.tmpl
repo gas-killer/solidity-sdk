@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.13;
+
+import {Test} from "forge-std/Test.sol";
+import {GKVM_ADDRESS} from "{{SDK_REMAP}}gkvm/GkVm.sol";
+import {GkVmUnavailable, GkGuestTrap} from "{{SDK_REMAP}}gkvm/GkVmErrors.sol";
+import {GkVmFfiShim} from "{{SDK_REMAP}}gkvm/testing/GkVmFfiShim.sol";
+import {GkGreet} from "{{BINDING_IMPORT}}";
+import {GreetGk} from "{{CONSUMER_IMPORT}}";
+
+/// @dev Runs the real guest through the `gk-run` sidecar: `gk test --match-contract GreetGkTest`
+///      (= GK_RUN=<sidecar> FOUNDRY_PROFILE=gkvm-ffi forge test …). The shim-backed tests skip
+///      unless GK_RUN names the binary.
+contract GreetGkTest is Test {
+    /// @dev written by `gk build guest/greet.py`; `forge clean` removes it — rebuild
+    string internal constant GREET_ELF = "cache/gkvm/build/greet/guest.elf";
+
+    GreetGk internal greeter;
+    bool internal gkRunMissing;
+
+    event Greeted(string greeting);
+
+    modifier needsGkRun() {
+        vm.skip(gkRunMissing);
+        _;
+    }
+
+    function setUp() public {
+        string memory gkRun = vm.envOr("GK_RUN", string(""));
+        gkRunMissing = bytes(gkRun).length == 0;
+        if (gkRunMissing) return;
+        GkVmFfiShim shim = new GkVmFfiShim(gkRun);
+        bytes32 installed = shim.installProgram(GREET_ELF);
+        assertEq(installed, GkGreet.PROGRAM_HASH, "guest.elf != the binding: re-run gk build guest/greet.py");
+        greeter = new GreetGk(address(shim));
+    }
+
+    function testThePythonFunctionAnswers() public needsGkRun {
+        assertEq(greeter.preview("world", 2), "hello world hello world");
+    }
+
+    function testGreetStoresAndLogsTheAnswer() public needsGkRun {
+        vm.expectEmit(address(greeter));
+        emit Greeted("hello forge");
+        greeter.greet("forge", 1);
+        assertEq(greeter.lastGreeting(), "hello forge");
+    }
+
+    /// @dev A Python exception is a typed, deterministic guest error: the call reverts
+    ///      `GkGuestTrap(code, data)` with the traceback (message included) as data
+    function testAGuestExceptionBubblesOut() public needsGkRun {
+        vm.expectPartialRevert(GkGuestTrap.selector);
+        greeter.preview("x", 17);
+    }
+
+    /// @dev No gk-run needed: this is what EVERY chain without the precompile does today
+    function testRevertsUnavailableWithoutThePrecompile() public {
+        GreetGk production = new GreetGk(GKVM_ADDRESS);
+        vm.expectRevert(GkVmUnavailable.selector);
+        production.preview("world", 1);
+    }
+}

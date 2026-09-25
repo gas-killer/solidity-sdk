@@ -60,9 +60,7 @@ contract GasKillerChatShardedConsumerTest is Test {
         (, bytes32[] memory writes) = vm.accesses(address(chat));
         assertGt(writes.length, 0, "no writes recorded");
         for (uint256 i = 0; i < writes.length; ++i) {
-            assertTrue(
-                writes[i] == chat.CHAT_ROOT_SLOT() || writes[i] == TRACKER_SLOT, "unexpected storage write"
-            );
+            assertTrue(writes[i] == chat.CHAT_ROOT_SLOT() || writes[i] == TRACKER_SLOT, "unexpected storage write");
         }
         assertFalse(chat.settledRoots(pipelineRoot), "fulfil must not write settledRoots");
         assertEq(chat.chatRoot(), expectedRoot, "chat root not updated");

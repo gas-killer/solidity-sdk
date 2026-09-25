@@ -51,6 +51,35 @@ DOCKER_IMAGE = 'ubuntu:24.04'
 DOCKER_PACKAGES = ('make gcc libc6-dev python3 gcc-riscv64-unknown-elf '
                    'picolibc-riscv64-unknown-elf')
 
+# The prebuilt toolchain (gas-analyzer crates/gkvm/toolchain/Dockerfile): the same Ubuntu
+# packages plus MicroPython at the pin with mpy-cross built, so a build skips the apt-get and
+# the clone. Used when docker already has it or can pull it; otherwise the apt route above.
+# GK_TOOLCHAIN_IMAGE= (empty) disables it, GK_TOOLCHAIN_PULL=0 forbids the pull.
+TOOLCHAIN_IMAGE = os.environ.get('GK_TOOLCHAIN_IMAGE', 'ghcr.io/gas-killer/gk-toolchain:v1')
+IMAGE_MPY_SRC = '/opt/micropython'  # the image's pinned checkout (checked in-container)
+_toolchain = {}
+
+
+def toolchain_image(log=None):
+    """The prebuilt image name when docker has it (pulling once if allowed), else None."""
+    if 'image' in _toolchain:
+        return _toolchain['image']
+    image = None
+    if TOOLCHAIN_IMAGE and shutil.which('docker'):
+        have = subprocess.run(['docker', 'image', 'inspect', TOOLCHAIN_IMAGE],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if have.returncode == 0:
+            image = TOOLCHAIN_IMAGE
+        elif os.environ.get('GK_TOOLCHAIN_PULL', '1') != '0':
+            if log:
+                log('  pulling   %s' % TOOLCHAIN_IMAGE)
+            pull = subprocess.run(['docker', 'pull', '-q', TOOLCHAIN_IMAGE],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if pull.returncode == 0:
+                image = TOOLCHAIN_IMAGE
+    _toolchain['image'] = image
+    return image
+
 SCALARS = {'int': 'uint256', 'bool': 'bool', 'bytes': 'bytes', 'str': 'string'}
 
 SOL_LINE = 120  # forge fmt's default line_length
@@ -344,12 +373,17 @@ def check_pin(mpy_src):
         raise GkPythonError('%s has local modifications' % mpy_src)
 
 
-def resolve_mpy_src(mpy_src, root, log=print):
+def resolve_mpy_src(mpy_src, root, log=print, compiler='docker'):
     """--mpy-src, else GK_MPY_SRC, else <root>/cache/gkvm/micropython/src — cloned there at
-    the pin on first use (network). Whatever it is, it must pass check_pin."""
+    the pin on first use (network); or, for a docker build with the prebuilt toolchain image
+    and no local checkout, the image's own copy (IMAGE_MPY_SRC, pin-checked in-container).
+    Whatever it is, it must pass check_pin."""
     mpy_src = mpy_src or os.environ.get('GK_MPY_SRC')
     if not mpy_src:
         mpy_src = os.path.join(root, 'cache', 'gkvm', 'micropython', 'src')
+        if not os.path.isdir(os.path.join(mpy_src, '.git')) and compiler == 'docker' \
+                and toolchain_image(log):
+            return IMAGE_MPY_SRC
         if not os.path.isdir(os.path.join(mpy_src, '.git')):
             if not shutil.which('git'):
                 raise GkPythonError('git is not on PATH (needed to fetch MicroPython %s)' % MPY_TAG)
@@ -377,11 +411,23 @@ def resolve_port(port=None):
 # --- stage + compile ---------------------------------------------------------------------
 
 
+def empty_dir(stage_dir):
+    """Clear a stage dir IN PLACE rather than rmtree + recreate: Docker Desktop's file sharing
+    caches the bind-mounted directory by inode, and a directory recreated at the same path
+    seconds after a build shows up empty inside the next container ("crt/crt0.S: No such
+    file") — seen on a second `gk init` of the same project."""
+    if os.path.isdir(stage_dir):
+        for entry in os.listdir(stage_dir):
+            path = os.path.join(stage_dir, entry)
+            shutil.rmtree(path) if os.path.isdir(path) and not os.path.islink(path) else os.remove(path)
+    else:
+        os.makedirs(stage_dir)
+
+
 def stage(source, sig, crt, crt_files, port, stage_dir):
     """Lay out gas-analyzer's guest dir: crt/, link.ld, micropython/ (the port) with the
     scripts under micropython/guest/. Returns (GUEST_PY, GUEST_PY_EXTRA), port-relative."""
-    if os.path.isdir(stage_dir):
-        shutil.rmtree(stage_dir)
+    empty_dir(stage_dir)
     guest_dir = os.path.join(stage_dir, 'micropython', 'guest')
     os.makedirs(os.path.join(stage_dir, 'crt'))
     os.makedirs(guest_dir)
@@ -426,6 +472,8 @@ def _run(cmd, cwd=None):
 def compile_native(stage_dir, mpy_src, args, cc):
     """UNTESTED on a real host toolchain (needs riscv64-unknown-elf-gcc + picolibc headers);
     the ELF may also differ from the docker leg's, whose source paths are fixed."""
+    if mpy_src == IMAGE_MPY_SRC:
+        raise GkPythonError('a native build needs a MicroPython checkout: pass --mpy-src')
     _run(['make', '-f', 'port.mk', 'MPY_SRC=' + mpy_src] + args,
          cwd=os.path.join(stage_dir, 'micropython'))
     return _run([cc, '--version']).splitlines()[0].strip()
@@ -433,17 +481,31 @@ def compile_native(stage_dir, mpy_src, args, cc):
 
 def compile_docker(stage_dir, mpy_src, args, cc):
     # gas-analyzer's `make docker` leg, mount for mount: /guest is the staged guest dir,
-    # /mpy the pinned upstream (mpy-cross, a host tool, is built inside it once).
+    # /mpy the pinned upstream (mpy-cross, a host tool, is built inside it once) — or the
+    # toolchain image's own checkout when resolve_mpy_src chose it.
     quoted = ' '.join("'%s'" % a for a in args)
+    image = toolchain_image()
+    in_image = mpy_src == IMAGE_MPY_SRC
+    if in_image and not image:
+        raise GkPythonError('the toolchain image is not available; pass --mpy-src or unset '
+                            'GK_TOOLCHAIN_IMAGE')
+    setup = ('set -e; ' if image else
+             'set -e; apt-get update -qq >/dev/null; apt-get install -y -qq %s >/dev/null; '
+             % DOCKER_PACKAGES)
+    if in_image:
+        mpy, mounts = IMAGE_MPY_SRC, []
+        setup += ('test "$(git -C %s rev-parse HEAD)" = %s || { echo "toolchain image: '
+                  'MicroPython is not at %s"; exit 9; }; ' % (mpy, MPY_COMMIT, MPY_COMMIT))
+    else:
+        mpy, mounts = '/mpy', ['-v', '%s:/mpy' % mpy_src]
     script = (
-        'set -e; apt-get update -qq >/dev/null; apt-get install -y -qq %s >/dev/null; '
+        setup +
         '%s --version | head -n1 > /guest/cc.version; rc=0; '
-        'make -f port.mk MPY_SRC=/mpy %s > /guest/make.log 2>&1 || rc=$?; '
-        'chown -R %d:%d /guest /mpy/mpy-cross/build 2>/dev/null || true; '
+        'make -f port.mk MPY_SRC=%s %s > /guest/make.log 2>&1 || rc=$?; '
+        'chown -R %d:%d /guest %s/mpy-cross/build 2>/dev/null || true; '
         '[ $rc -eq 0 ] || tail -n 40 /guest/make.log; exit $rc'
-        % (DOCKER_PACKAGES, cc, quoted, os.getuid(), os.getgid()))
-    _run(['docker', 'run', '--rm', '-v', '%s:/guest' % os.path.abspath(stage_dir),
-          '-v', '%s:/mpy' % mpy_src, '-w', '/guest/micropython', DOCKER_IMAGE,
-          'bash', '-c', script])
+        % (cc, mpy, quoted, os.getuid(), os.getgid(), mpy))
+    _run(['docker', 'run', '--rm', '-v', '%s:/guest' % os.path.abspath(stage_dir)] + mounts +
+         ['-w', '/guest/micropython', image or DOCKER_IMAGE, 'bash', '-c', script])
     with open(os.path.join(stage_dir, 'cc.version')) as f:
         return f.read().strip()

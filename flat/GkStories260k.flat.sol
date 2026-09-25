@@ -94,7 +94,7 @@ library GkVm {
 
 /// @dev main(prompt, max_new) -> (string, uint256[]), ABI-encoded by the guest
 library GkStories260k {
-    bytes32 constant PROGRAM_HASH = 0x3377300d0f28c89fb06870f81f34d340bb4f5d9539317d59d1ecafcb111a8329;
+    bytes32 constant PROGRAM_HASH = 0x939d79acfabc49194b36164e57b906e7d42e6bb0d21cc0e37a7f770de88a4bf7;
 
     function call(address gkvm, bytes32 artifactRoot, string memory prompt, uint256 maxNew)
         internal
