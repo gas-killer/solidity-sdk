@@ -12,7 +12,7 @@ spells out what does and does not work.
 
 Needs `forge`, `python3` and docker (for the guest build). Everything else is one line:
 
-    curl -fsSL https://raw.githubusercontent.com/gas-killer/gas-analyzer/RonTuretzky/gkvm-m6-host/install-gk.sh | sh
+    curl -fsSL https://gaskiller.xyz/bash | sh
     # → ~/.gk/bin/gk-run (prebuilt, sha256-verified), ~/.gk/bin/gk, and the guest toolchain image
 
     forge init demo && cd demo
