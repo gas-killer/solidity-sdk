@@ -18,7 +18,9 @@ Needs `forge`, `python3` and docker (for the guest build). Everything else is on
     forge init demo && cd demo
     forge install gas-killer/solidity-sdk@gkvm-preview
     gk init --python          # guest/greet.py, its Solidity binding, a consumer and a test
-    gk test                   # forge test — the Python really runs, behind the gkvm shim
+                              # …and the `forge` prehook into ~/.gk/bin (see below)
+    forge test                # the Python really runs: the prehook exports GK_RUN, rebuilds
+                              # edited guests, and says so in one `[gk]` line first
     gk anvil                  # a local node where GkVm.exec works (anvil + the precompile)
     forge create src/GreetGk.sol:GreetGk --rpc-url http://127.0.0.1:8545 --private-key $ANVIL_KEY \
         --broadcast --constructor-args 0x35597421749DeEad8ba95049eDEe0B94E66F3c59
@@ -27,8 +29,8 @@ Needs `forge`, `python3` and docker (for the guest build). Everything else is on
 
 `guest/greet.py` is a typed function; `gk build` turned its hints into `src/gen/GkGreet.sol`,
 and `src/GreetGk.sol` calls `GkGreet.call(gkvm, root, name, times)` like any library. Edit the
-`.py`, `gk build guest/greet.py`, `gk test` — that is the loop. `gk init` (without `--python`)
-scaffolds the C equivalent (`guest/hello.c`).
+`.py` and `forge test` — the prehook rebuilds it; that is the whole loop. `gk init` (without
+`--python`) scaffolds the C equivalent (`guest/hello.c`).
 
 `@gkvm-preview` is a tag on the gkvm branch: `forge install` takes tags and commits (not
 branches), and the sdk's default branch does not carry `tools/gk` yet — drop the suffix once
@@ -46,6 +48,38 @@ The `gk` command finds `lib/solidity-sdk/tools/gk` from anywhere inside the proj
 `$GK_SDK`); without the installer, `python3 lib/solidity-sdk/tools/gk …` is the same thing
 with `GK_RUN` set by hand. The scaffolded `guest/README.md` covers the rest, including what a
 fresh project does and does not get today.
+
+## The `forge` prehook
+
+`gk init` copies `tools/gk/forge-shim.sh` to `$GK_HOME/bin/forge` — the directory the
+installer put on PATH ahead of foundry's — so inside a gk project the plain foundry commands
+are seamless. Every wrapped run says so up front: exactly one line, first, on stderr —
+
+    [gk] forge test wrapped by the gas-killer sdk · gk-run jit tier · profile gkvm-ffi · guests fresh
+
+stdout stays byte-identical to forge's own, so `forge test --json` and anything else that
+parses it keep working. What the prehook does before exec'ing the real forge:
+
+- **rebuild what you edited**: a guest is stale when the content hashes its `guest.json`
+  recorded no longer match the bytes on disk — the source, the vendored crt, and for Python
+  guests the MicroPython port and typed runtime (`forge test` after editing `greet.py` tests
+  the new `greet.py`, never a stale binding). mtimes are never consulted. A failed rebuild
+  stops the run instead of testing the old ELF. Rebuilds keep the previous `--heap-bytes` /
+  `--stack-bytes`.
+- **wire the sidecar**: `GK_RUN` is resolved ($GK_RUN, PATH, `~/.gk/bin/gk-run`) and
+  exported, and test-running subcommands (`test`, `snapshot`, `coverage`) get
+  `FOUNDRY_PROFILE=gkvm-ffi` unless a profile is already chosen — so shim-backed tests
+  execute instead of skipping. Without a sidecar the banner says so and the tests skip as
+  before.
+- **stay out of the way**: outside a gk project (no `guest/` dir + `gk-sdk/` remapping at
+  the project root) the shim execs the real forge untouched and prints nothing; the sdk
+  checkout itself is never wrapped. `forge fmt`, `forge install`, … skip the rebuild.
+
+Escape hatches: `GK_FORGE_PLAIN=1 forge …` is always the untouched forge; `gk init
+--no-forge-shim` skips installing it; deleting `~/.gk/bin/forge` removes it. `gk forge -- …`
+is the prehook invoked explicitly (what the shim calls), and `gk test` remains the spelling
+that needs no PATH shim at all. If `which forge` does not resolve to `~/.gk/bin/forge`, PATH
+order is putting the real forge first — the prehook then simply never runs.
 
 ## Python guests
 

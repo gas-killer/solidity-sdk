@@ -41,6 +41,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import gk_build  # noqa: E402
+import gk_forge  # noqa: E402
 import gk_init  # noqa: E402
 import gk_test  # noqa: E402
 import gk_anvil  # noqa: E402
@@ -105,10 +106,18 @@ def main(argv=None):
     i.add_argument('--python', action='store_true',
                    help='scaffold a typed Python guest (guest/greet.py → GkGreet.sol) instead '
                         'of the C one; needs docker (or the prebuilt toolchain image)')
+    i.add_argument('--no-forge-shim', action='store_true',
+                   help='do not install the `forge` prehook into $GK_HOME/bin (plain '
+                        '`forge test` then needs GK_RUN + FOUNDRY_PROFILE by hand, or `gk test`)')
 
     t = sub.add_parser('test', help='forge test with the guest really executing (gk-run + the '
                                     'gkvm-ffi profile); extra arguments go to forge')
     t.add_argument('forge_args', nargs=argparse.REMAINDER, help='passed to `forge test`')
+
+    f = sub.add_parser('forge', help='run forge through the gkvm prehook: rebuild stale '
+                                     'guests, export GK_RUN, one [gk] banner line, then exec '
+                                     'the real forge (what the installed `forge` shim calls)')
+    f.add_argument('forge_args', nargs=argparse.REMAINDER, help='the full forge command line')
 
     a = sub.add_parser('anvil', help='start gk-anvil (anvil + the gkvm precompile) with every '
                                      'guest built in this project installed; extra arguments '
@@ -118,7 +127,7 @@ def main(argv=None):
     # `gk test --match-contract X`: argparse would claim the forge options as gk's own, so
     # everything unknown after `test` goes to forge.
     args, unknown = ap.parse_known_args(argv)
-    if args.cmd == 'test':
+    if args.cmd in ('test', 'forge'):
         args.forge_args = unknown + args.forge_args
     elif args.cmd == 'anvil':
         args.anvil_args = unknown + args.anvil_args
@@ -135,9 +144,14 @@ def main(argv=None):
         elif args.cmd == 'init':
             gk_init.init(args.project, args.sdk_root, crt=args.crt, compiler=args.compiler,
                          build=not args.no_build, sdk_path=args.sdk_path, python=args.python)
+            if not args.no_forge_shim:
+                gk_forge.install_shim()
         elif args.cmd == 'test':
             forge_args = args.forge_args[1:] if args.forge_args[:1] == ['--'] else args.forge_args
             return gk_test.run(args.sdk_root, forge_args)
+        elif args.cmd == 'forge':
+            forge_args = args.forge_args[1:] if args.forge_args[:1] == ['--'] else args.forge_args
+            return gk_forge.run(args.sdk_root, forge_args)
         elif args.cmd == 'anvil':
             anvil_args = args.anvil_args[1:] if args.anvil_args[:1] == ['--'] else args.anvil_args
             return gk_anvil.run(args.sdk_root, anvil_args)

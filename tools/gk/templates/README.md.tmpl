@@ -53,10 +53,15 @@ Re-running `gk init` is safe: existing files are never overwritten.
 
 3. **Run the tests** with the guest really executing:
 
-       gk test --match-contract {{TEST_CONTRACT}}
+       forge test --match-contract {{TEST_CONTRACT}}
 
-   (`gk test` = `GK_RUN=<sidecar> FOUNDRY_PROFILE=gkvm-ffi forge test …`.) Without a sidecar
-   the shim-backed tests skip (plain `forge test` stays green and ffi-free).
+   `gk init` installed a `forge` prehook into `~/.gk/bin`: inside this project it exports
+   `GK_RUN`, selects the `gkvm-ffi` profile, rebuilds any guest you edited (content hashes,
+   not mtimes) and announces itself in one `[gk]` line on stderr before the real forge runs.
+   `gk test --match-contract {{TEST_CONTRACT}}` is the same thing without the PATH shim
+   (`gk test` = rebuild-if-stale + `GK_RUN=<sidecar> FOUNDRY_PROFILE=gkvm-ffi forge test …`),
+   and `GK_FORGE_PLAIN=1` gives you the untouched forge. Without a sidecar the shim-backed
+   tests skip (plain `forge test` stays green and ffi-free).
 
 4. **Run it on a local node** — `gk anvil` starts anvil with the gkvm precompile and every guest
    built here installed; deploy the consumer with `GKVM_ADDRESS` (`0x3559…3c59`) as its `gkvm` and

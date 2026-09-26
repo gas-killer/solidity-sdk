@@ -17,6 +17,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import gk_build  # noqa: E402
+import gk_forge  # noqa: E402
 import gk_init  # noqa: E402
 import gk_python  # noqa: E402
 import gk_vectors  # noqa: E402
@@ -500,6 +501,235 @@ class Init(unittest.TestCase):
             self.assertEqual(proc.returncode, 1)
             self.assertIn(b'gk: ', proc.stderr)
             self.assertIn(b'not a forge project', proc.stderr)
+
+
+class ForgePrehook(unittest.TestCase):
+    """The transparent `forge` wrapper: content-hash staleness, banner, env, shim install."""
+
+    def fake_built_project(self, tmp):
+        """A scaffolded project whose hello.c has a recorded build matching it byte-for-byte
+        (fake ELF/binding — staleness only reads guest.json and hashes sources)."""
+        sdk = make_project(tmp)
+        gk_init.init(tmp, sdk, build=False, log=quiet)
+        src = os.path.join(tmp, 'guest', 'hello.c')
+        bdir = os.path.join(tmp, 'cache', 'gkvm', 'build', 'hello')
+        os.makedirs(bdir)
+        with open(os.path.join(bdir, 'guest.elf'), 'wb') as f:
+            f.write(b'\x7fELF fake')
+        binding = os.path.join(tmp, 'src', 'gen', 'GkHello.sol')
+        os.makedirs(os.path.dirname(binding), exist_ok=True)
+        with open(binding, 'w') as f:
+            f.write('// fake binding\n')
+        info = {
+            'name': 'hello', 'binding': 'GkHello',
+            'sourceHash': hex32(keccak256(gk_build._read(src))),
+            'crtHash': hex32(keccak256(b''.join(
+                gk_build._read(os.path.join(tmp, 'guest', p)) for p in gk_build.CRT_FILES))),
+        }
+        with open(os.path.join(bdir, 'guest.json'), 'w') as f:
+            json.dump(info, f)
+        return sdk, src
+
+    def fake_bin(self, base, name, script):
+        d = os.path.join(base, 'bin-' + name)
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, name)
+        with open(path, 'w') as f:
+            f.write(script)
+        os.chmod(path, 0o755)
+        return path
+
+    def test_stale_is_a_content_hash_not_an_mtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, src = self.fake_built_project(tmp)
+            self.assertIsNone(gk_forge.stale(tmp, src))
+            os.utime(src)  # a bare touch is not an edit
+            self.assertIsNone(gk_forge.stale(tmp, src))
+            with open(src, 'a') as f:
+                f.write('\n/* edited */\n')
+            self.assertEqual(gk_forge.stale(tmp, src), 'source changed')
+
+    def test_stale_reasons(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, src = self.fake_built_project(tmp)
+            binding = os.path.join(tmp, 'src', 'gen', 'GkHello.sol')
+            os.rename(binding, binding + '.away')
+            self.assertEqual(gk_forge.stale(tmp, src), 'binding missing')
+            os.rename(binding + '.away', binding)
+            elf = os.path.join(tmp, 'cache', 'gkvm', 'build', 'hello', 'guest.elf')
+            os.remove(elf)
+            self.assertEqual(gk_forge.stale(tmp, src), 'guest.elf missing')
+            with open(elf, 'wb') as f:
+                f.write(b'\x7fELF fake')
+            with open(os.path.join(tmp, 'guest', 'crt', 'gkvm.h'), 'a') as f:
+                f.write('\n/* crt edited */\n')
+            self.assertEqual(gk_forge.stale(tmp, src), 'crt changed')
+            os.remove(os.path.join(tmp, 'cache', 'gkvm', 'build', 'hello', 'guest.json'))
+            self.assertEqual(gk_forge.stale(tmp, src), 'never built')
+
+    def test_ensure_fresh_rebuilds_only_the_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sdk, _ = self.fake_built_project(tmp)
+            with open(os.path.join(tmp, 'guest', 'world.c'), 'w') as f:
+                f.write('int main(void) { return 0; }\n')
+            calls = []
+            rebuilt = gk_forge.ensure_fresh(
+                sdk, tmp, log=quiet,
+                build=lambda source, sdk_root, **kw: calls.append(os.path.basename(source)))
+            self.assertEqual(calls, ['world.c'])
+            self.assertEqual(rebuilt, [('world.c', 'never built')])
+
+    def test_prior_heap_and_stack_survive_a_rebuild(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, 'cache', 'gkvm', 'build', 'greet'))
+            with open(os.path.join(tmp, 'cache', 'gkvm', 'build', 'greet', 'guest.json'),
+                      'w') as f:
+                json.dump({'makeArgs': ['V=1', 'GK_MPY_HEAP_BYTES=333', 'GK_MPY_STACK_BYTES=44']},
+                          f)
+            self.assertEqual(gk_forge._prior_make_args(tmp, 'guest/greet.py'), (333, 44))
+
+    def test_find_real_forge_skips_every_shim_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(gk_forge.SHIM_TEMPLATE) as f:
+                shim = self.fake_bin(tmp, 'forge', f.read())
+            self.assertTrue(gk_forge.is_shim(shim))
+            real = self.fake_bin(os.path.join(tmp, 'real'), 'forge', '#!/bin/sh\nexit 0\n')
+            path = os.pathsep.join([os.path.dirname(shim), os.path.dirname(real)])
+            self.assertEqual(gk_forge.find_real_forge(path), real)
+            self.assertIsNone(gk_forge.find_real_forge(os.path.dirname(shim)))
+
+    def _run(self, cwd, argv, env_extra, sdk_root=SDK_ROOT):
+        """gk_forge.run with a captured exec and a scoped cwd/env; returns (execs, lines)."""
+        execs, lines = [], []
+        old_cwd, old_env = os.getcwd(), dict(os.environ)
+        try:
+            os.chdir(cwd)
+            os.environ.update(env_extra)
+            rc = gk_forge.run(sdk_root, argv, log=lines.append,
+                              exec_fn=lambda p, a, e: execs.append((p, a, e)) or 0)
+        finally:
+            os.chdir(old_cwd)
+            os.environ.clear()
+            os.environ.update(old_env)
+        return rc, execs, lines
+
+    def test_outside_a_gk_project_forge_is_untouched_and_silent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            real = self.fake_bin(tmp, 'forge', '#!/bin/sh\nexit 0\n')
+            plain = os.path.join(tmp, 'elsewhere')
+            os.makedirs(plain)
+            rc, execs, lines = self._run(plain, ['test', '-vv'],
+                                         {'PATH': os.path.dirname(real)})
+            self.assertEqual(rc, 0)
+            self.assertEqual(lines, [])
+            (path, argv, env), = execs
+            self.assertEqual((path, argv), (real, [real, 'test', '-vv']))
+            self.assertNotIn('GK_FORGE_WRAPPED', env)
+
+    def test_inside_a_gk_project_forge_test_is_wrapped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sdk, _ = self.fake_built_project(tmp)
+            real = self.fake_bin(tmp, 'forge', '#!/bin/sh\nexit 0\n')
+            gk_run = self.fake_bin(tmp, 'gk-run', '#!/bin/sh\necho jit\n')
+            rc, execs, lines = self._run(
+                tmp, ['test', '-vv'],
+                {'PATH': os.path.dirname(real), 'GK_RUN': gk_run}, sdk_root=sdk)
+            self.assertEqual(rc, 0)
+            (path, argv, env), = execs
+            self.assertEqual((path, argv), (real, [real, 'test', '-vv']))
+            self.assertEqual(env['GK_RUN'], gk_run)
+            self.assertEqual(env['FOUNDRY_PROFILE'], gk_init.FFI_PROFILE)
+            self.assertEqual(env['GK_FORGE_WRAPPED'], '1')
+            self.assertEqual(len(lines), 1, lines)
+            self.assertTrue(lines[0].startswith('[gk] forge test'), lines[0])
+            self.assertIn('jit tier', lines[0])
+            self.assertIn('guests fresh', lines[0])
+
+    def test_gk_forge_plain_opts_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sdk, _ = self.fake_built_project(tmp)
+            real = self.fake_bin(tmp, 'forge', '#!/bin/sh\nexit 0\n')
+            rc, execs, lines = self._run(
+                tmp, ['build'],
+                {'PATH': os.path.dirname(real), 'GK_FORGE_PLAIN': '1'}, sdk_root=sdk)
+            self.assertEqual(lines, [])
+            self.assertEqual(execs[0][1], [real, 'build'])
+
+    def test_a_failed_rebuild_stops_forge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sdk, src = self.fake_built_project(tmp)
+            with open(src, 'a') as f:
+                f.write('\n/* edited */\n')
+            real = self.fake_bin(tmp, 'forge', '#!/bin/sh\nexit 0\n')
+
+            def boom(*a, **kw):
+                raise gk_build.GkBuildError('boom')
+            old = gk_build.build
+            gk_build.build = boom
+            try:
+                rc, execs, lines = self._run(tmp, ['test'],
+                                             {'PATH': os.path.dirname(real)}, sdk_root=sdk)
+            finally:
+                gk_build.build = old
+            self.assertEqual(rc, 1)
+            self.assertEqual(execs, [])
+            self.assertEqual(len(lines), 1)
+            self.assertIn('forge not run', lines[0])
+            self.assertIn('boom', lines[0])
+
+    def test_install_shim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_env = dict(os.environ)
+            os.environ['GK_HOME'] = os.path.join(tmp, 'gk-home')
+            try:
+                self.assertEqual(gk_forge.install_shim(log=quiet), 'skipped')
+                os.makedirs(os.path.join(tmp, 'gk-home', 'bin'))
+                self.assertEqual(gk_forge.install_shim(log=quiet), 'installed')
+                shim = os.path.join(tmp, 'gk-home', 'bin', 'forge')
+                self.assertTrue(os.access(shim, os.X_OK))
+                self.assertTrue(gk_forge.is_shim(shim))
+                self.assertEqual(gk_forge.install_shim(log=quiet), 'kept')
+                with open(shim, 'a') as f:
+                    f.write('# older copy\n')
+                self.assertEqual(gk_forge.install_shim(log=quiet), 'updated')
+                with open(gk_forge.SHIM_TEMPLATE) as f:
+                    self.assertEqual(gk_build._read(shim).decode(), f.read())
+                with open(shim, 'w') as f:
+                    f.write('#!/bin/sh\n# the user\'s own wrapper\n')
+                self.assertEqual(gk_forge.install_shim(log=quiet), 'refused')
+                self.assertIn('own wrapper', gk_build._read(shim).decode())
+            finally:
+                os.environ.clear()
+                os.environ.update(old_env)
+
+    def test_end_to_end_through_the_cli_with_a_fake_forge(self):
+        """python3 tools/gk forge -- test -q in a fresh project: banner on stderr first,
+        stdout is the (fake) forge's alone, GK_RUN + profile exported."""
+        with tempfile.TemporaryDirectory() as tmp:
+            sdk, _ = self.fake_built_project(tmp)
+            real = self.fake_bin(
+                tmp, 'forge',
+                '#!/bin/sh\necho "FORGE $@"\necho "GK_RUN=${GK_RUN:-unset}"\n'
+                'echo "PROFILE=${FOUNDRY_PROFILE:-unset}"\n'
+                'echo "WRAPPED=${GK_FORGE_WRAPPED:-unset}"\n')
+            gk_run = self.fake_bin(tmp, 'gk-run', '#!/bin/sh\necho interp\n')
+            env = dict(os.environ)
+            env['PATH'] = os.path.dirname(real) + os.pathsep + env.get('PATH', '')
+            env['GK_RUN'] = gk_run
+            env['GK_HOME'] = os.path.join(tmp, 'no-such-gk-home')
+            env.pop('FOUNDRY_PROFILE', None)
+            env.pop('GK_FORGE_PLAIN', None)
+            env.pop('GK_FORGE_WRAPPED', None)
+            proc = subprocess.run(
+                [sys.executable, HERE, '--sdk-root', sdk, 'forge', '--', 'test', '-q'],
+                cwd=tmp, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+            err = proc.stderr.decode().splitlines()
+            self.assertTrue(err and err[0].startswith('[gk] forge test'), err)
+            self.assertIn('interp tier', err[0])
+            out = proc.stdout.decode().splitlines()
+            self.assertEqual(out, ['FORGE test -q', 'GK_RUN=%s' % gk_run,
+                                   'PROFILE=%s' % gk_init.FFI_PROFILE, 'WRAPPED=1'])
 
 
 @unittest.skipUnless(HAVE_CC and FORGE, 'needs a guest compiler (or docker) and forge')

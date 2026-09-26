@@ -2,6 +2,9 @@
 # The clean-directory quickstart proof (UNBOUNDED_V3 L3 gate): a fresh forge project, in a
 # scratch directory outside every checkout, reaches green shim-backed tests by running ONLY
 # the commands written in tools/gk/README.md and then in the guest/README.md `gk init` wrote.
+# It also proves the forge prehook: plain `forge test` announces itself with one [gk] line
+# and runs the guests, an edited guest is rebuilt automatically, and GK_FORGE_PLAIN=1 is the
+# untouched forge. GK_HOME is pinned into the scratch dir — the proof never touches $HOME.
 #
 # Every command goes through `step <readme> <written> [<executed>]`: <written> must appear
 # verbatim in <readme> or the proof stops; <executed> (default: <written>) is what runs, and
@@ -60,9 +63,12 @@ else
     TOP="$SDK_HERE/tools/gk/README.md"
 fi
 
-# --- tools/gk/README.md, steps 1-2 -------------------------------------------------------
-step "$TOP" 'forge init hello-gk'
-step "$TOP" 'cd hello-gk'
+# --- tools/gk/README.md, quickstart ------------------------------------------------------
+# `gk init` installs the forge prehook into $GK_HOME/bin; pinning GK_HOME into the scratch
+# dir keeps the proof out of the caller's home. The dir must exist for the install to land.
+export GK_HOME="$SCRATCH/gk-home"
+mkdir -p "$GK_HOME/bin"
+step "$TOP" 'forge init demo && cd demo'
 if [ -n "$SDK_SRC" ]; then
     step "$TOP" 'git -c protocol.file.allow=always submodule add /path/to/solidity-sdk lib/solidity-sdk' \
         "git -c protocol.file.allow=always submodule add $SDK_SRC lib/solidity-sdk"
@@ -71,30 +77,50 @@ else
     step "$TOP" 'forge install gas-killer/solidity-sdk'
 fi
 printf '# installed sdk commit: %s\n' "$(git -C lib/solidity-sdk rev-parse --short HEAD)"
-step "$TOP" 'python3 lib/solidity-sdk/tools/gk init'
+# the README's `gk init` is the installer's `gk` command; without the installer the same
+# thing is the sdk's tools/gk, as the README says
+step "$TOP" 'gk init' 'python3 lib/solidity-sdk/tools/gk init'
+[ -x "$GK_HOME/bin/forge" ] || die 'gk init did not install the forge prehook into $GK_HOME/bin'
 
 # --- guest/README.md (scaffolded), Quickstart steps 1-3 ----------------------------------
 GUEST="$PWD/guest/README.md"
 [ -f "$GUEST" ] || die "gk init wrote no guest/README.md"
 step "$GUEST" 'python3 lib/solidity-sdk/tools/gk build guest/hello.c'
 
-# `--root` is the README's own option; it keeps the proof out of ~/.cargo/bin. PATH is
-# extended so that the README's `$(command -v gk-run)` finds the binary just installed.
+# `--root` is the README's own option; it keeps the proof out of ~/.cargo/bin.
 grep -qF -- '--root <dir>' "$GUEST" || die "guest/README.md no longer documents --root"
 step "$GUEST" 'cargo install --locked --path crates/gkvm --bin gk-run' \
     "(cd $GAS_ANALYZER && cargo install --locked --path crates/gkvm --bin gk-run --root $SCRATCH/gk-run-root)"
 export PATH="$SCRATCH/gk-run-root/bin:$PATH"
 printf '# gk-run on PATH: %s\n' "$(command -v gk-run)"
 
-step "$GUEST" 'GK_RUN=$(command -v gk-run) FOUNDRY_PROFILE=gkvm-ffi forge test --match-contract HelloGkTest' \
-    'GK_RUN=$(command -v gk-run) FOUNDRY_PROFILE=gkvm-ffi forge test --match-contract HelloGkTest 2>&1 | tee ../ffi-test.log'
+# --- the forge prehook: plain `forge test` runs the guests, one [gk] line first ----------
+export PATH="$GK_HOME/bin:$PATH"
+command -v forge | grep -qF "$GK_HOME/bin/forge" || die "PATH does not resolve forge to the prehook"
+step "$GUEST" 'forge test --match-contract HelloGkTest' \
+    'forge test --match-contract HelloGkTest 2> ../prehook.log | tee ../ffi-test.log'
+sed 's/^/  # stderr: /' ../prehook.log
+head -n 1 ../prehook.log | grep -q '^\[gk\] forge test' \
+    || die "the wrapped forge did not announce itself first on stderr"
 grep -Eq 'Suite result: ok\. [1-9][0-9]* passed; 0 failed; 0 skipped' ../ffi-test.log \
     || die "the shim-backed tests did not all run green (a skip is not a pass)"
 
-# "plain `forge test` stays green and ffi-free"
-step "$GUEST" 'forge test'
+# an edited guest is rebuilt before the tests run (content hashes, not mtimes)
+printf '\n$ printf "/* edited */\\n" >> guest/hello.c   # then the same forge test again\n'
+printf '/* edited */\n' >> guest/hello.c
+forge test --match-contract HelloGkTest 2> ../prehook2.log | tee ../ffi-test2.log
+sed 's/^/  # stderr: /' ../prehook2.log
+grep -qF 'rebuilt hello.c (source changed)' ../prehook2.log \
+    || die "editing guest/hello.c did not trigger a rebuild"
+grep -Eq 'Suite result: ok\. [1-9][0-9]* passed; 0 failed; 0 skipped' ../ffi-test2.log \
+    || die "the rebuilt guest's tests did not run green"
 
-printf '\nquickstart-proof: PASS — fresh project, written steps only, shim-backed tests ran green\n'
+# "`GK_FORGE_PLAIN=1` gives you the untouched forge" — the ffi tests then skip, staying green
+step "$GUEST" 'GK_FORGE_PLAIN=1' 'GK_FORGE_PLAIN=1 forge test 2> ../plain.log'
+if grep -q '^\[gk\]' ../plain.log; then die "GK_FORGE_PLAIN=1 still went through the prehook"; fi
+
+printf '\nquickstart-proof: PASS — fresh project, written steps only: the prehook wrapped forge test\n'
+printf 'green, an edited guest was rebuilt automatically, GK_FORGE_PLAIN=1 stayed untouched\n'
 if [ "$KEEP" = "1" ]; then
     printf '# kept: %s\n' "$SCRATCH"
 else

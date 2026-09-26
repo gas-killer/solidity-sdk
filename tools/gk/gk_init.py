@@ -250,7 +250,8 @@ def init(project, sdk_root, crt=None, compiler='auto', build=True, sdk_path=None
         gk_build.build(guest, sdk_root, crt=os.path.join(project, GUEST_DIR), compiler=compiler,
                        sol_out=os.path.dirname(binding), log=log, project=project)
         actions.append(('built', _posix(os.path.relpath(binding, project))))
-        log('next: `gk test` (or GK_RUN=/path/to/gk-run FOUNDRY_PROFILE=%s forge test) — see '
+        log('next: `forge test` (the gk prehook rebuilds guests and sets GK_RUN; without it, '
+            '`gk test` or GK_RUN=/path/to/gk-run FOUNDRY_PROFILE=%s forge test) — see '
             '%s/README.md' % (FFI_PROFILE, GUEST_DIR))
     elif not os.path.isfile(binding):
         log('next: python3 %s/tools/gk build %s/%s   (until then `forge build` fails: %s '
