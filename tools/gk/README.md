@@ -49,6 +49,37 @@ The `gk` command finds `lib/solidity-sdk/tools/gk` from anywhere inside the proj
 with `GK_RUN` set by hand. The scaffolded `guest/README.md` covers the rest, including what a
 fresh project does and does not get today.
 
+## When it fails: `gk explain`
+
+Every gkvm failure is typed, but forge shows it as a decimal code and hex bytes. Paste any
+of those shapes into `gk explain` — the ABI revert blob from a trace, the forge-printed
+line, gk-run's hex output line, or a bare code — and it answers in words:
+
+    $ gk explain "GkGuestTrap(3489660929, 0x54726163…)"
+    forge-printed GkGuestTrap(...)
+      code   0xD0000001 (3489660929) — GK_MPY_TRAP_EXCEPTION
+      from   the MicroPython port: uncaught Python exception
+      data   86 bytes (the traceback text) — traceback:
+        Traceback (most recent call last):
+          File "greet.py", line 3, in main
+        ValueError: boom
+
+The trap-code taxonomy it decodes (assembled from the crt, the MicroPython port and the
+host runner — this table is the one place it is written down):
+
+| code | raised by | meaning | `data` |
+|---|---|---|---|
+| anything else | the guest | its own `gk_abort(code, msg)` | the guest's message |
+| `0xD0000001` | MicroPython port | uncaught Python exception | the traceback text |
+| `0xE0000001..4` | gk-guest-crt | input too large / artifact Merkle-verify / artifact range / bad manifest | crt diagnostic |
+| `0xF0000001` | host runner | `GKVM_MEM_BYTES_CAP` exceeded | host diagnostic |
+| `0xF0000002` | host runner | execution fault (illegal instruction, …) | host diagnostic |
+| `0xF0000100 \| exit` | host runner | bare nonzero `exit()` without `gk_abort` | — |
+
+`GkGuestOutOfCycles(used, limit)` decodes too (with the gas the budget corresponds to at
+the pinned 4 cycles/gas), as do the no-argument errors (`GkVmUnavailable`, …), and
+`GKVM_OK_TAG`-prefixed returndata is called out as success, not an error.
+
 ## The `forge` prehook
 
 `gk init` copies `tools/gk/forge-shim.sh` to `$GK_HOME/bin/forge` — the directory the

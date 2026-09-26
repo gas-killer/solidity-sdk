@@ -17,6 +17,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import gk_build  # noqa: E402
+import gk_explain  # noqa: E402
 import gk_forge  # noqa: E402
 import gk_init  # noqa: E402
 import gk_python  # noqa: E402
@@ -501,6 +502,105 @@ class Init(unittest.TestCase):
             self.assertEqual(proc.returncode, 1)
             self.assertIn(b'gk: ', proc.stderr)
             self.assertIn(b'not a forge project', proc.stderr)
+
+
+class Explain(unittest.TestCase):
+    """`gk explain` — every shape a gkvm failure reaches a developer in."""
+
+    TRACEBACK = ('Traceback (most recent call last):\n'
+                 '  File "greet.py", line 3, in main\nValueError: boom')
+
+    # Pinned: keccak256(signature)[:4]. The Rust side pins the same values
+    # (gas-analyzer crates/core/src/gkvm.rs selector tests); a drift here is a consensus bug.
+    SELECTORS = {
+        'GkVmUnavailable()': '53c3489c',
+        'GkGuestTrap(uint32,bytes)': '345cd5f0',
+        'GkGuestOutOfCycles(uint64,uint64)': 'e157e676',
+        'GkVmInputOverflow()': '74269737',
+        'GkVmOutputOverflow()': '3a7f20fa',
+        'GkVmStaticOnly()': 'ed152aaf',
+    }
+
+    def trap_abi(self, code, data):
+        pad = b'\0' * ((32 - len(data) % 32) % 32)
+        return (gk_explain.selector('GkGuestTrap(uint32,bytes)')
+                + code.to_bytes(32, 'big') + (0x40).to_bytes(32, 'big')
+                + len(data).to_bytes(32, 'big') + data + pad)
+
+    def test_selectors_are_pinned(self):
+        for sig, sel in self.SELECTORS.items():
+            self.assertEqual(gk_explain.selector(sig).hex(), sel, sig)
+        self.assertEqual(sorted(gk_explain.ERROR_SIGS), sorted(self.SELECTORS))
+
+    def test_trap_code_classes(self):
+        for code, name in [(0xD0000001, 'GK_MPY_TRAP_EXCEPTION'),
+                           (0xE0000002, 'GK_TRAP_ARTIFACT_VERIFY'),
+                           (0xF0000001, 'GKVM_TRAP_CODE_MEM_CAP'),
+                           (0xF0000002, 'GKVM_TRAP_CODE_EXEC_FAULT')]:
+            self.assertEqual(gk_explain.classify(code)[0], name, hex(code))
+        name, origin, meaning, _ = gk_explain.classify(0xF0000142)
+        self.assertEqual(name, 'GKVM_TRAP_CODE_BARE_EXIT | 66')
+        self.assertIn('exited with code 66', meaning)
+        self.assertEqual(gk_explain.classify(0x51000001)[1], 'the guest itself')
+        self.assertEqual(gk_explain.classify(0xE00000FF)[1], 'gk-guest-crt')
+
+    def test_every_input_shape_decodes_the_same_traceback(self):
+        data = self.TRACEBACK.encode()
+        shapes = [
+            '0x' + self.trap_abi(0xD0000001, data).hex(),          # ABI revert blob
+            'GkGuestTrap(3489660929, 0x%s)' % data.hex(),          # pasted forge line
+            '0xd0000001' + data.hex(),                             # gk-run stdout line
+        ]
+        for shape in shapes:
+            out = gk_explain.explain(shape)
+            self.assertIn('GK_MPY_TRAP_EXCEPTION', out, shape[:40])
+            self.assertIn('uncaught Python exception', out)
+            self.assertIn('ValueError: boom', out)   # the traceback is TEXT, not hex
+            self.assertNotIn(data.hex(), out)
+
+    def test_binary_data_stays_hex(self):
+        out = gk_explain.explain('0x' + self.trap_abi(0x51000001, b'\x00\x01\xff').hex())
+        self.assertIn('not text: 0x0001ff', out)
+        self.assertIn('gk_abort', out)
+
+    def test_out_of_cycles_both_shapes(self):
+        abi = (gk_explain.selector('GkGuestOutOfCycles(uint64,uint64)')
+               + (10_000_000).to_bytes(32, 'big') + (10_000_000).to_bytes(32, 'big'))
+        for shape in ['0x' + abi.hex(),
+                      '0x' + (10_000_000).to_bytes(8, 'big').hex()
+                      + (10_000_000).to_bytes(8, 'big').hex(),
+                      'GkGuestOutOfCycles(10000000, 10000000)']:
+            out = gk_explain.explain(shape)
+            self.assertIn('10,000,000', out, shape[:40])
+            self.assertIn('2,500,000 gas', out)
+
+    def test_bare_codes_and_zero_arg_errors(self):
+        self.assertIn('GKVM_TRAP_CODE_MEM_CAP', gk_explain.explain('4026531841'))
+        self.assertIn('GKVM_TRAP_CODE_MEM_CAP', gk_explain.explain('0xF0000001'))
+        self.assertIn('STATICCALL', gk_explain.explain(
+            '0x' + gk_explain.selector('GkVmStaticOnly()').hex()))
+        self.assertIn('GkVm.exec itself', gk_explain.explain('GkVmUnavailable()'))
+
+    def test_ok_returndata_is_not_an_error(self):
+        out = gk_explain.explain('0x01474b')
+        self.assertIn('not an error', out)
+        self.assertIn('0x474b', out)
+
+    def test_garbage_is_a_loud_refusal(self):
+        for bad in ['0x12345678aabb', 'hello world', '0x123']:
+            with self.assertRaises(gk_explain.GkExplainError, msg=bad):
+                gk_explain.explain(bad)
+
+    def test_cli(self):
+        proc = subprocess.run(
+            [sys.executable, HERE, 'explain', 'GkGuestTrap(3489660929, 0x626f6f6d)'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        self.assertIn('boom', proc.stdout.decode())
+        proc = subprocess.run([sys.executable, HERE, 'explain', 'nonsense'],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn('gk explain', proc.stderr.decode())
 
 
 class ForgePrehook(unittest.TestCase):
