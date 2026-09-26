@@ -41,6 +41,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import gk_build  # noqa: E402
+import gk_explain  # noqa: E402
 import gk_forge  # noqa: E402
 import gk_init  # noqa: E402
 import gk_test  # noqa: E402
@@ -91,6 +92,11 @@ def main(argv=None):
 
     h = sub.add_parser('hash', help='print programHash = keccak256(ELF)')
     h.add_argument('elf')
+
+    e = sub.add_parser('explain', help='decode a gkvm failure: an ABI revert blob, the '
+                                       'forge-printed GkGuestTrap(…) line, gk-run\'s hex '
+                                       'output line, or a bare trap code')
+    e.add_argument('blob', nargs='+', help='what you copied; quoting the whole thing is fine')
 
     i = sub.add_parser('init', help='scaffold a guest into an existing forge project '
                                     '(never overwrites; safe to re-run)')
@@ -155,6 +161,8 @@ def main(argv=None):
         elif args.cmd == 'anvil':
             anvil_args = args.anvil_args[1:] if args.anvil_args[:1] == ['--'] else args.anvil_args
             return gk_anvil.run(args.sdk_root, anvil_args)
+        elif args.cmd == 'explain':
+            print(gk_explain.explain(' '.join(args.blob)))
         elif args.cmd == 'vectors':
             if bool(args.artifact) != bool(args.artifact_root):
                 raise gk_vectors.GkVectorsError(
@@ -170,7 +178,7 @@ def main(argv=None):
             with open(args.elf, 'rb') as f:
                 print(hex32(keccak256(f.read())))
     except (gk_build.GkBuildError, gk_init.GkInitError, gk_vectors.GkVectorsError,
-            OSError) as e:
+            gk_explain.GkExplainError, OSError) as e:
         print('gk: %s' % e, file=sys.stderr)
         return 1
     return 0

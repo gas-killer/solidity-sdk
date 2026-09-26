@@ -55,6 +55,10 @@ Re-running `gk init` is safe: existing files are never overwritten.
 
        forge test --match-contract {{TEST_CONTRACT}}
 
+   When a test fails with something like `GkGuestTrap(3489660929, 0x5472…)`, paste that
+   line into `gk explain "…"` — it names the trap class and renders a Python traceback as
+   text instead of hex.
+
    `gk init` installed a `forge` prehook into `~/.gk/bin`: inside this project it exports
    `GK_RUN`, selects the `gkvm-ffi` profile, rebuilds any guest you edited (content hashes,
    not mtimes) and announces itself in one `[gk]` line on stderr before the real forge runs.
