@@ -67,6 +67,13 @@ Re-running `gk init` is safe: existing files are never overwritten.
    and `GK_FORGE_PLAIN=1` gives you the untouched forge. Without a sidecar the shim-backed
    tests skip (plain `forge test` stays green and ffi-free).
 
+   **Iterating on a Python guest?** `GK_FAST=1 forge test` skips the rv64im rebuild and
+   runs the script on the host interpreter instead — sub-second loops, working `print()`
+   and `pdb`. The banner says `FAST (host cpython — not consensus)` and means it: no
+   cycle metering, no artifact verification, CPython ≠ the pinned MicroPython. Anything
+   you pin, sign or ship must come from the real path (drop `GK_FAST`, or
+   `gk run --fast-check` to diff the two).
+
 4. **Run it on a local node** — `gk anvil` starts anvil with the gkvm precompile and every guest
    built here installed; deploy the consumer with `GKVM_ADDRESS` (`0x3559…3c59`) as its `gkvm` and
    `cast call` it. The precompile exists on that node and on no real chain (see below).

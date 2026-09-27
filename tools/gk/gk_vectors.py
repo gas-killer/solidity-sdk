@@ -71,7 +71,10 @@ def run_one(gk_run, elf_path, program_hash, payload, cycle_limit=None, artifact=
         if artifact.get('schedule'):
             cmd += ['--schedule', artifact['schedule']]
 
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # GK_FAST_FORBID: if GK_RUN was pointed at the fast-path sidecar (gk_fast.py), it
+    # refuses — golden vectors are consensus data and only real gk-run may produce them.
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          env=dict(os.environ, GK_FAST_FORBID='1'))
     stderr = proc.stderr.decode('utf-8', 'replace')
     if proc.returncode not in OUTCOMES:
         raise GkVectorsError('gk-run exit %d (environment/usage class — not a vector):\n%s'

@@ -4,6 +4,8 @@ The sidecar- and compiler-dependent cases skip themselves when GK_RUN /
 GK_GUEST_CRT are absent, mirroring the forge shim tests.
 """
 import ast
+import contextlib
+import io
 import json
 import os
 import re
@@ -18,6 +20,7 @@ sys.path.insert(0, HERE)
 
 import gk_build  # noqa: E402
 import gk_explain  # noqa: E402
+import gk_fast  # noqa: E402
 import gk_forge  # noqa: E402
 import gk_init  # noqa: E402
 import gk_python  # noqa: E402
@@ -620,6 +623,232 @@ class Explain(unittest.TestCase):
         self.assertIn('gk explain', proc.stderr.decode())
 
 
+class FastPath(unittest.TestCase):
+    """#89: the host-cpython fast path — the frozen image's runtime and gkvm surface,
+    on the interpreter already on the machine, loudly not consensus."""
+
+    GREET = ('def main(name: str, times: int) -> str:\n'
+             '    if times > 16:\n'
+             '        raise ValueError("greet: times > 16")\n'
+             '    return " ".join(["hello " + name] * times)\n')
+
+    def write(self, tmp, rel, text):
+        path = os.path.join(tmp, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write(text)
+        return path
+
+    @staticmethod
+    def abi_greet(name, times):
+        data = name.encode()
+        return ((0x40).to_bytes(32, 'big') + times.to_bytes(32, 'big')
+                + len(data).to_bytes(32, 'big') + data + b'\0' * (-len(data) % 32))
+
+    @staticmethod
+    def abi_string(value):
+        data = value.encode()
+        return ((0x20).to_bytes(32, 'big') + len(data).to_bytes(32, 'big')
+                + data + b'\0' * (-len(data) % 32))
+
+    def test_typed_guest_runs_through_the_real_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = self.write(tmp, 'guest/greet.py', self.GREET)
+            result = gk_fast.execute(src, self.abi_greet('bob', 3))
+            self.assertEqual(result, ('ok', self.abi_string('hello bob hello bob hello bob')))
+            code, line = gk_fast.outcome_line(result)
+            self.assertEqual(code, 0)
+            self.assertEqual(line, '0x' + result[1].hex())
+
+    def test_uncaught_exception_is_the_mpy_trap_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = self.write(tmp, 'guest/greet.py', self.GREET)
+            kind, code, data = gk_fast.execute(src, self.abi_greet('bob', 17))
+            self.assertEqual((kind, code), ('trap', gk_fast.GK_MPY_TRAP_EXCEPTION))
+            text = data.decode()
+            self.assertIn('ValueError: greet: times > 16', text)
+            self.assertIn('greet.py', text)
+            self.assertNotIn('gk_fast.py', text)  # runner frames are not the guest's
+            self.assertLessEqual(len(data), gk_fast.GK_MPY_TRAP_MSG_CAP)
+            exit_code, line = gk_fast.outcome_line(('trap', code, data))
+            self.assertEqual(exit_code, 10)
+            self.assertTrue(line.startswith('0xd0000001'))
+
+    def test_untyped_guest_uses_gkvm_directly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = self.write(tmp, 'guest/fold.py',
+                             'import gkvm\n'
+                             'data = gkvm.input()\n'
+                             'gkvm.output(gkvm.keccak256(data))\n'
+                             'gkvm.output(bytes([gkvm.PAGE_SIZE // 4096]))\n')
+            result = gk_fast.execute(src, b'\x11\x22')
+            self.assertEqual(result, ('ok', keccak256(b'\x11\x22') + b'\x01'))
+
+    def test_gk_abort_is_the_guest_chosen_trap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = self.write(tmp, 'guest/quit.py', 'import gkvm\ngkvm.abort(0x42, b"nope")\n')
+            self.assertEqual(gk_fast.execute(src, b''), ('trap', 0x42, b'nope'))
+            # a reserved code is refused exactly like the port refuses it: ValueError
+            src = self.write(tmp, 'guest/bad.py', 'import gkvm\ngkvm.abort(0xF0000001)\n')
+            kind, code, data = gk_fast.execute(src, b'')
+            self.assertEqual((kind, code), ('trap', gk_fast.GK_MPY_TRAP_EXCEPTION))
+            self.assertIn(b'trap code must be in 0..0xCFFFFFFF', data)
+
+    def test_sys_exit_mirrors_the_port(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = self.write(tmp, 'guest/bail.py', 'import sys\nsys.exit(3)\n')
+            self.assertEqual(gk_fast.execute(src, b''),
+                             ('trap', gk_fast.GK_MPY_TRAP_SYSTEM_EXIT, b'3'))
+            src = self.write(tmp, 'guest/fine.py',
+                             'import gkvm\nimport sys\ngkvm.output(b"ok")\nsys.exit(0)\n')
+            self.assertEqual(gk_fast.execute(src, b''), ('ok', b'ok'))
+
+    def test_guest_print_goes_to_stderr_never_the_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = self.write(tmp, 'guest/noisy.py',
+                             'import gkvm\nprint("debugging!")\ngkvm.output(b"\\x01")\n')
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                result = gk_fast.execute(src, b'')
+            self.assertEqual(result, ('ok', b'\x01'))
+            self.assertIn('debugging!', err.getvalue())
+
+    def test_artifacts_come_from_the_blob_files_unverified(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            blob = os.path.join(tmp, 'weights.bin')
+            body = bytes(range(256)) * 19 + b'\xAA' * 136  # 5000 bytes
+            with open(blob, 'wb') as f:
+                f.write(body)
+            gkvm, _out = gk_fast._gkvm_module(b'', [blob], b'\x11' * 32)
+            self.assertEqual(gkvm.artifact_root(), b'\x11' * 32)
+            self.assertEqual(gkvm.artifact_len(0), 5000)
+            self.assertEqual(gkvm.artifact_read(0, 0), body[:4096])
+            self.assertEqual(gkvm.artifact_read(0, 1), body[4096:] + b'\0' * (8192 - 5000))
+            buf = bytearray(4096)
+            gkvm.artifact_readinto(0, 1, buf)
+            self.assertEqual(bytes(buf), body[4096:] + b'\0' * (8192 - 5000))
+            for bad in (lambda: gkvm.artifact_read(0, 2), lambda: gkvm.artifact_len(1)):
+                with self.assertRaises(gk_fast.Trap) as caught:
+                    bad()
+                self.assertEqual(caught.exception.code, gk_fast.GK_TRAP_ARTIFACT_RANGE)
+            # no artifact mounted at all: the same range trap, not a Python error
+            bare, _ = gk_fast._gkvm_module(b'', None, None)
+            self.assertEqual(bare.artifact_root(), b'\0' * 32)
+            with self.assertRaises(gk_fast.Trap):
+                bare.artifact_len(0)
+
+    def fake_sidecar_tree(self, tmp, source_text=None):
+        """<project>/cache/gkvm/build/greet/{guest.elf,guest.json} + guest/greet.py —
+        the programHash→source mapping the sidecar keys off."""
+        project = os.path.join(tmp, 'proj')
+        src = self.write(project, 'guest/greet.py', source_text or self.GREET)
+        elf = self.write(project, 'cache/gkvm/build/greet/guest.elf', 'fake elf')
+        program_hash = hex32(keccak256(b'fake elf'))
+        self.write(project, 'cache/gkvm/build/greet/guest.json',
+                   json.dumps({'name': 'greet', 'programHash': program_hash,
+                               'source': 'greet.py'}))
+        return project, src, elf, program_hash
+
+    def sidecar(self, *args, **kw):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = gk_fast.sidecar(*args, **kw)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_sidecar_speaks_the_gk_run_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, elf, program_hash = self.fake_sidecar_tree(tmp)
+            payload = self.abi_greet('bob', 2)
+            rc, out, err = self.sidecar(elf, program_hash, '0x' + payload.hex(),
+                                        cycle_limit=123456)
+            self.assertEqual(rc, 0)
+            self.assertEqual(out.strip(), '0x' + self.abi_string('hello bob hello bob').hex())
+            self.assertIn('FAST', err)
+            self.assertIn('not consensus', err)
+            # @file input, exactly like gk-run takes spilled payloads
+            spill = os.path.join(tmp, 'input.bin')
+            with open(spill, 'wb') as f:
+                f.write(payload)
+            rc, out2, _ = self.sidecar(elf, program_hash, '@' + spill)
+            self.assertEqual((rc, out2), (0, out))
+
+    def test_sidecar_trap_and_overflow_exits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, elf, program_hash = self.fake_sidecar_tree(tmp)
+            rc, out, err = self.sidecar(elf, program_hash,
+                                        '0x' + self.abi_greet('bob', 17).hex())
+            self.assertEqual(rc, 10)
+            self.assertTrue(out.startswith('0xd0000001'))
+            self.assertIn('byte-DIFFERENT', err)
+            spill = os.path.join(tmp, 'big.bin')
+            with open(spill, 'wb') as f:
+                f.write(b'\0' * (gk_fast.GK_INPUT_BYTES_CAP + 1))
+            rc, out, _ = self.sidecar(elf, program_hash, '@' + spill)
+            self.assertEqual((rc, out), (12, ''))
+
+    def test_sidecar_guardrails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, elf, program_hash = self.fake_sidecar_tree(tmp)
+            with self.assertRaises(gk_fast.GkFastError) as caught:
+                gk_fast.sidecar(elf, '0x' + '11' * 32, '0x')
+            self.assertIn('not the recorded build', str(caught.exception))
+            os.environ['GK_FAST_FORBID'] = '1'
+            try:
+                with self.assertRaises(gk_fast.GkFastError) as caught:
+                    gk_fast.sidecar(elf, program_hash, '0x')
+                self.assertIn('golden vectors refuse', str(caught.exception))
+            finally:
+                del os.environ['GK_FAST_FORBID']
+            with self.assertRaises(gk_fast.GkFastError):
+                gk_fast.sidecar(os.path.join(tmp, 'nowhere', 'guest.elf'), None, '0x')
+
+    def test_vectors_export_the_forbid_guard(self):
+        seen = {}
+
+        class Proc:
+            returncode = 0
+            stdout = b'0x01\n'
+            stderr = b'{"cycles": 7, "gas_used": 2}\n'
+
+        def fake_run(cmd, stdout=None, stderr=None, env=None):
+            seen['env'] = env
+            return Proc()
+        old = gk_vectors.subprocess.run
+        gk_vectors.subprocess.run = fake_run
+        try:
+            gk_vectors.run_one('gk-run', 'x.elf', '0x' + '00' * 32, b'\x01')
+        finally:
+            gk_vectors.subprocess.run = old
+        self.assertEqual(seen['env'].get('GK_FAST_FORBID'), '1')
+
+    def test_fast_check_diff_rules(self):
+        self.assertEqual(gk_fast._diff(0, '0x01', 0, '0x01'), ('match', None))
+        verdict, detail = gk_fast._diff(10, '0xd0000001aa', 10, '0xd0000001bb')
+        self.assertEqual(verdict, 'match*')
+        self.assertIn('traceback', detail)
+        verdict, _ = gk_fast._diff(10, '0x00000042aa', 10, '0x00000042bb')
+        self.assertEqual(verdict, 'DIVERGENT')
+        verdict, _ = gk_fast._diff(0, '0x01', 10, '0xd0000001aa')
+        self.assertEqual(verdict, 'DIVERGENT')
+
+    def test_cli_end_to_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = self.write(tmp, 'guest/greet.py', self.GREET)
+            payload = '0x' + self.abi_greet('ann', 1).hex()
+            proc = subprocess.run([sys.executable, HERE, 'run', '--fast', src,
+                                   '--input', payload],
+                                  cwd=tmp, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+            self.assertEqual(proc.stdout.decode().strip(),
+                             '0x' + self.abi_string('hello ann').hex())
+            self.assertIn('FAST', proc.stderr.decode())
+            # --fast is the opt-in signature; without it the command refuses
+            proc = subprocess.run([sys.executable, HERE, 'run', src, '--input', payload],
+                                  cwd=tmp, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn('--fast', proc.stderr.decode())
+
+
 class ForgePrehook(unittest.TestCase):
     """The transparent `forge` wrapper: content-hash staleness, banner, env, shim install."""
 
@@ -793,6 +1022,49 @@ class ForgePrehook(unittest.TestCase):
             self.assertEqual(len(lines), 1)
             self.assertIn('forge not run', lines[0])
             self.assertIn('boom', lines[0])
+
+    def test_gk_fast_routes_gk_run_to_the_sidecar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sdk, _ = self.fake_built_project(tmp)
+            real = self.fake_bin(tmp, 'forge', '#!/bin/sh\nexit 0\n')
+            gk_run = self.fake_bin(tmp, 'gk-run', '#!/bin/sh\necho interp\n')
+            rc, execs, lines = self._run(
+                tmp, ['test'],
+                {'PATH': os.path.dirname(real), 'GK_RUN': gk_run, 'GK_FAST': '1'},
+                sdk_root=sdk)
+            self.assertEqual(rc, 0)
+            (path, argv, env), = execs
+            wrapper = os.path.join(tmp, 'cache', 'gkvm', gk_fast.WRAPPER_NAME)
+            self.assertEqual(env['GK_RUN'], wrapper)
+            self.assertEqual(env['GK_RUN_REAL'], gk_run)
+            self.assertTrue(os.access(wrapper, os.X_OK))
+            self.assertIn('run --fast --sidecar', gk_build._read(wrapper).decode())
+            self.assertEqual(env['FOUNDRY_PROFILE'], gk_init.FFI_PROFILE)
+            self.assertEqual(len(lines), 1)
+            self.assertIn('FAST (host cpython — not consensus)', lines[0])
+            self.assertNotIn('tier', lines[0])
+
+    def test_gk_fast_tolerates_a_stale_python_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sdk, _ = self.fake_built_project(tmp)
+            # a Python guest whose recorded build no longer matches its source
+            with open(os.path.join(tmp, 'guest', 'greet.py'), 'w') as f:
+                f.write('def main(name: str) -> str:\n    return name\n')
+            bdir = os.path.join(tmp, 'cache', 'gkvm', 'build', 'greet')
+            os.makedirs(bdir)
+            with open(os.path.join(bdir, 'guest.elf'), 'wb') as f:
+                f.write(b'\x7fELF fake')
+            with open(os.path.join(bdir, 'guest.json'), 'w') as f:
+                json.dump({'name': 'greet', 'sourceHash': '0x' + 'ab' * 32}, f)
+            calls = []
+            build = lambda source, sdk_root, **kw: calls.append(os.path.basename(source))  # noqa: E731
+            self.assertEqual(gk_forge.ensure_fresh(sdk, tmp, log=quiet, build=build,
+                                                   fast=True), [])
+            self.assertEqual(calls, [])  # 'source changed' tolerated: fast runs the source
+            os.remove(os.path.join(bdir, 'guest.json'))  # 'never built' is structural
+            rebuilt = gk_forge.ensure_fresh(sdk, tmp, log=quiet, build=build, fast=True)
+            self.assertEqual(calls, ['greet.py'])
+            self.assertEqual(rebuilt, [('greet.py', 'never built')])
 
     def test_install_shim(self):
         with tempfile.TemporaryDirectory() as tmp:

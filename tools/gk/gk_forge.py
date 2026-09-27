@@ -158,7 +158,15 @@ def _prior_make_args(root, source):
     return heap, stack
 
 
-def ensure_fresh(sdk_root, project, log=print, build=None):
+# Staleness a Python guest tolerates under GK_FAST=1: the fast path executes the CURRENT
+# source on the host, so the frozen rv64im image may lag it. Structural gaps (never
+# built, ELF/binding missing) still rebuild — the test cannot even install the program
+# without them.
+FAST_TOLERATED = {'source changed', 'crt changed', 'micropython port changed',
+                  'typed runtime changed'}
+
+
+def ensure_fresh(sdk_root, project, log=print, build=None, fast=False):
     """Rebuild every stale guest of `project`; returns [(name, reason)] of what was rebuilt.
 
     Raises GkBuildError when a rebuild fails — the caller must NOT run forge then: it
@@ -170,6 +178,8 @@ def ensure_fresh(sdk_root, project, log=print, build=None):
         reason = stale(project, source)
         if not reason:
             continue
+        if fast and source.endswith('.py') and reason in FAST_TOLERATED:
+            continue  # the fast sidecar runs the current source; no rv64im rebuild
         heap, stack = _prior_make_args(project, source) if source.endswith('.py') else (None, None)
         build(source, sdk_root, project=project, log=log, heap_bytes=heap, stack_bytes=stack)
         rebuilt.append((os.path.basename(source), reason))
@@ -181,10 +191,14 @@ def is_gk_project(project):
         and gk_build.sdk_remapping(project) is not None
 
 
-def _banner(forge_args, gk_run, gk_tier, profile, rebuilt):
+def _banner(forge_args, gk_run, gk_tier, profile, rebuilt, fast=False):
     cmd = next((a for a in forge_args if not a.startswith('-')), '') or 'forge'
     parts = []
-    if gk_run:
+    if fast:
+        parts.append('FAST (host cpython — not consensus)')
+        if profile:
+            parts.append('profile %s' % profile)
+    elif gk_run:
         parts.append('gk-run %s tier' % gk_tier)
         if profile:
             parts.append('profile %s' % profile)
@@ -216,25 +230,35 @@ def run(sdk_root, forge_args, log=None, exec_fn=None):
         return exec_fn(real, [real] + list(forge_args), env)
 
     cmd = next((a for a in forge_args if not a.startswith('-')), '')
+    fast = env.get('GK_FAST') == '1'
     rebuilt = []
     if cmd in REBUILD_COMMANDS:
         try:
-            rebuilt = ensure_fresh(sdk_root, project, log=log)
+            rebuilt = ensure_fresh(sdk_root, project, log=log, fast=fast)
         except gk_build.GkBuildError as e:
             log('[gk] guest rebuild failed — forge not run (it would test the stale '
                 'binding): %s' % e)
             return 1
     gk_run = find_gk_run()
-    profile = None
-    if gk_run:
+    if fast:
+        # GK_RUN becomes the host-cpython sidecar; the real gk-run (if any) stays
+        # reachable as GK_RUN_REAL for the wrapper's C-guest fall-through.
+        import gk_fast
+        if gk_run:
+            env['GK_RUN_REAL'] = gk_run
+        gk_run = gk_fast.write_wrapper(project)
         env['GK_RUN'] = gk_run
-        if cmd in TEST_COMMANDS:
-            profile = env.get('FOUNDRY_PROFILE') or None
-            if not profile:
-                import gk_init
-                env['FOUNDRY_PROFILE'] = profile = gk_init.FFI_PROFILE
+    elif gk_run:
+        env['GK_RUN'] = gk_run
+    profile = None
+    if gk_run and cmd in TEST_COMMANDS:
+        profile = env.get('FOUNDRY_PROFILE') or None
+        if not profile:
+            import gk_init
+            env['FOUNDRY_PROFILE'] = profile = gk_init.FFI_PROFILE
     env['GK_FORGE_WRAPPED'] = '1'  # a forge a script spawns goes straight through
-    log(_banner(forge_args, gk_run, tier(gk_run) if gk_run else '?', profile, rebuilt))
+    log(_banner(forge_args, gk_run, tier(gk_run) if gk_run and not fast else '?',
+                profile, rebuilt, fast=fast))
     return exec_fn(real, [real] + list(forge_args), env)
 
 
