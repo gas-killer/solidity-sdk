@@ -85,6 +85,22 @@ links libgcc), no I/O beyond the hostcalls in `guest/crt/gkvm.h`.
 
 `forge clean` deletes `cache/` and with it the built ELFs — rebuild with `gk build`.
 
+## When a guest traps
+
+`GkGuestTrap(code, data)` is every way a guest dies short of running out of cycles. On a
+trap the shim `console.log`s the decoded form (run forge with `-vv` to see it — the logs
+survive the revert), and `gk explain "<the line forge printed>"` decodes one after the
+fact. The code classes:
+
+| code | from | meaning |
+| --- | --- | --- |
+| `0xD0000001` | MicroPython port | uncaught Python exception — `data` is the traceback text |
+| `0xE0000001..4` | gk-guest-crt | input too large / artifact verify failed / artifact read out of range / manifest invalid |
+| `0xF0000001` | host runner | guest exceeded the memory cap |
+| `0xF0000002` | host runner | execution fault (illegal instruction, …) |
+| `0xF0000100 \| exit` | host runner | bare nonzero `exit()` without `gk_abort` |
+| anything else | your guest | `gk_abort(code, msg)` — `data` is your message |
+
 ## What works today, and what does not
 
 **Today a fresh project gets the forge emulation, and nothing else.** Read this before planning

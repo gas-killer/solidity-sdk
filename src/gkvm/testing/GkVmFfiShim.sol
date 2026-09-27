@@ -2,6 +2,7 @@
 pragma solidity ^0.8.12;
 
 import {Vm} from "forge-std/Vm.sol";
+import {console2} from "forge-std/console2.sol";
 import {GKVM_OK_TAG} from "../GkVm.sol";
 import {
     GkGuestTrap,
@@ -52,6 +53,11 @@ contract GkVmFfiShim {
     int32 internal constant EXIT_OUT_OF_CYCLES = 11;
     int32 internal constant EXIT_INPUT_OVERFLOW = 12;
     int32 internal constant EXIT_OUTPUT_OVERFLOW = 13;
+
+    /// @dev The two trap classes the log decoder treats specially; `gk explain` holds the
+    ///      full taxonomy (tools/gk/README.md § When it fails)
+    uint32 internal constant GK_MPY_TRAP_EXCEPTION = 0xD0000001;
+    uint32 internal constant GKVM_TRAP_CODE_BARE_EXIT = 0xF0000100;
 
     /// @dev Payloads above this go to gk-run as `--input @file`: one argv string caps at 131071
     ///      chars on Linux, under the 262144 hex chars of a cap-sized (131072-byte) payload
@@ -115,6 +121,7 @@ contract GkVmFfiShim {
         if (result.exitCode == EXIT_OK) return abi.encodePacked(GKVM_OK_TAG, result.stdout);
         if (result.exitCode == EXIT_TRAP && result.stdout.length >= 4) {
             (uint32 code, bytes memory trapData) = _splitTrap(result.stdout);
+            _logTrap(code, trapData);
             revert GkGuestTrap(code, trapData);
         }
         if (result.exitCode == EXIT_OUT_OF_CYCLES && result.stdout.length == 16) {
@@ -188,6 +195,60 @@ contract GkVmFfiShim {
         vm.createDir(SPILL_DIR, true);
         vm.writeFileBinary(path, payload);
         return string.concat("@", path);
+    }
+
+    /// @dev Forge prints the revert below as `GkGuestTrap(3489660929, 0x5472…)` — a decimal
+    ///      code and hex bytes (solidity-sdk#88). These console lines are the readable form;
+    ///      they change no returndata, so the revert stays byte-identical to the precompile's
+    ///      (the golden suite keeps pinning it). Visible at `-vv`, also when the call reverts.
+    function _logTrap(uint32 code, bytes memory data) private view {
+        // abi.encodePacked keeps toString on the 4-byte form (bytes4 would widen to bytes32)
+        console2.log(string.concat("[gk] guest trapped: ", vm.toString(abi.encodePacked(code)), " ", _trapClass(code)));
+        if (data.length != 0) {
+            if (_isText(data)) {
+                console2.log(
+                    string.concat(code == GK_MPY_TRAP_EXCEPTION ? "[gk] traceback:\n" : "[gk] message: ", string(data))
+                );
+            } else {
+                console2.log(string.concat("[gk] data: ", vm.toString(data)));
+            }
+        }
+        console2.log(
+            string.concat(
+                "[gk] decode again with: gk explain ",
+                vm.toString(abi.encodeWithSelector(bytes4(keccak256("GkGuestTrap(uint32,bytes)")), code, data))
+            )
+        );
+    }
+
+    /// @dev The trap-code taxonomy (tools/gk/README.md § When it fails); names and wording
+    ///      match `gk explain`, which stays the source of truth
+    function _trapClass(uint32 code) private pure returns (string memory) {
+        if (code == GK_MPY_TRAP_EXCEPTION) return "GK_MPY_TRAP_EXCEPTION: uncaught Python exception";
+        if (code == 0xE0000001) return "GK_TRAP_INPUT_TOO_LARGE: payload larger than the guest's input buffer";
+        if (code == 0xE0000002) return "GK_TRAP_ARTIFACT_VERIFY: artifact page failed Merkle verification";
+        if (code == 0xE0000003) return "GK_TRAP_ARTIFACT_RANGE: artifact read out of the bundle range";
+        if (code == 0xE0000004) return "GK_TRAP_MANIFEST_INVALID: malformed artifact manifest";
+        if (code == 0xF0000001) return "GKVM_TRAP_CODE_MEM_CAP: guest exceeded GKVM_MEM_BYTES_CAP";
+        if (code == 0xF0000002) return "GKVM_TRAP_CODE_EXEC_FAULT: execution fault (illegal instruction, ...)";
+        if (code >= GKVM_TRAP_CODE_BARE_EXIT && code <= (GKVM_TRAP_CODE_BARE_EXIT | 0xFF)) {
+            return string.concat(
+                "GKVM_TRAP_CODE_BARE_EXIT: guest exited with code ",
+                vm.toString(uint256(code & 0xFF)),
+                " without calling gk_abort"
+            );
+        }
+        return "guest-chosen: gk_abort(code, msg) in the guest source";
+    }
+
+    /// @dev ASCII-printable plus \n\r\t — the gate for logging trap data as text. Non-ASCII
+    ///      UTF-8 falls back to hex: cheap, and never mangles a terminal.
+    function _isText(bytes memory data) private pure returns (bool) {
+        for (uint256 i = 0; i < data.length; i++) {
+            uint8 c = uint8(data[i]);
+            if ((c < 0x20 || c > 0x7E) && c != 0x0A && c != 0x0D && c != 0x09) return false;
+        }
+        return true;
     }
 
     /// @dev gk-run prints a trap as `code (u32 BE) || data`
