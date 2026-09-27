@@ -32,6 +32,7 @@ import re
 import shutil
 
 import gk_build
+import gk_toolchain
 
 TEMPLATES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
 
@@ -166,7 +167,7 @@ def init(project, sdk_root, crt=None, compiler='auto', build=True, sdk_path=None
             raise GkInitError('%s — install one, or scaffold without building: gk init '
                               '--no-build' % e)
     try:
-        crt_src = gk_build.resolve_crt(crt)
+        crt_src = gk_build.resolve_crt(crt, project)  # pinned-but-missing refuses here
     except gk_build.GkBuildError as e:
         raise GkInitError(str(e))
 
@@ -177,7 +178,25 @@ def init(project, sdk_root, crt=None, compiler='auto', build=True, sdk_path=None
     consumer_test = os.path.join(project, test_dir, example['test'])
     vendored_already = gk_build.has_crt(os.path.join(project, GUEST_DIR))
     vendoring = vendor_crt or vendored_already
-    if vendoring:
+    # the toolchain pin (#92): keep an existing one; write one only when a toolchain is
+    # actually installed (a pin gk cannot resolve would break the very next build)
+    pin = gk_toolchain.read_pin(project)
+    pin_to_write = None
+    if not pin and not vendoring and not crt and not os.environ.get('GK_GUEST_CRT'):
+        installed = gk_toolchain.list_installed()
+        if installed:
+            pin_to_write = installed[0][0]
+    pinned_version = pin or pin_to_write
+    if pinned_version and not vendoring:
+        crt_row = ('| *(not in your project)* | guest toolchain `%s` — pinned in '
+                   '`gk.toml`, resolved from the gk installation '
+                   '(`$GK_HOME/toolchains`) | — |' % pinned_version)
+        crt_note = ('The guest toolchain (crt + linker script) is **pinned in `gk.toml`**'
+                    ' (`toolchain = "%s"`), like `solc`: its bytes are part of every '
+                    "guest's `programHash` (`crtHash` in `guest.json`), so the pin "
+                    'changes only as a deliberate, reviewed diff. A fresh clone installs '
+                    'it with `gk toolchain install %s`.' % (pinned_version, pinned_version))
+    elif vendoring:
         crt_row = ('| `guest/crt/`, `guest/link.ld` | gk-guest-crt, vendored: entry code, '
                    'hostcalls (`gkvm.h`), linker script. Part of every guest\'s '
                    '`programHash` | no — changing it changes every programHash |')
@@ -265,6 +284,12 @@ def init(project, sdk_root, crt=None, compiler='auto', build=True, sdk_path=None
         _append_line(remap_path, wanted)
         note('merged', remap_path)
 
+    if pin_to_write:
+        pin_path = os.path.join(project, gk_toolchain.PIN_FILE)
+        fresh = not os.path.isfile(pin_path)
+        gk_toolchain.write_pin(project, pin_to_write)
+        note('created' if fresh else 'merged', pin_path)
+
     ignore_path = os.path.join(project, '.gitignore')
     ignored = os.path.isfile(ignore_path) and any(
         line.strip() in _GITIGNORE_COVERS for line in _read(ignore_path).splitlines())
@@ -277,8 +302,10 @@ def init(project, sdk_root, crt=None, compiler='auto', build=True, sdk_path=None
     # ---- the binding: only a build knows the programHash
     guest = os.path.join(project, GUEST_DIR, example['guest'])
     if build:
+        # crt passes through unresolved: build() re-resolves against the project, so a
+        # pin this init just wrote (or found) wins over the pre-pin crt_src
         gk_build.build(guest, sdk_root,
-                       crt=os.path.join(project, GUEST_DIR) if vendoring else crt_src,
+                       crt=os.path.join(project, GUEST_DIR) if vendoring else crt,
                        compiler=compiler,
                        sol_out=os.path.dirname(binding), log=log, project=project)
         actions.append(('built', _posix(os.path.relpath(binding, project))))

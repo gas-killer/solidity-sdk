@@ -136,6 +136,29 @@ divergence detector:
 
     gk run --fast-check guest/greet.py --input 0x…   # both paths, diffed; ok-outcomes must match to the byte
 
+## The toolchain pin: `gk.toml` (like solc)
+
+`programHash = keccak256(ELF)` commits to the crt + linker-script bytes, so which
+toolchain built a guest must be a declaration, not a directory-layout accident. A project
+pins it in `gk.toml` at its root — its own file, because forge warns about unknown
+sections in foundry.toml:
+
+    [gkvm]
+    toolchain = "v0.1.0"
+
+`gk toolchain install v0.1.0` fetches `gk-crt-v0.1.0.tar.gz` + `SHA256SUMS` from the
+gas-analyzer releases (the install-gk.sh trust path), verifies and installs it under
+`~/.gk/toolchains/`; `--from <dir|tarball>` installs from a local source (crt
+development — e.g. a gas-analyzer checkout's `crates/gkvm/guest`). `gk toolchain list`
+shows what is installed and what the project pins.
+
+On a pinned project `gk build` resolves the crt from the pinned version and **refuses**
+when it is not installed — it never silently substitutes whatever files are lying
+around, because that would move every programHash. `--crt` / `GK_GUEST_CRT` stay as
+explicit dev overrides; a project with no pin keeps today's fallbacks (vendored
+`guest/crt`, else the sdk's bundled copy). `gk init` writes the pin automatically when a
+toolchain is installed, and `guest.json` records the version next to `crtHash`.
+
 ## Python guests
 
 `gk build guest/answer.py` freezes the script into the MicroPython gkvm port (mpy-cross
