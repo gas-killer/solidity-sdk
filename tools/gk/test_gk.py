@@ -660,6 +660,125 @@ class Explain(unittest.TestCase):
         self.assertIn('gk explain', proc.stderr.decode())
 
 
+class CoreCache(unittest.TestCase):
+    """#94: the MicroPython core build tree survives the stage wipe, keyed by everything
+    that shapes the core objects. (The byte-identity leg lives in PythonBuild — docker.)"""
+
+    def test_key_commits_to_every_core_input(self):
+        base = dict(root='/proj', port=gk_python.BUNDLED_PORT, crt=gk_build.BUNDLED_CRT,
+                    crt_files=gk_build.CRT_FILES, heap_bytes=None, stack_bytes=None,
+                    compiler='native', cc='gcc 13')
+        path = gk_python.core_cache_dir(**base)
+        self.assertEqual(path, gk_python.core_cache_dir(**base))  # stable
+        self.assertTrue(path.startswith(os.path.join('/proj', 'cache', 'gkvm', 'mpy-core')))
+        # port.mk's defaults and their explicit spellings share a key
+        self.assertEqual(path, gk_python.core_cache_dir(**dict(
+            base, heap_bytes=gk_python.GK_MPY_HEAP_DEFAULT,
+            stack_bytes=gk_python.GK_MPY_STACK_DEFAULT)))
+        others = [gk_python.core_cache_dir(**dict(base, heap_bytes=1 << 20)),
+                  gk_python.core_cache_dir(**dict(base, stack_bytes=1 << 16)),
+                  gk_python.core_cache_dir(**dict(base, cc='gcc 14'))]
+        with tempfile.TemporaryDirectory() as tmp:
+            edited = os.path.join(tmp, 'port')
+            shutil.copytree(gk_python.BUNDLED_PORT, edited)
+            with open(os.path.join(edited, 'gkport.h'), 'a') as f:
+                f.write('/* edited */\n')
+            others.append(gk_python.core_cache_dir(**dict(base, port=edited)))
+        self.assertEqual(len({path, *others}), 5)  # every input moves the key
+
+    def test_cache_can_be_disabled(self):
+        os.environ['GK_MPY_CORE_CACHE'] = '0'
+        try:
+            self.assertIsNone(gk_python.core_cache_dir(
+                '/p', gk_python.BUNDLED_PORT, gk_build.BUNDLED_CRT, gk_build.CRT_FILES,
+                None, None, 'native', 'gcc'))
+        finally:
+            del os.environ['GK_MPY_CORE_CACHE']
+
+    def test_run_compile_self_heals_on_a_compiler_change(self):
+        calls = []
+
+        def leg(stage_dir, mpy_src, args, cc, build_dir=None):
+            calls.append(build_dir)
+            return 'gcc NEW'
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = os.path.join(tmp, 'core')
+            os.makedirs(cache)
+            with open(os.path.join(cache, 'cc.version'), 'w') as f:
+                f.write('gcc OLD\n')
+            sentinel = os.path.join(cache, 'stale.o')
+            with open(sentinel, 'w') as f:
+                f.write('x')
+            cc = gk_python.run_compile(leg, '/stage', '/mpy', [], 'gcc', cache, log=quiet)
+            self.assertEqual(cc, 'gcc NEW')
+            self.assertEqual(len(calls), 2)  # mixed-compiler build discarded, rebuilt cold
+            self.assertFalse(os.path.exists(sentinel))
+            with open(os.path.join(cache, 'cc.version')) as f:
+                self.assertEqual(f.read().strip(), 'gcc NEW')
+            # a settled cache is one call
+            self.assertEqual(gk_python.run_compile(leg, '/stage', '/mpy', [], 'gcc',
+                                                   cache, log=quiet), 'gcc NEW')
+            self.assertEqual(len(calls), 3)
+        # no cache dir: passthrough
+        self.assertEqual(gk_python.run_compile(leg, '/stage', '/mpy', [], 'gcc', None,
+                                               log=quiet), 'gcc NEW')
+
+    def test_docker_leg_mounts_the_cache_at_the_stage_build_path(self):
+        captured = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = os.path.join(tmp, 'stage')
+            os.makedirs(stage)
+            cache = os.path.join(tmp, 'core')
+
+            def fake_run(cmd, cwd=None):
+                captured['cmd'] = cmd
+                with open(os.path.join(stage, 'cc.version'), 'w') as f:
+                    f.write('gcc (fake) 13\n')
+                return ''
+            old_run, old_image = gk_python._run, gk_python.toolchain_image
+            gk_python._run, gk_python.toolchain_image = fake_run, lambda: None
+            try:
+                cc = gk_python.compile_docker(stage, os.path.join(tmp, 'mpy'),
+                                              ['GUEST_PY=guest/gk_entry.py'], 'gcc',
+                                              build_dir=cache)
+            finally:
+                gk_python._run, gk_python.toolchain_image = old_run, old_image
+            self.assertEqual(cc, 'gcc (fake) 13')
+            self.assertTrue(os.path.isdir(cache))  # created before the mount
+            cmd = captured['cmd']
+            mounts = [cmd[i + 1] for i, a in enumerate(cmd) if a == '-v']
+            self.assertIn('%s:/guest/build' % cache, mounts)
+
+    def test_native_leg_passes_build_under_the_cache(self):
+        captured = []
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = os.path.join(tmp, 'stage')
+            os.makedirs(os.path.join(stage, 'micropython'))
+            cache = os.path.join(tmp, 'core')
+
+            def fake_run(cmd, cwd=None):
+                captured.append(cmd)
+                return 'riscv64-unknown-elf-gcc (fake) 13\n'
+            old_run = gk_python._run
+            gk_python._run = fake_run
+            try:
+                gk_python.compile_native(stage, '/mpy', ['GUEST_PY=guest/gk_entry.py'],
+                                         'gcc', build_dir=cache)
+            finally:
+                gk_python._run = old_run
+            make_cmd = captured[0]
+            self.assertIn('BUILD=' + os.path.join(cache, 'micropython', 'gk_entry'),
+                          make_cmd)
+
+    def test_built_elf_follows_the_cache(self):
+        self.assertEqual(
+            gk_python.built_elf('/stage', 'guest/gk_entry.py', build_dir='/core'),
+            os.path.join('/core', 'micropython', 'gk_entry', 'gk_entry-py.elf'))
+        self.assertEqual(
+            gk_python.built_elf('/stage', 'guest/hello.py'),
+            os.path.join('/stage', 'build', 'micropython', 'hello', 'hello-py.elf'))
+
+
 class Toolchain(unittest.TestCase):
     """#92: the guest toolchain pinned like solc — gk.toml declares a version, the gk
     installation provides it, and a missing pinned version is a hard refusal."""
@@ -1646,6 +1765,33 @@ class PythonBuild(unittest.TestCase):
                                    out=os.path.join(out, 'v.json'), sdk_root=out,
                                    log=quiet)['vectors'][0]
             self.assertEqual((v['stdout'], v['cycles']), (HELLO_11223344, HELLO_PY_CYCLES))
+
+    def test_core_cache_warm_build_is_byte_identical_after_an_edit(self):
+        # #94: cold-populate the core cache, edit the script, build warm; then the same
+        # edited script with the cache disabled (the old in-stage pipeline). Same bytes,
+        # or the cache is a consensus bug.
+        out = os.path.join(self.base, 'cachecheck')
+        os.makedirs(out, exist_ok=True)
+        source = os.path.join(out, 'cachecheck.py')
+        with open(source, 'w') as f:
+            f.write('import gkvm\ngkvm.output(gkvm.input()[::-1])\n')
+        gk_build.build(source, SDK_ROOT, out=os.path.join(out, 'a'), crt=gk_build.BUNDLED_CRT,
+                       mpy_src=GK_MPY_SRC, compiler='docker', emit_binding=False, log=quiet)
+        with open(source, 'a') as f:
+            f.write('# edited\n')
+        warm = gk_build.build(source, SDK_ROOT, out=os.path.join(out, 'b'),
+                              crt=gk_build.BUNDLED_CRT, mpy_src=GK_MPY_SRC,
+                              compiler='docker', emit_binding=False, log=quiet)
+        self.assertIn('coreCache', warm)
+        os.environ['GK_MPY_CORE_CACHE'] = '0'
+        try:
+            cold = gk_build.build(source, SDK_ROOT, out=os.path.join(out, 'c'),
+                                  crt=gk_build.BUNDLED_CRT, mpy_src=GK_MPY_SRC,
+                                  compiler='docker', emit_binding=False, log=quiet)
+        finally:
+            del os.environ['GK_MPY_CORE_CACHE']
+        self.assertEqual(warm['programHash'], cold['programHash'])
+        self.assertNotIn('coreCache', cold)
 
     def test_what_micropython_cannot_compile_fails_the_build_with_its_message(self):
         # CPython parses `match`; mpy-cross (MicroPython 1.29) does not

@@ -456,9 +456,82 @@ def make_args(guest_py, extra, heap_bytes=None, stack_bytes=None):
     return args
 
 
-def built_elf(stage_dir, guest_py):
+# port.mk's own defaults — mirrored for the cache key, never tuned here
+GK_MPY_HEAP_DEFAULT = 16777216
+GK_MPY_STACK_DEFAULT = 1048576
+
+
+def core_cache_dir(root, port, crt, crt_files, heap_bytes, stack_bytes, compiler, cc):
+    """cache/gkvm/mpy-core/<key> — the persistent make BUILD tree (solidity-sdk#94).
+
+    stage() wipes the stage every build, and port.mk's default BUILD lives inside it,
+    so the entire MicroPython core was recompiled per build. Keeping BUILD here turns
+    a rebuild into mpy-cross freeze + frozen-content compile + link: make's own
+    dependency tracking does the rest. The key commits to everything that shapes the
+    core objects — port bytes, crt bytes, the MicroPython pin, heap/stack (baked into
+    the image), and the compiler channel; the guest scripts are ordinary make deps
+    below it. GK_MPY_CORE_CACHE=0 disables the cache (the cold path, and the A/B leg
+    of the byte-identity check).
+    """
+    if os.environ.get('GK_MPY_CORE_CACHE') == '0':
+        return None
+    from gk_keccak import keccak256
+    heap = heap_bytes if heap_bytes is not None else GK_MPY_HEAP_DEFAULT
+    stack = stack_bytes if stack_bytes is not None else GK_MPY_STACK_DEFAULT
+    channel = ('image:%s' % (toolchain_image() or DOCKER_IMAGE) if compiler == 'docker'
+               else 'native:%s' % cc)
+    parts = [b''.join(_read_bytes(os.path.join(port, f)) for f in PORT_FILES),
+             b''.join(_read_bytes(os.path.join(crt, f)) for f in crt_files),
+             MPY_COMMIT.encode(),
+             b'heap=%d stack=%d' % (heap, stack),
+             channel.encode()]
+    key = keccak256(b'\0'.join(parts)).hex()[:16]
+    return os.path.join(root, 'cache', 'gkvm', 'mpy-core', key)
+
+
+def _read_bytes(path):
+    with open(path, 'rb') as f:
+        return f.read()
+
+
+def run_compile(compile_leg, stage_dir, mpy_src, args, cc, build_dir, log=print):
+    """One build through the core cache, self-healing on a compiler change.
+
+    make tracks source deps, not the compiler: objects cached under one cc and linked
+    after an in-place image/toolchain upgrade would silently mix compilers. The cc
+    version is only knowable after a run, so: build, compare against the cache's
+    recorded cc.version, and on a mismatch wipe the cache and build once more, cold.
+    """
+    for _ in range(2):
+        cc_version = compile_leg(stage_dir, mpy_src, args, cc, build_dir=build_dir)
+        if not build_dir:
+            return cc_version
+        marker = os.path.join(build_dir, 'cc.version')
+        prior = None
+        if os.path.isfile(marker):
+            with open(marker) as f:
+                prior = f.read().strip()
+        if prior in (None, cc_version):
+            with open(marker, 'w') as f:
+                f.write(cc_version + '\n')
+            return cc_version
+        log('  cache     compiler changed under the core cache (%s -> %s): rebuilding '
+            'the core cold' % (prior, cc_version))
+        empty_dir(build_dir)
+    raise GkPythonError('core cache: the compiler version would not settle')
+
+
+def _guest_name(args):
+    for arg in args:
+        if arg.startswith('GUEST_PY='):
+            return os.path.splitext(os.path.basename(arg[len('GUEST_PY='):]))[0]
+    return 'hello'  # port.mk's own default
+
+
+def built_elf(stage_dir, guest_py, build_dir=None):
     name = os.path.splitext(os.path.basename(guest_py))[0]
-    return os.path.join(stage_dir, 'build', 'micropython', name, name + '-py.elf')
+    root = build_dir or os.path.join(stage_dir, 'build')
+    return os.path.join(root, 'micropython', name, name + '-py.elf')
 
 
 def _run(cmd, cwd=None):
@@ -469,17 +542,21 @@ def _run(cmd, cwd=None):
     return proc.stdout.decode('utf-8', 'replace')
 
 
-def compile_native(stage_dir, mpy_src, args, cc):
+def compile_native(stage_dir, mpy_src, args, cc, build_dir=None):
     """UNTESTED on a real host toolchain (needs riscv64-unknown-elf-gcc + picolibc headers);
     the ELF may also differ from the docker leg's, whose source paths are fixed."""
     if mpy_src == IMAGE_MPY_SRC:
         raise GkPythonError('a native build needs a MicroPython checkout: pass --mpy-src')
-    _run(['make', '-f', 'port.mk', 'MPY_SRC=' + mpy_src] + args,
-         cwd=os.path.join(stage_dir, 'micropython'))
+    make_args = ['make', '-f', 'port.mk', 'MPY_SRC=' + mpy_src] + args
+    if build_dir:
+        os.makedirs(build_dir, exist_ok=True)
+        make_args.append('BUILD=' + os.path.join(os.path.abspath(build_dir),
+                                                 'micropython', _guest_name(args)))
+    _run(make_args, cwd=os.path.join(stage_dir, 'micropython'))
     return _run([cc, '--version']).splitlines()[0].strip()
 
 
-def compile_docker(stage_dir, mpy_src, args, cc):
+def compile_docker(stage_dir, mpy_src, args, cc, build_dir=None):
     # gas-analyzer's `make docker` leg, mount for mount: /guest is the staged guest dir,
     # /mpy the pinned upstream (mpy-cross, a host tool, is built inside it once) — or the
     # toolchain image's own checkout when resolve_mpy_src chose it.
@@ -498,6 +575,12 @@ def compile_docker(stage_dir, mpy_src, args, cc):
                   'MicroPython is not at %s"; exit 9; }; ' % (mpy, MPY_COMMIT, MPY_COMMIT))
     else:
         mpy, mounts = '/mpy', ['-v', '%s:/mpy' % mpy_src]
+    if build_dir:
+        # The core cache mounts AT the stage's default build location: in-container
+        # paths stay byte-identical to gas-analyzer's own `make docker` (which the
+        # committed-image test pins), while the objects live outside the wiped stage.
+        os.makedirs(build_dir, exist_ok=True)
+        mounts += ['-v', '%s:/guest/build' % os.path.abspath(build_dir)]
     script = (
         setup +
         '%s --version | head -n1 > /guest/cc.version; rc=0; '
