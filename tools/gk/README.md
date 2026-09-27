@@ -112,6 +112,30 @@ is the prehook invoked explicitly (what the shim calls), and `gk test` remains t
 that needs no PATH shim at all. If `which forge` does not resolve to `~/.gk/bin/forge`, PATH
 order is putting the real forge first — the prehook then simply never runs.
 
+## The fast path: `GK_FAST=1` (dev only — not consensus)
+
+The consensus path costs a docker build and an rv64im execution per edit. The fast path
+runs a **Python** guest straight on the host interpreter — the same script, the same typed
+runtime the frozen image uses — for sub-second edit→test loops with working `print()`,
+`pdb` and real tracebacks:
+
+    GK_FAST=1 forge test            # prehook: [gk] forge test … · FAST (host cpython — not consensus)
+    gk run --fast guest/greet.py --input 0x…    # one gk-run-style hex line on stdout
+
+Under `GK_FAST=1` the prehook skips the rv64im rebuild for edited Python sources (the fast
+sidecar executes the current source), points `GK_RUN` at `cache/gkvm/fast-run.sh`, and the
+shim runs unchanged — same wire format, same typed errors on success paths. C guests fall
+through to the real gk-run.
+
+**What it is not** — and every run says so on stderr: no cycle metering (nothing runs out
+of cycles), no artifact Merkle verification (pages come straight from the blob files),
+CPython instead of the pinned MicroPython (stdlib surface and error strings differ, and a
+trap's bytes are NOT what an operator would sign). Only a gk-run result is signable;
+`gk vectors` refuses the fast sidecar outright. Before pinning anything, run the
+divergence detector:
+
+    gk run --fast-check guest/greet.py --input 0x…   # both paths, diffed; ok-outcomes must match to the byte
+
 ## Python guests
 
 `gk build guest/answer.py` freezes the script into the MicroPython gkvm port (mpy-cross

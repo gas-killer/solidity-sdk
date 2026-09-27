@@ -42,6 +42,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import gk_build  # noqa: E402
 import gk_explain  # noqa: E402
+import gk_fast  # noqa: E402
 import gk_forge  # noqa: E402
 import gk_init  # noqa: E402
 import gk_test  # noqa: E402
@@ -97,6 +98,30 @@ def main(argv=None):
                                        'forge-printed GkGuestTrap(…) line, gk-run\'s hex '
                                        'output line, or a bare trap code')
     e.add_argument('blob', nargs='+', help='what you copied; quoting the whole thing is fine')
+
+    r = sub.add_parser('run', help='execute a Python guest on the host interpreter — the '
+                                   'dev fast path: no build, no docker, NOT consensus')
+    r.add_argument('source', nargs='?', help='guest source (guest/<name>.py)')
+    r.add_argument('--fast', action='store_true',
+                   help='required: the fast path is opt-in — no cycle metering, no '
+                        'artifact verification, CPython instead of the pinned MicroPython')
+    r.add_argument('--fast-check', action='store_true',
+                   help='run BOTH paths (host cpython, and the built ELF under gk-run) '
+                        'and diff the outcomes — the divergence detector')
+    r.add_argument('--input', action='append', default=[], metavar='0xHEX',
+                   help='payload; repeat for several runs')
+    r.add_argument('--artifact', help='artifact blob[,blob…] — served WITHOUT Merkle '
+                                      'verification on the fast path')
+    r.add_argument('--artifact-root', help='what gkvm.artifact_root() returns '
+                                           '(default: 32 zero bytes)')
+    r.add_argument('--project', help='forge project the built ELF hangs off '
+                                     '(--fast-check; default: the project the cwd sits in)')
+    # the gk-run-compatible sidecar mode cache/gkvm/fast-run.sh invokes under GK_FAST=1
+    r.add_argument('--sidecar', action='store_true', help=argparse.SUPPRESS)
+    r.add_argument('--program', help=argparse.SUPPRESS)
+    r.add_argument('--program-hash', help=argparse.SUPPRESS)
+    r.add_argument('--cycle-limit', type=int, help=argparse.SUPPRESS)
+    r.add_argument('--schedule', help=argparse.SUPPRESS)
 
     i = sub.add_parser('init', help='scaffold a guest into an existing forge project '
                                     '(never overwrites; safe to re-run)')
@@ -161,6 +186,29 @@ def main(argv=None):
         elif args.cmd == 'anvil':
             anvil_args = args.anvil_args[1:] if args.anvil_args[:1] == ['--'] else args.anvil_args
             return gk_anvil.run(args.sdk_root, anvil_args)
+        elif args.cmd == 'run':
+            if not (args.fast or args.fast_check):
+                raise gk_fast.GkFastError(
+                    'gk run is the DEV fast path and wants the explicit --fast (or '
+                    '--fast-check); the consensus path is `gk build` + gk-run/`gk vectors`')
+            if args.sidecar:
+                if not args.program or len(args.input) != 1:
+                    raise gk_fast.GkFastError('--sidecar speaks gk-run argv: --program, '
+                                              '--program-hash and exactly one --input')
+                return gk_fast.sidecar(args.program, args.program_hash, args.input[0],
+                                       cycle_limit=args.cycle_limit,
+                                       artifact=args.artifact,
+                                       artifact_root=args.artifact_root,
+                                       schedule=args.schedule)
+            if not args.source:
+                raise gk_fast.GkFastError('gk run wants a guest source (guest/<name>.py)')
+            if args.fast_check:
+                project = args.project or gk_build.find_project(os.getcwd(), args.sdk_root)
+                return gk_fast.fast_check(args.source, args.input, args.sdk_root,
+                                          project=project, artifact=args.artifact,
+                                          artifact_root=args.artifact_root)
+            return gk_fast.run_source(args.source, args.input, artifact=args.artifact,
+                                      artifact_root=args.artifact_root)
         elif args.cmd == 'explain':
             print(gk_explain.explain(' '.join(args.blob)))
         elif args.cmd == 'vectors':
@@ -178,7 +226,7 @@ def main(argv=None):
             with open(args.elf, 'rb') as f:
                 print(hex32(keccak256(f.read())))
     except (gk_build.GkBuildError, gk_init.GkInitError, gk_vectors.GkVectorsError,
-            gk_explain.GkExplainError, OSError) as e:
+            gk_explain.GkExplainError, gk_fast.GkFastError, OSError) as e:
         print('gk: %s' % e, file=sys.stderr)
         return 1
     return 0

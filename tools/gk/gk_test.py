@@ -30,11 +30,20 @@ def run(sdk_root, forge_args, log=print):
         raise gk_build.GkBuildError('forge is not on PATH (https://getfoundry.sh)')
     project = gk_build.find_project(os.getcwd(), sdk_root)
     env = dict(os.environ)
+    fast = env.get('GK_FAST') == '1' and gk_forge.is_gk_project(project)
     if gk_forge.is_gk_project(project):
-        for name, reason in gk_forge.ensure_fresh(sdk_root, project, log=log):
+        for name, reason in gk_forge.ensure_fresh(sdk_root, project, log=log, fast=fast):
             log('  rebuilt   %s (%s)' % (name, reason))
     gk_run = find_gk_run()
-    if gk_run:
+    if fast:
+        import gk_fast
+        if gk_run:
+            env['GK_RUN_REAL'] = gk_run
+        env['GK_RUN'] = gk_fast.write_wrapper(project)
+        env['FOUNDRY_PROFILE'] = env.get('FOUNDRY_PROFILE') or gk_init.FFI_PROFILE
+        log('  gk-run    FAST host-cpython sidecar — not consensus (%s)' % env['GK_RUN'])
+        log('  profile   %s' % env['FOUNDRY_PROFILE'])
+    elif gk_run:
         env['GK_RUN'] = gk_run
         env['FOUNDRY_PROFILE'] = env.get('FOUNDRY_PROFILE') or gk_init.FFI_PROFILE
         log('  gk-run    %s (%s tier)' % (gk_run, tier(gk_run)))
