@@ -74,6 +74,14 @@ def quiet(*_):
     pass
 
 
+def scrub_env(test, *names):
+    """Drop env vars that redirect crt/toolchain resolution (the Makefile exports
+    GK_GUEST_CRT by default) so resolution-order tests see a clean machine; restored
+    after the test."""
+    saved = {name: os.environ.pop(name) for name in names if name in os.environ}
+    test.addCleanup(os.environ.update, saved)
+
+
 class Keccak(unittest.TestCase):
     def test_known_answers(self):
         self.assertEqual(
@@ -326,6 +334,7 @@ class Init(unittest.TestCase):
         os.environ['GK_HOME'] = os.path.join(home.name, 'gk-home')
         self.addCleanup(lambda: os.environ.update({'GK_HOME': old}) if old
                         else os.environ.pop('GK_HOME', None))
+        scrub_env(self, 'GK_GUEST_CRT')
 
     def test_python_scaffold_is_the_same_shape_around_greet_py(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -790,6 +799,7 @@ class Toolchain(unittest.TestCase):
         os.environ['GK_HOME'] = os.path.join(home.name, 'gk-home')
         self.addCleanup(lambda: os.environ.update({'GK_HOME': old}) if old
                         else os.environ.pop('GK_HOME', None))
+        scrub_env(self, 'GK_GUEST_CRT')
 
     def test_pin_round_trip(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1129,6 +1139,9 @@ class FastPath(unittest.TestCase):
 
 class ForgePrehook(unittest.TestCase):
     """The transparent `forge` wrapper: content-hash staleness, banner, env, shim install."""
+
+    def setUp(self):
+        scrub_env(self, 'GK_GUEST_CRT')  # staleness resolves the crt like a build would
 
     def fake_built_project(self, tmp):
         """A scaffolded project whose hello.c has a recorded build matching it byte-for-byte

@@ -26,8 +26,13 @@ contract GreetGkTest is Test {
     }
 
     function setUp() public {
+        // Both gates matter: GK_RUN may be exported globally in a shell, but only the
+        // gkvm-ffi profile carries ffi = true and the cache/gkvm fs permission — under
+        // any other profile the shim tests skip instead of failing on the file read.
         string memory gkRun = vm.envOr("GK_RUN", string(""));
-        gkRunMissing = bytes(gkRun).length == 0;
+        bool ffiProfile =
+            keccak256(bytes(vm.envOr("FOUNDRY_PROFILE", string("")))) == keccak256("gkvm-ffi");
+        gkRunMissing = bytes(gkRun).length == 0 || !ffiProfile;
         if (gkRunMissing) return;
         GkVmFfiShim shim = new GkVmFfiShim(gkRun);
         bytes32 installed = shim.installProgram(GREET_ELF);
