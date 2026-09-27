@@ -532,6 +532,23 @@ class Explain(unittest.TestCase):
             self.assertEqual(gk_explain.selector(sig).hex(), sel, sig)
         self.assertEqual(sorted(gk_explain.ERROR_SIGS), sorted(self.SELECTORS))
 
+    def test_shim_trap_log_is_in_lockstep(self):
+        # GkVmFfiShim._trapClass mirrors this taxonomy for its console.log leg (#88);
+        # gk_explain stays the source of truth, this pins the mirror to it.
+        shim_path = os.path.join(SDK_ROOT, 'src', 'gkvm', 'testing', 'GkVmFfiShim.sol')
+        with open(shim_path) as f:
+            shim = f.read()
+        for code, (name, _origin, _meaning, _data) in gk_explain._KNOWN_CODES.items():
+            self.assertIn(name, shim)
+            if code != gk_explain.GK_MPY_TRAP_EXCEPTION:  # the rest appear as literals
+                self.assertIn('0x%08X' % code, shim)
+        self.assertIn('GKVM_TRAP_CODE_BARE_EXIT', shim)
+        self.assertIn('0x%08X' % gk_explain.GK_MPY_TRAP_EXCEPTION, shim)
+        self.assertIn('0x%08X' % gk_explain.GKVM_TRAP_CODE_BARE_EXIT, shim)
+        # the `gk explain` pointer recomputes the selector from the signature — no magic bytes
+        self.assertIn('keccak256("GkGuestTrap(uint32,bytes)")', shim)
+        self.assertIn('gk explain', shim)
+
     def test_trap_code_classes(self):
         for code, name in [(0xD0000001, 'GK_MPY_TRAP_EXCEPTION'),
                            (0xE0000002, 'GK_TRAP_ARTIFACT_VERIFY'),
