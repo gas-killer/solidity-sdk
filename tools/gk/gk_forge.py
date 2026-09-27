@@ -21,6 +21,7 @@ sdk checkout itself (its own flows are make targets and `gk test`).
 """
 import glob
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -211,11 +212,13 @@ def _banner(forge_args, gk_run, gk_tier, profile, rebuilt, fast=False):
     return '[gk] forge %s wrapped by the gas-killer sdk · %s' % (cmd, ' · '.join(parts))
 
 
-def run(sdk_root, forge_args, log=None, exec_fn=None):
-    """The prehook: rebuild stale guests, export GK_RUN, one [gk] line, exec real forge.
+def run(sdk_root, forge_args, log=None, exec_fn=None, spawn=None):
+    """The prehook: rebuild stale guests, export GK_RUN, one [gk] line, then forge.
 
-    `log` writes the banner (default: stderr — stdout is forge's alone).
-    `exec_fn(path, argv, env)` defaults to os.execve and never returns.
+    Test-running subcommands run forge as a watched subprocess (run_decoded) so gkvm
+    failures explain themselves; everything else execs the real forge and IS forge
+    from there on. `log` writes to stderr — stdout is forge's alone, byte for byte.
+    `exec_fn(path, argv, env)` defaults to os.execve; `spawn` is run_decoded's seam.
     """
     log = log or (lambda line: print(line, file=sys.stderr, flush=True))
     exec_fn = exec_fn or os.execve
@@ -259,7 +262,62 @@ def run(sdk_root, forge_args, log=None, exec_fn=None):
     env['GK_FORGE_WRAPPED'] = '1'  # a forge a script spawns goes straight through
     log(_banner(forge_args, gk_run, tier(gk_run) if gk_run and not fast else '?',
                 profile, rebuilt, fast=fast))
+    if cmd in TEST_COMMANDS and env.get('GK_FORGE_NO_DECODE') != '1':
+        # test output is watched, not exec'd: gkvm failures decode inline (#88 — no
+        # more pasting into gk explain). stdout stays forge's, byte for byte.
+        return run_decoded(real, forge_args, env, log, spawn=spawn)
     return exec_fn(real, [real] + list(forge_args), env)
+
+
+# Failure spellings worth decoding inline. The zero-argument GkVm* errors explain
+# themselves; these two carry payloads nobody can read raw (#88).
+DECODE_MARKERS = (b'GkGuestTrap(', b'GkGuestOutOfCycles(')
+
+_ANSI = re.compile(rb'\x1b\[[0-9;]*[A-Za-z]')
+
+
+def decode_line(raw, seen):
+    """Explanation lines for one forge output line, deduped across the run, else []."""
+    if not any(marker in raw for marker in DECODE_MARKERS):
+        return []
+    import gk_explain
+    text = _ANSI.sub(b'', raw).decode('utf-8', 'replace').strip()
+    match = gk_explain._FORGE_LINE.search(text)
+    if not match or match.group(0) in seen:
+        return []
+    seen.add(match.group(0))
+    try:
+        explained = gk_explain.explain(match.group(0))
+    except gk_explain.GkExplainError:
+        return []
+    return ['[gk] ' + line if line.strip() else '[gk]'
+            for line in explained.splitlines()]
+
+
+def run_decoded(real, forge_args, env, log, spawn=None):
+    """forge as a watched subprocess: stdout passes through byte-identical (--json and
+    every other parser keep working), and any GkGuestTrap / GkGuestOutOfCycles line is
+    explained on stderr the moment it appears — the same decode `gk explain` does,
+    without the paste. GK_FORGE_NO_DECODE=1 restores the plain exec."""
+    spawn = spawn or (lambda argv, env: subprocess.Popen(argv, env=env,
+                                                         stdout=subprocess.PIPE))
+    argv = [real] + list(forge_args)
+    if sys.stdout.isatty() and not any(a == '--color' or a.startswith('--color=')
+                                       or a in ('--json', '-j') for a in forge_args):
+        # forge sees a pipe now, not the terminal; keep its colors as they were
+        argv += ['--color', 'always']
+    proc = spawn(argv, env)
+    out = getattr(sys.stdout, 'buffer', sys.stdout)
+    seen = set()
+    try:
+        for raw in iter(proc.stdout.readline, b''):
+            out.write(raw)
+            out.flush()
+            for line in decode_line(raw, seen):
+                log(line)
+    except KeyboardInterrupt:
+        pass  # forge got the same SIGINT; report how it ended
+    return proc.wait()
 
 
 def install_shim(log=print):

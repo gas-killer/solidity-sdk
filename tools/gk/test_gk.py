@@ -1257,7 +1257,8 @@ class ForgePrehook(unittest.TestCase):
             gk_run = self.fake_bin(tmp, 'gk-run', '#!/bin/sh\necho jit\n')
             rc, execs, lines = self._run(
                 tmp, ['test', '-vv'],
-                {'PATH': os.path.dirname(real), 'GK_RUN': gk_run}, sdk_root=sdk)
+                {'PATH': os.path.dirname(real), 'GK_RUN': gk_run,
+                 'GK_FORGE_NO_DECODE': '1'}, sdk_root=sdk)
             self.assertEqual(rc, 0)
             (path, argv, env), = execs
             self.assertEqual((path, argv), (real, [real, 'test', '-vv']))
@@ -1268,6 +1269,72 @@ class ForgePrehook(unittest.TestCase):
             self.assertTrue(lines[0].startswith('[gk] forge test'), lines[0])
             self.assertIn('jit tier', lines[0])
             self.assertIn('guests fresh', lines[0])
+
+    def test_a_trap_in_forge_output_is_decoded_inline(self):
+        # #88's last mile: nobody pastes into gk explain — the wrapper watches the
+        # test output and explains any GkGuestTrap / GkGuestOutOfCycles on stderr,
+        # while stdout stays forge's own, byte for byte.
+        trap_line = ('[FAIL: GkGuestTrap(3489660929, 0x' +
+                     b'Traceback (most recent call last):\n  boom'.hex() +
+                     ')] test_greet() (gas: 1)')
+        forge_out = ('Compiling...\n' + trap_line + '\n' + trap_line + '\n'
+                     'GkGuestOutOfCycles(12000000, 10000000)\nDone.\n').encode()
+
+        class Proc:
+            def __init__(self, out):
+                import io as _io
+                self.stdout = _io.BytesIO(out)
+
+            def wait(self):
+                return 1
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sdk, _ = self.fake_built_project(tmp)
+            real = self.fake_bin(tmp, 'forge', '#!/bin/sh\nexit 0\n')
+            gk_run = self.fake_bin(tmp, 'gk-run', '#!/bin/sh\necho jit\n')
+            spawned = []
+
+            def spawn(argv, env):
+                spawned.append((argv, env))
+                return Proc(forge_out)
+            lines = []
+            old_cwd, old_env, old_stdout = os.getcwd(), dict(os.environ), sys.stdout
+            sys.stdout = io.TextIOWrapper(io.BytesIO(), encoding='utf-8')
+            try:
+                os.chdir(tmp)
+                os.environ.update({'PATH': os.path.dirname(real), 'GK_RUN': gk_run})
+                rc = gk_forge.run(sdk, ['test', '-q'], log=lines.append, spawn=spawn)
+                sys.stdout.flush()
+                passthrough = sys.stdout.buffer.getvalue()
+            finally:
+                sys.stdout = old_stdout
+                os.chdir(old_cwd)
+                os.environ.clear()
+                os.environ.update(old_env)
+            self.assertEqual(rc, 1)  # forge's exit code, not ours
+            self.assertEqual(passthrough, forge_out)  # stdout byte-identical
+            (argv, env), = spawned
+            self.assertEqual(argv[:3], [real, 'test', '-q'])
+            self.assertEqual(env['GK_FORGE_WRAPPED'], '1')
+            text = '\n'.join(lines)
+            self.assertTrue(lines[0].startswith('[gk] forge test'))
+            # the trap decoded once (deduped), traceback rendered as text
+            self.assertEqual(text.count('GK_MPY_TRAP_EXCEPTION'), 1)
+            self.assertIn('Traceback (most recent call last)', text)
+            # the out-of-cycles line decoded with the gas hint
+            self.assertIn('GkGuestOutOfCycles', text)
+            self.assertIn('gas', text)
+            for line in lines:
+                self.assertTrue(line.startswith('[gk]'), line)
+
+    def test_ansi_colored_trap_lines_still_decode(self):
+        seen = set()
+        raw = (b'\x1b[31m[FAIL: GkGuestTrap(4026531841, 0x)]\x1b[0m test_x()\n')
+        lines = gk_forge.decode_line(raw, seen)
+        self.assertTrue(any('GKVM_TRAP_CODE_MEM_CAP' in line for line in lines))
+        # deduped on a second sighting; unrelated lines cost nothing
+        self.assertEqual(gk_forge.decode_line(raw, seen), [])
+        self.assertEqual(gk_forge.decode_line(b'Compiling 3 files\n', seen), [])
 
     def test_gk_forge_plain_opts_out(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1308,8 +1375,8 @@ class ForgePrehook(unittest.TestCase):
             gk_run = self.fake_bin(tmp, 'gk-run', '#!/bin/sh\necho interp\n')
             rc, execs, lines = self._run(
                 tmp, ['test'],
-                {'PATH': os.path.dirname(real), 'GK_RUN': gk_run, 'GK_FAST': '1'},
-                sdk_root=sdk)
+                {'PATH': os.path.dirname(real), 'GK_RUN': gk_run, 'GK_FAST': '1',
+                 'GK_FORGE_NO_DECODE': '1'}, sdk_root=sdk)
             self.assertEqual(rc, 0)
             (path, argv, env), = execs
             wrapper = os.path.join(tmp, 'cache', 'gkvm', gk_fast.WRAPPER_NAME)
