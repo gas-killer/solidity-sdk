@@ -4,10 +4,17 @@
     forge install gas-killer/solidity-sdk            # -> lib/solidity-sdk
     python3 lib/solidity-sdk/tools/gk init
 
-What lands in the project: the vendored gk-guest-crt (guest/crt/, guest/link.ld), an example
-guest (guest/hello.c), its generated binding, a sample consumer, a test wired to GkVmFfiShim,
-a quickstart (guest/README.md), and three merges — `[profile.gkvm-ffi]` into foundry.toml,
-the `gk-sdk/` remapping into remappings.txt, `cache/gkvm/` into .gitignore.
+What lands in the project: only what the user owns — an example guest (guest/hello.c or
+--python's greet.py), its generated binding, a sample consumer, a test wired to
+GkVmFfiShim, a quickstart (guest/README.md) — and three merges: `[profile.gkvm-ffi]` into
+foundry.toml, the `gk-sdk/` remapping into remappings.txt, `cache/gkvm/` into .gitignore.
+
+gk-guest-crt (crt0.S, gkvm.c/h, link.ld) stays in the installed sdk by default
+(solidity-sdk#90): `forge install` pins the sdk at a commit, so the bundled copy is
+equally pinned, and guest.json's `crtHash` + the prehook's `crt changed` staleness make
+any crt drift loud. `--vendor-crt` copies it into guest/ for projects that want the
+bytes pinned in-repo independent of the sdk submodule pin; a project that already has a
+vendored guest/crt keeps working unchanged (gk_build.resolve_crt prefers it).
 
 Two rules:
 
@@ -135,7 +142,7 @@ def resolve_sdk_path(project, sdk_root, sdk_path=None):
 
 
 def init(project, sdk_root, crt=None, compiler='auto', build=True, sdk_path=None, log=print,
-         python=False):
+         python=False, vendor_crt=False):
     """Scaffold into `project`. Returns [(status, project-relative path)], in write order;
     status is created | kept | merged | built."""
     example = EXAMPLES[bool(python)]
@@ -168,9 +175,30 @@ def init(project, sdk_root, crt=None, compiler='auto', build=True, sdk_path=None
                            gk_build.binding_name(example['stem']) + '.sol')
     consumer = os.path.join(project, src_dir, example['consumer'])
     consumer_test = os.path.join(project, test_dir, example['test'])
+    vendored_already = gk_build.has_crt(os.path.join(project, GUEST_DIR))
+    vendoring = vendor_crt or vendored_already
+    if vendoring:
+        crt_row = ('| `guest/crt/`, `guest/link.ld` | gk-guest-crt, vendored: entry code, '
+                   'hostcalls (`gkvm.h`), linker script. Part of every guest\'s '
+                   '`programHash` | no — changing it changes every programHash |')
+        crt_note = ('The crt is **vendored**: `guest/crt/` + `guest/link.ld` are byte '
+                    'copies whose keccak is `crtHash` in `guest.json`, part of every '
+                    "guest's `programHash` — never edit them. (Without `--vendor-crt`, "
+                    '`gk init` leaves the crt in the installed sdk.)')
+    else:
+        crt_row = ('| *(not in your project)* | gk-guest-crt (entry code, hostcalls, '
+                   'linker script) resolves from the installed sdk: `%s/tools/gk/guest-crt`'
+                   ' | — (`gk init --vendor-crt` copies it in) |' % sdk_rel)
+        crt_note = ("The crt is part of every guest's `programHash` (its keccak is "
+                    '`crtHash` in `guest.json`): an sdk update that changes it surfaces '
+                    'as a `crt changed` rebuild in the forge prehook and a visible '
+                    'binding diff — never silent drift. Want the bytes pinned in-repo, '
+                    'surviving an sdk re-pin? `gk init --vendor-crt`.')
     values = {
         'SDK_PATH': sdk_rel,
         'SDK_REMAP': gk_build.SDK_REMAP_PREFIX,
+        'CRT_ROW': crt_row,
+        'CRT_NOTE': crt_note,
         'SRC': _posix(src_dir),
         'TEST': _posix(test_dir),
         'EXAMPLE_GUEST': example['guest'],
@@ -196,15 +224,17 @@ def init(project, sdk_root, crt=None, compiler='auto', build=True, sdk_path=None
             _write(path, text)
             note('created', path)
 
-    # ---- vendored crt (byte copies: the crt is part of every programHash) + example guest
-    for f in gk_build.CRT_FILES:
-        dst = os.path.join(project, GUEST_DIR, f)
-        if os.path.exists(dst):
-            note('kept', dst)
-        else:
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copyfile(os.path.join(crt_src, f), dst)
-            note('created', dst)
+    # ---- crt (opt-in vendoring, #90: byte copies pin the bytes in-repo; the default
+    # resolves it from the installed sdk, whose submodule pin is a pin already)
+    if vendoring:
+        for f in gk_build.CRT_FILES:
+            dst = os.path.join(project, GUEST_DIR, f)
+            if os.path.exists(dst):
+                note('kept', dst)
+            else:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copyfile(os.path.join(crt_src, f), dst)
+                note('created', dst)
     create(os.path.join(project, GUEST_DIR, example['guest']),
            render(example['guest'], values))
     create(os.path.join(project, GUEST_DIR, 'README.md'), render('README.md', values))
@@ -247,7 +277,9 @@ def init(project, sdk_root, crt=None, compiler='auto', build=True, sdk_path=None
     # ---- the binding: only a build knows the programHash
     guest = os.path.join(project, GUEST_DIR, example['guest'])
     if build:
-        gk_build.build(guest, sdk_root, crt=os.path.join(project, GUEST_DIR), compiler=compiler,
+        gk_build.build(guest, sdk_root,
+                       crt=os.path.join(project, GUEST_DIR) if vendoring else crt_src,
+                       compiler=compiler,
                        sol_out=os.path.dirname(binding), log=log, project=project)
         actions.append(('built', _posix(os.path.relpath(binding, project))))
         log('next: `forge test` (the gk prehook rebuilds guests and sets GK_RUN; without it, '
