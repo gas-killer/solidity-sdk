@@ -109,8 +109,17 @@ def binding_name(stem):
 
 
 def resolve_crt(crt, project=None):
-    """--crt, else GK_GUEST_CRT, else the project's vendored guest/, else the sdk's bundled copy."""
+    """--crt / GK_GUEST_CRT (explicit dev overrides), else the project's gk.toml
+    toolchain pin (#92 — a pinned-but-missing version is a hard refusal, never a silent
+    substitution), else the project's vendored guest/, else the sdk's bundled copy
+    (the pin-less legacy fallback)."""
     crt = crt or os.environ.get('GK_GUEST_CRT')
+    if not crt:
+        import gk_toolchain
+        try:
+            _version, crt = gk_toolchain.resolve_pin(project)
+        except gk_toolchain.GkToolchainError as e:
+            raise GkBuildError(str(e))
     if not crt and project and has_crt(os.path.join(project, PROJECT_CRT_DIR)):
         crt = os.path.join(project, PROJECT_CRT_DIR)
     crt = crt or BUNDLED_CRT
@@ -335,6 +344,10 @@ def build(source, sdk_root, out=None, sol_out=None, crt=None, name=None,
     if python:
         del info['cflags']  # the port's flags live in port.mk, committed to by portHash
         info.update(extras)
+    import gk_toolchain
+    pin = gk_toolchain.read_pin(root)
+    if pin and os.path.abspath(crt) == os.path.abspath(gk_toolchain.toolchain_path(pin)):
+        info['toolchain'] = pin  # which declared version provided the crt bytes (#92)
 
     if emit_binding:
         sol_out = sol_out or os.path.join(root, forge_dirs(root)[0], 'gen')

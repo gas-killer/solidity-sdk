@@ -24,6 +24,7 @@ import gk_fast  # noqa: E402
 import gk_forge  # noqa: E402
 import gk_init  # noqa: E402
 import gk_python  # noqa: E402
+import gk_toolchain  # noqa: E402
 import gk_vectors  # noqa: E402
 from gk_keccak import hex32, keccak256, keccak256_pure  # noqa: E402
 
@@ -315,6 +316,16 @@ def snapshot(root):
 
 class Init(unittest.TestCase):
     """The scaffold itself — no compiler, no forge (build=False)."""
+
+    def setUp(self):
+        # a machine's own ~/.gk/toolchains must not leak into the scaffold defaults
+        # (an installed toolchain makes `gk init` write a gk.toml pin)
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        old = os.environ.get('GK_HOME')
+        os.environ['GK_HOME'] = os.path.join(home.name, 'gk-home')
+        self.addCleanup(lambda: os.environ.update({'GK_HOME': old}) if old
+                        else os.environ.pop('GK_HOME', None))
 
     def test_python_scaffold_is_the_same_shape_around_greet_py(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -647,6 +658,128 @@ class Explain(unittest.TestCase):
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertEqual(proc.returncode, 1)
         self.assertIn('gk explain', proc.stderr.decode())
+
+
+class Toolchain(unittest.TestCase):
+    """#92: the guest toolchain pinned like solc — gk.toml declares a version, the gk
+    installation provides it, and a missing pinned version is a hard refusal."""
+
+    def setUp(self):
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        old = os.environ.get('GK_HOME')
+        os.environ['GK_HOME'] = os.path.join(home.name, 'gk-home')
+        self.addCleanup(lambda: os.environ.update({'GK_HOME': old}) if old
+                        else os.environ.pop('GK_HOME', None))
+
+    def test_pin_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(gk_toolchain.read_pin(tmp))
+            gk_toolchain.write_pin(tmp, 'v0.1.0')
+            self.assertEqual(gk_toolchain.read_pin(tmp), 'v0.1.0')
+            # an existing pin is never rewritten
+            self.assertEqual(gk_toolchain.write_pin(tmp, 'v9.9.9'), 'v0.1.0')
+            self.assertEqual(gk_toolchain.read_pin(tmp), 'v0.1.0')
+            with self.assertRaises(gk_toolchain.GkToolchainError):
+                gk_toolchain.check_version('0.1.0')  # no leading v
+            with self.assertRaises(gk_toolchain.GkToolchainError):
+                gk_toolchain.check_version('v0.1.0/..')
+
+    def test_pin_appends_to_an_existing_gk_toml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, 'gk.toml'), 'w') as f:
+                f.write('# my notes\n[something]\ntoolchain = "v9.9.9"\n')
+            # a `toolchain` key outside [gkvm] is not the pin
+            self.assertIsNone(gk_toolchain.read_pin(tmp))
+            gk_toolchain.write_pin(tmp, 'v0.1.0')
+            text = gk_build._read(os.path.join(tmp, 'gk.toml')).decode()
+            self.assertTrue(text.startswith('# my notes\n[something]\ntoolchain = "v9.9.9"\n'))
+            self.assertEqual(gk_toolchain.read_pin(tmp), 'v0.1.0')
+
+    def test_install_from_a_local_dir(self):
+        path = gk_toolchain.install('v0.0.1-test', from_path=gk_build.BUNDLED_CRT,
+                                    log=quiet)
+        for f in gk_build.CRT_FILES:
+            self.assertEqual(gk_build._read(os.path.join(path, f)),
+                             gk_build._read(os.path.join(gk_build.BUNDLED_CRT, f)))
+        self.assertEqual([v for v, _ in gk_toolchain.list_installed()], ['v0.0.1-test'])
+        # idempotent: a second install keeps the existing copy
+        again = gk_toolchain.install('v0.0.1-test', from_path=gk_build.BUNDLED_CRT,
+                                     log=quiet)
+        self.assertEqual(again, path)
+
+    def _release_dir(self, tmp, version, corrupt=False):
+        """A fake release directory: gk-crt-<v>.tar.gz + SHA256SUMS, served via file://."""
+        import tarfile as tf
+        asset = gk_toolchain.ASSET_TEMPLATE % version
+        tarball = os.path.join(tmp, asset)
+        with tf.open(tarball, 'w:gz') as tar:
+            tar.add(gk_build.BUNDLED_CRT, arcname='gk-crt')
+        digest = gk_toolchain._sha256(tarball)
+        if corrupt:
+            digest = ('0' * 8) + digest[8:]
+        with open(os.path.join(tmp, 'SHA256SUMS'), 'w') as f:
+            f.write('%s  %s\n' % (digest, asset))
+        return 'file://' + tarball
+
+    def test_install_fetch_verifies_sha256(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            url = self._release_dir(tmp, 'v0.0.2-test')
+            path = gk_toolchain.install('v0.0.2-test', url=url, log=quiet)
+            self.assertTrue(gk_toolchain.is_toolchain(path))
+
+    def test_a_sha256_mismatch_refuses_and_installs_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            url = self._release_dir(tmp, 'v0.0.3-test', corrupt=True)
+            with self.assertRaisesRegex(gk_toolchain.GkToolchainError, 'sha256 mismatch'):
+                gk_toolchain.install('v0.0.3-test', url=url, log=quiet)
+            self.assertEqual(gk_toolchain.list_installed(), [])
+
+    def test_resolve_crt_pin_precedence(self):
+        gk_toolchain.install('v0.0.4-test', from_path=gk_build.BUNDLED_CRT, log=quiet)
+        with tempfile.TemporaryDirectory() as project:
+            # pin beats a vendored copy: never "whatever files are lying around"
+            vendored = os.path.join(project, 'guest')
+            for f in gk_build.CRT_FILES:
+                os.makedirs(os.path.dirname(os.path.join(vendored, f)), exist_ok=True)
+                shutil.copyfile(os.path.join(gk_build.BUNDLED_CRT, f),
+                                os.path.join(vendored, f))
+            gk_toolchain.write_pin(project, 'v0.0.4-test')
+            self.assertEqual(gk_build.resolve_crt(None, project),
+                             os.path.abspath(gk_toolchain.toolchain_path('v0.0.4-test')))
+            # an explicit --crt still beats the pin (crt development)
+            self.assertEqual(gk_build.resolve_crt(gk_build.BUNDLED_CRT, project),
+                             os.path.abspath(gk_build.BUNDLED_CRT))
+
+    def test_a_missing_pinned_toolchain_is_a_hard_refusal(self):
+        with tempfile.TemporaryDirectory() as project:
+            gk_toolchain.write_pin(project, 'v7.7.7')
+            with self.assertRaisesRegex(gk_build.GkBuildError,
+                                        'gk toolchain install v7.7.7'):
+                gk_build.resolve_crt(None, project)
+
+    def test_init_pins_the_installed_toolchain(self):
+        gk_toolchain.install('v0.0.5-test', from_path=gk_build.BUNDLED_CRT, log=quiet)
+        with tempfile.TemporaryDirectory() as tmp:
+            sdk = make_project(tmp)
+            actions = gk_init.init(tmp, sdk, build=False, log=quiet)
+            self.assertIn(('created', 'gk.toml'), actions)
+            self.assertEqual(gk_toolchain.read_pin(tmp), 'v0.0.5-test')
+            readme = gk_build._read(os.path.join(tmp, 'guest', 'README.md')).decode()
+            self.assertIn('pinned in `gk.toml`', readme)
+            self.assertIn('gk toolchain install v0.0.5-test', readme)
+            # re-run: the pin is kept, everything stays a no-op
+            before = snapshot(tmp)
+            gk_init.init(tmp, sdk, build=False, log=quiet)
+            self.assertEqual(snapshot(tmp), before)
+
+    def test_cli_list_names_a_missing_pin(self):
+        with tempfile.TemporaryDirectory() as project:
+            gk_toolchain.write_pin(project, 'v1.2.3')
+            lines = []
+            gk_toolchain.cli_list(project, log=lines.append)
+            self.assertTrue(any('NOT INSTALLED' in line and 'v1.2.3' in line
+                                for line in lines))
 
 
 class FastPath(unittest.TestCase):

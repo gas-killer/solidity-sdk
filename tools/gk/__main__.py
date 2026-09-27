@@ -46,6 +46,7 @@ import gk_fast  # noqa: E402
 import gk_forge  # noqa: E402
 import gk_init  # noqa: E402
 import gk_test  # noqa: E402
+import gk_toolchain  # noqa: E402
 import gk_anvil  # noqa: E402
 import gk_vectors  # noqa: E402
 from gk_keccak import hex32, keccak256  # noqa: E402
@@ -146,6 +147,20 @@ def main(argv=None):
                    help='do not install the `forge` prehook into $GK_HOME/bin (plain '
                         '`forge test` then needs GK_RUN + FOUNDRY_PROFILE by hand, or `gk test`)')
 
+    tc = sub.add_parser('toolchain', help='guest toolchains, pinned like solc: gk.toml '
+                                          'declares the version, the gk installation '
+                                          'provides it ($GK_HOME/toolchains)')
+    tcsub = tc.add_subparsers(dest='tc_cmd', required=True)
+    tci = tcsub.add_parser('install', help='fetch gk-crt-<version>.tar.gz + SHA256SUMS '
+                                           'from the gas-analyzer releases, verify, '
+                                           'install')
+    tci.add_argument('version', help='e.g. v0.1.0')
+    tci.add_argument('--from', dest='from_path',
+                     help='install from a local dir or .tar.gz instead of fetching '
+                          '(crt development; a gas-analyzer checkout: crates/gkvm/guest)')
+    tci.add_argument('--url', help='asset URL override (SHA256SUMS is fetched beside it)')
+    tcsub.add_parser('list', help="installed toolchains + this project's pin")
+
     t = sub.add_parser('test', help='forge test with the guest really executing (gk-run + the '
                                     'gkvm-ffi profile); extra arguments go to forge')
     t.add_argument('forge_args', nargs=argparse.REMAINDER, help='passed to `forge test`')
@@ -215,6 +230,12 @@ def main(argv=None):
                                           artifact_root=args.artifact_root)
             return gk_fast.run_source(args.source, args.input, artifact=args.artifact,
                                       artifact_root=args.artifact_root)
+        elif args.cmd == 'toolchain':
+            if args.tc_cmd == 'install':
+                gk_toolchain.install(args.version, from_path=args.from_path, url=args.url)
+            else:
+                project = gk_build.find_project(os.getcwd(), args.sdk_root)
+                return gk_toolchain.cli_list(project or os.getcwd())
         elif args.cmd == 'explain':
             print(gk_explain.explain(' '.join(args.blob)))
         elif args.cmd == 'vectors':
@@ -232,7 +253,8 @@ def main(argv=None):
             with open(args.elf, 'rb') as f:
                 print(hex32(keccak256(f.read())))
     except (gk_build.GkBuildError, gk_init.GkInitError, gk_vectors.GkVectorsError,
-            gk_explain.GkExplainError, gk_fast.GkFastError, OSError) as e:
+            gk_explain.GkExplainError, gk_fast.GkFastError,
+            gk_toolchain.GkToolchainError, OSError) as e:
         print('gk: %s' % e, file=sys.stderr)
         return 1
     return 0
