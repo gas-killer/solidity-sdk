@@ -49,7 +49,7 @@ The `gk` command finds `lib/solidity-sdk/tools/gk` from anywhere inside the proj
 with `GK_RUN` set by hand. The scaffolded `guest/README.md` covers the rest, including what a
 fresh project does and does not get today.
 
-## When it fails: `gk explain`
+## When it fails: `gk explain` (the wrapped forge runs this for you)
 
 Every gkvm failure is typed, but forge shows it as a decimal code and hex bytes. Paste any
 of those shapes into `gk explain` — the ABI revert blob from a trace, the forge-printed
@@ -102,9 +102,17 @@ parses it keep working. What the prehook does before exec'ing the real forge:
   `FOUNDRY_PROFILE=gkvm-ffi` unless a profile is already chosen — so shim-backed tests
   execute instead of skipping. Without a sidecar the banner says so and the tests skip as
   before.
-- **stay out of the way**: outside a gk project (no `guest/` dir + `gk-sdk/` remapping at
-  the project root) the shim execs the real forge untouched and prints nothing; the sdk
-  checkout itself is never wrapped. `forge fmt`, `forge install`, … skip the rebuild.
+- **explain failures inline**: test-running subcommands are watched, not exec'd — any
+  `GkGuestTrap(…)` / `GkGuestOutOfCycles(…)` in the output is decoded on stderr the moment
+  it appears (trap class, traceback as text, the gas hint), deduped per run. stdout stays
+  forge's own byte for byte, so `--json` and every other parser keep working; when stdout
+  is your terminal the wrapper passes `--color always` so forge keeps its colors.
+  `GK_FORGE_NO_DECODE=1` restores the plain exec.
+- **stay out of the way**: wrapping is opt-in per project — it needs the `guest/` dir,
+  the `gk-sdk/` remapping AND the `[profile.gkvm-ffi]` block in foundry.toml (the flag
+  `gk init` writes there). Any project missing one of the three gets the real forge,
+  exec'd untouched, with nothing printed and no python spawned; the sdk checkout itself
+  is never wrapped. `forge fmt`, `forge install`, … skip the rebuild.
 
 Escape hatches: `GK_FORGE_PLAIN=1 forge …` is always the untouched forge; `gk init
 --no-forge-shim` skips installing it; deleting `~/.gk/bin/forge` removes it. `gk forge -- …`
