@@ -188,8 +188,22 @@ def ensure_fresh(sdk_root, project, log=print, build=None, fast=False):
 
 
 def is_gk_project(project):
-    return bool(project) and os.path.isdir(os.path.join(project, gk_build.PROJECT_CRT_DIR)) \
-        and gk_build.sdk_remapping(project) is not None
+    """Wrap only where the project opted in: a guest/ dir, the gk-sdk/ remapping, AND
+    the [profile.gkvm-ffi] block in foundry.toml — the flag `gk init` writes there.
+    A project missing any of the three gets the untouched forge, silently."""
+    if not (project and os.path.isdir(os.path.join(project, gk_build.PROJECT_CRT_DIR))
+            and gk_build.sdk_remapping(project) is not None):
+        return False
+    try:
+        with open(os.path.join(project, 'foundry.toml')) as f:
+            toml_text = f.read()
+    except OSError:
+        return False
+    import gk_init
+    try:
+        return gk_init.has_ffi_profile(toml_text)
+    except gk_init.GkInitError:
+        return False  # an unparseable foundry.toml is forge's problem, not ours
 
 
 def _banner(forge_args, gk_run, gk_tier, profile, rebuilt, fast=False):

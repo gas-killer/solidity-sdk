@@ -108,9 +108,11 @@ parses it keep working. What the prehook does before exec'ing the real forge:
   forge's own byte for byte, so `--json` and every other parser keep working; when stdout
   is your terminal the wrapper passes `--color always` so forge keeps its colors.
   `GK_FORGE_NO_DECODE=1` restores the plain exec.
-- **stay out of the way**: outside a gk project (no `guest/` dir + `gk-sdk/` remapping at
-  the project root) the shim execs the real forge untouched and prints nothing; the sdk
-  checkout itself is never wrapped. `forge fmt`, `forge install`, … skip the rebuild.
+- **stay out of the way**: wrapping is opt-in per project — it needs the `guest/` dir,
+  the `gk-sdk/` remapping AND the `[profile.gkvm-ffi]` block in foundry.toml (the flag
+  `gk init` writes there). Any project missing one of the three gets the real forge,
+  exec'd untouched, with nothing printed and no python spawned; the sdk checkout itself
+  is never wrapped. `forge fmt`, `forge install`, … skip the rebuild.
 
 Escape hatches: `GK_FORGE_PLAIN=1 forge …` is always the untouched forge; `gk init
 --no-forge-shim` skips installing it; deleting `~/.gk/bin/forge` removes it. `gk forge -- …`

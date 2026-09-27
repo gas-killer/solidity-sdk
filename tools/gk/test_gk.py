@@ -1336,6 +1336,25 @@ class ForgePrehook(unittest.TestCase):
         self.assertEqual(gk_forge.decode_line(raw, seen), [])
         self.assertEqual(gk_forge.decode_line(b'Compiling 3 files\n', seen), [])
 
+    def test_without_the_foundry_toml_flag_forge_is_untouched(self):
+        # guest/ dir and remapping alone are not consent: the [profile.gkvm-ffi] block
+        # in foundry.toml is the opt-in flag, so a foreign project that happens to have
+        # a guest/ directory is never wrapped.
+        with tempfile.TemporaryDirectory() as tmp:
+            sdk, _ = self.fake_built_project(tmp)
+            with open(os.path.join(tmp, 'foundry.toml'), 'w') as f:
+                f.write(FORGE_INIT_TOML)  # the profile block gone
+            self.assertFalse(gk_forge.is_gk_project(tmp))
+            real = self.fake_bin(tmp, 'forge', '#!/bin/sh\nexit 0\n')
+            rc, execs, lines = self._run(tmp, ['test'],
+                                         {'PATH': os.path.dirname(real)}, sdk_root=sdk)
+            self.assertEqual(rc, 0)
+            self.assertEqual(lines, [])  # silent
+            self.assertEqual(execs[0][1], [real, 'test'])
+            # the bash shim makes the same call without spawning python
+            with open(gk_forge.SHIM_TEMPLATE) as f:
+                self.assertIn('profile\\.gkvm-ffi', f.read())
+
     def test_gk_forge_plain_opts_out(self):
         with tempfile.TemporaryDirectory() as tmp:
             sdk, _ = self.fake_built_project(tmp)

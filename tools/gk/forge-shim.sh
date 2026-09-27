@@ -2,11 +2,12 @@
 # gk-forge-shim — the transparent gkvm prehook around foundry's forge.
 #
 # `gk init` installs this as $GK_HOME/bin/forge (the directory the gas-killer installer
-# put on PATH). Inside a forge project that ran `gk init` — a guest/ dir plus the gk-sdk/
-# remapping — it hands the call to the project's own `tools/gk forge`, which rebuilds
-# stale guests, exports GK_RUN, prints one `[gk]` line to stderr and execs the real
-# forge. Anywhere else it execs the real forge untouched and prints nothing, so non-gkvm
-# projects never see it. GK_FORGE_PLAIN=1 forces the untouched path everywhere.
+# put on PATH). Inside a forge project that opted in — a guest/ dir, the gk-sdk/
+# remapping, and the [profile.gkvm-ffi] flag in foundry.toml — it hands the call to the
+# project's own `tools/gk forge`, which rebuilds stale guests, exports GK_RUN, prints
+# one `[gk]` line to stderr and runs the real forge. Anywhere else it execs the real
+# forge untouched and prints nothing, so non-gkvm projects never see it.
+# GK_FORGE_PLAIN=1 forces the untouched path everywhere.
 #
 # The logic lives in the sdk each project vendors (lib/solidity-sdk/tools/gk), so it is
 # versioned with the project; this file only decides "gk project or not" and delegates.
@@ -38,8 +39,11 @@ while [ "$root" != / ] && [ ! -f "$root/foundry.toml" ]; do
   root="$(dirname "$root")"
 done
 
+# the foundry.toml flag: only the [profile.gkvm-ffi] block `gk init` wrote makes a
+# project wrappable — any other project gets the untouched forge, no python spawned
 tools=""
-if [ -f "$root/foundry.toml" ] && [ -d "$root/guest" ]; then
+if [ -f "$root/foundry.toml" ] && [ -d "$root/guest" ] \
+    && grep -q '^[[:space:]]*\[profile\.gkvm-ffi\]' "$root/foundry.toml"; then
   if [ -n "${GK_SDK:-}" ] && [ -f "$GK_SDK/tools/gk/__main__.py" ]; then
     tools="$GK_SDK/tools/gk"
   elif [ -f "$root/lib/solidity-sdk/tools/gk/__main__.py" ]; then
