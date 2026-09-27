@@ -253,7 +253,12 @@ def _build_python(source, stem, sig, crt, out, compiler, log, root, mpy_src, hea
     guest_py, extra = gk_python.stage(source, sig, crt, CRT_FILES, port, stage_dir)
     args = gk_python.make_args(guest_py, extra, heap_bytes, stack_bytes)
     compile_leg = gk_python.compile_native if compiler == 'native' else gk_python.compile_docker
-    cc_version = compile_leg(stage_dir, mpy_src, args, CC)
+    # the MicroPython core objects persist outside the wiped stage (#94); the ELF must
+    # be a pure function of the sources either way — the byte-identity test pins it
+    build_root = gk_python.core_cache_dir(root, port, crt, CRT_FILES, heap_bytes,
+                                          stack_bytes, compiler, CC)
+    cc_version = gk_python.run_compile(compile_leg, stage_dir, mpy_src, args, CC,
+                                       build_root, log=log)
     frozen = [os.path.basename(source)] + (['gk_runtime.py', 'gk_entry.py'] if sig else [])
     log('  frozen    %s  →  micropython-gkvm image (MicroPython %s, %s, %s)'
         % (' + '.join(frozen), gk_python.MPY_TAG, compiler, cc_version))
@@ -264,13 +269,15 @@ def _build_python(source, stem, sig, crt, out, compiler, log, root, mpy_src, hea
                                              for f in gk_python.PORT_FILES))),
         'makeArgs': args,
     }
+    if build_root:
+        extras['coreCache'] = os.path.basename(build_root)
     if sig:
         extras['runtimeHash'] = hex32(keccak256(_read(gk_python.RUNTIME)))
         extras['signature'] = {
             'params': [{'name': p, 'solName': n, 'type': t} for p, n, t in sig['params']],
             'returns': None if sig['returns'] is None else list(sig['returns']),
         }
-    return gk_python.built_elf(stage_dir, guest_py), cc_version, extras
+    return gk_python.built_elf(stage_dir, guest_py, build_dir=build_root), cc_version, extras
 
 
 def build(source, sdk_root, out=None, sol_out=None, crt=None, name=None,
