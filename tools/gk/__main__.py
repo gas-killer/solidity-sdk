@@ -126,8 +126,13 @@ def main(argv=None):
     i = sub.add_parser('init', help='scaffold a guest into an existing forge project '
                                     '(never overwrites; safe to re-run)')
     i.add_argument('project', nargs='?', default='.', help='forge project root (default: .)')
-    i.add_argument('--crt', help='gk-guest-crt dir to vendor (default $GK_GUEST_CRT, else the '
+    i.add_argument('--crt', help='gk-guest-crt dir (default $GK_GUEST_CRT, else the '
                                  "sdk's bundled copy)")
+    i.add_argument('--vendor-crt', action='store_true',
+                   help='copy gk-guest-crt into guest/ so the crt bytes are pinned '
+                        'in-repo, independent of the sdk submodule pin (default: the crt '
+                        'resolves from the installed sdk; a project that already vendored '
+                        'it keeps its copy either way)')
     i.add_argument('--sdk-path', help='where the project sees the sdk, project-relative '
                                       '(default: derived from this checkout)')
     i.add_argument('--compiler', default='auto', choices=['auto', 'native', 'docker'])
@@ -174,7 +179,8 @@ def main(argv=None):
                            stack_bytes=args.stack_bytes)
         elif args.cmd == 'init':
             gk_init.init(args.project, args.sdk_root, crt=args.crt, compiler=args.compiler,
-                         build=not args.no_build, sdk_path=args.sdk_path, python=args.python)
+                         build=not args.no_build, sdk_path=args.sdk_path, python=args.python,
+                         vendor_crt=args.vendor_crt)
             if not args.no_forge_shim:
                 gk_forge.install_shim()
         elif args.cmd == 'test':

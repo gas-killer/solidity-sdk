@@ -355,13 +355,11 @@ class Init(unittest.TestCase):
             sdk = make_project(tmp)
             actions = gk_init.init(tmp, sdk, build=False, log=quiet)
             files = snapshot(tmp)
+        # the slim default (#90): only what the user owns — no crt, no linker script
         self.assertEqual(sorted(files), sorted([
             '.gitignore', 'foundry.toml', 'remappings.txt',
-            'guest/README.md', 'guest/hello.c', 'guest/link.ld',
-            'guest/crt/crt0.S', 'guest/crt/gkvm.c', 'guest/crt/gkvm.h',
+            'guest/README.md', 'guest/hello.c',
             'src/HelloGk.sol', 'test/HelloGk.t.sol']))
-        for f in gk_build.CRT_FILES:
-            self.assertEqual(files['guest/' + f], gk_build._read(os.path.join(gk_build.BUNDLED_CRT, f)))
 
         # foundry.toml: the original, byte for byte, then the profile
         toml = files['foundry.toml'].decode()
@@ -386,6 +384,11 @@ class Init(unittest.TestCase):
         self.assertIn('import {HelloGk} from "../src/HelloGk.sol";', test)
         readme = files['guest/README.md'].decode()
         self.assertIn('python3 lib/solidity-sdk/tools/gk build guest/hello.c', readme)
+        # where the crt lives, that programHash commits to it, and how drift surfaces
+        self.assertIn('lib/solidity-sdk/tools/gk/guest-crt', readme)
+        self.assertIn('`crtHash` in `guest.json`', readme)
+        self.assertIn('`crt changed`', readme)
+        self.assertIn('gk init --vendor-crt', readme)
         # the verified gk-run install story: lockfile-pinned, both tiers named
         self.assertIn('cargo install --locked --path crates/gkvm --bin gk-run', readme)
         self.assertIn('--features portable-exec', readme)
@@ -402,9 +405,32 @@ class Init(unittest.TestCase):
         for name, body in files.items():
             self.assertNotIn(b'{{', body, name)
 
-        self.assertEqual([s for s, _ in actions].count('created'), 8)
+        self.assertEqual([s for s, _ in actions].count('created'), 4)
         self.assertEqual([p for s, p in actions if s == 'merged'], ['foundry.toml', 'remappings.txt'])
         self.assertEqual([p for s, p in actions if s == 'kept'], ['.gitignore'])
+
+    def test_vendor_crt_is_the_opt_in(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sdk = make_project(tmp)
+            gk_init.init(tmp, sdk, build=False, log=quiet, vendor_crt=True)
+            files = snapshot(tmp)
+        for f in gk_build.CRT_FILES:
+            self.assertEqual(files['guest/' + f],
+                             gk_build._read(os.path.join(gk_build.BUNDLED_CRT, f)))
+        readme = files['guest/README.md'].decode()
+        self.assertIn('vendored', readme)
+        self.assertIn('never edit them', readme)
+
+    def test_a_vendored_project_keeps_its_copy_on_a_default_rerun(self):
+        # checkbox 3 of #90: existing projects with a vendored guest/crt work unchanged
+        with tempfile.TemporaryDirectory() as tmp:
+            sdk = make_project(tmp)
+            gk_init.init(tmp, sdk, build=False, log=quiet, vendor_crt=True)
+            before = snapshot(tmp)
+            actions = gk_init.init(tmp, sdk, build=False, log=quiet)  # no --vendor-crt
+            self.assertEqual(snapshot(tmp), before)
+            self.assertEqual({s for s, _ in actions}, {'kept'})
+            self.assertIn(('kept', 'guest/crt/gkvm.h'), actions)
 
     def test_rerun_is_a_no_op(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -430,7 +456,7 @@ class Init(unittest.TestCase):
                 os.makedirs(os.path.dirname(os.path.join(tmp, rel)), exist_ok=True)
                 with open(os.path.join(tmp, rel), 'w') as f:
                     f.write(text)
-            gk_init.init(tmp, sdk, build=False, log=quiet)
+            gk_init.init(tmp, sdk, build=False, log=quiet, vendor_crt=True)
             files = {k: v.decode() for k, v in snapshot(tmp).items()}
         for rel in ('guest/hello.c', 'guest/crt/gkvm.h', 'src/HelloGk.sol'):
             self.assertEqual(files[rel], mine[rel])
@@ -856,7 +882,7 @@ class ForgePrehook(unittest.TestCase):
         """A scaffolded project whose hello.c has a recorded build matching it byte-for-byte
         (fake ELF/binding — staleness only reads guest.json and hashes sources)."""
         sdk = make_project(tmp)
-        gk_init.init(tmp, sdk, build=False, log=quiet)
+        gk_init.init(tmp, sdk, build=False, log=quiet, vendor_crt=True)
         src = os.path.join(tmp, 'guest', 'hello.c')
         bdir = os.path.join(tmp, 'cache', 'gkvm', 'build', 'hello')
         os.makedirs(bdir)

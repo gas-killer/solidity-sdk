@@ -9,7 +9,7 @@ contract runs through the gkvm precompile with `GkVm.exec`; its identity on-chai
 | path | what | yours to edit? |
 | --- | --- | --- |
 | `guest/{{EXAMPLE_GUEST}}` | {{EXAMPLE_DESC}} | yes |
-| `guest/crt/`, `guest/link.ld` | gk-guest-crt, vendored: entry code, hostcalls (`gkvm.h`), linker script. Part of every guest's `programHash` | no — changing it changes every programHash |
+{{CRT_ROW}}
 | `{{SRC}}/gen/{{BINDING_NAME}}.sol` | generated binding (`PROGRAM_HASH` + `call`) | no — `gk build` rewrites it |
 | `{{SRC}}/{{CONSUMER}}` | sample consumer | yes |
 | `{{TEST}}/{{CONSUMER_TEST}}` | test wired to `GkVmFfiShim` | yes |
@@ -18,6 +18,8 @@ contract runs through the gkvm precompile with `GkVm.exec`; its identity on-chai
 | `.gitignore` | `cache/gkvm/` (build outputs, shim spill files) | — |
 
 Re-running `gk init` is safe: existing files are never overwritten.
+
+{{CRT_NOTE}}
 
 ## Quickstart
 
@@ -88,7 +90,7 @@ floats, no imports beyond the frozen stdlib subset. `gk init --python` scaffolds
 **C:** add `guest/<name>.c` (`#include "gkvm.h"`; `gk_input_read` → compute → `gk_output_write`;
 `gk_abort` for a typed, deterministic failure), then `gk build guest/<name>.c` and import
 `{{SRC}}/gen/Gk<Name>.sol`. Guests are freestanding rv64im C: no libc, no floating point (nothing
-links libgcc), no I/O beyond the hostcalls in `guest/crt/gkvm.h`.
+links libgcc), no I/O beyond the crt's hostcalls (`gkvm.h`).
 
 `forge clean` deletes `cache/` and with it the built ELFs — rebuild with `gk build`.
 

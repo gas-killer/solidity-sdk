@@ -81,6 +81,10 @@ printf '# installed sdk commit: %s\n' "$(git -C lib/solidity-sdk rev-parse --sho
 # thing is the sdk's tools/gk, as the README says
 step "$TOP" 'gk init' 'python3 lib/solidity-sdk/tools/gk init'
 [ -x "$GK_HOME/bin/forge" ] || die 'gk init did not install the forge prehook into $GK_HOME/bin'
+# #90: the default scaffold holds only what the user owns — no toolchain internals
+[ ! -e guest/crt ] || die 'gk init vendored the crt by default (that is opt-in: --vendor-crt)'
+[ ! -e guest/link.ld ] || die 'gk init scaffolded link.ld by default'
+grep -qF -- '--vendor-crt' guest/README.md || die 'guest/README.md does not document --vendor-crt'
 
 # --- guest/README.md (scaffolded), Quickstart steps 1-3 ----------------------------------
 GUEST="$PWD/guest/README.md"
