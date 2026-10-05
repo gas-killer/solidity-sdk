@@ -5,6 +5,7 @@ import {Test, console2} from "forge-std/Test.sol";
 import {GasKillerSDK} from "../src/GasKillerSDK.sol";
 import {TransitionGuard} from "../src/TransitionGuard.sol";
 import {IGasKillerSDK} from "../src/interface/IGasKillerSDK.sol";
+import {IGasKillerNested} from "../src/interface/IGasKillerNested.sol";
 import {IGasKillerSDKBatch, TaskSubmission} from "../src/interface/IGasKillerSDKBatch.sol";
 import {ISchnorrStakeRegistry} from "../src/interface/ISchnorrStakeRegistry.sol";
 import {StateChangeHandlerLib, StateUpdateType} from "../src/StateChangeHandlerLib.sol";
@@ -650,5 +651,7 @@ contract GasKillerSDKHardeningTest is Test {
         // A change here is an interface break for every already-deployed router.
         assertEq(type(IGasKillerSDK).interfaceId, bytes4(0x82b35a01), "core id must not drift");
         assertEq(type(IGasKillerSDKBatch).interfaceId, bytes4(0x2ea5ee1d), "batch id must not drift");
+        assertTrue(sdk.supportsInterface(type(IGasKillerNested).interfaceId), "nested extension id");
+        assertEq(type(IGasKillerNested).interfaceId, bytes4(0x78481874), "nested id must not drift");
     }
 }

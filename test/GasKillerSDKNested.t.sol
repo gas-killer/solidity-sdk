@@ -170,9 +170,7 @@ contract GasKillerSDKNestedTest is Test {
         NestedTreeBuilder.Frame[] memory frames = _twiceFrames();
         NestedTreeBuilder.Tree memory tree = frames.build(expiryBlock);
         (tree.rootChildren[0], tree.rootChildren[1]) = (tree.rootChildren[1], tree.rootChildren[0]);
-        TreeSubmission memory sub = _submission(tree, 0);
-        vm.expectPartialRevert(StateChangeHandlerLib.RevertingContext.selector);
-        a.verifyAndUpdateTree(sub);
+        _expectChildRevert(a, _submission(tree, 0), IGasKillerNested.LeafMismatch.selector);
     }
 
     function test_valueForwardedThroughNestedOp() public {
@@ -269,9 +267,7 @@ contract GasKillerSDKNestedTest is Test {
         frames[0] = _frame(address(a), address(0), 0, 0, _ops1(_nested(address(b), 0, 1)));
         frames[1] = _frame(address(b), address(a), 0, 1 ether, _ops1(_store(SLOT_X, 2)));
         NestedTreeBuilder.Tree memory tree = frames.build(expiryBlock);
-        TreeSubmission memory sub = _submission(tree, 0);
-        vm.expectPartialRevert(StateChangeHandlerLib.RevertingContext.selector);
-        a.verifyAndUpdateTree(sub);
+        _expectChildRevert(a, _submission(tree, 0), IGasKillerNested.LeafMismatch.selector);
     }
 
     // ---------------------------------------------------------------------------------
@@ -290,8 +286,7 @@ contract GasKillerSDKNestedTest is Test {
         NestedTreeBuilder.Tree memory tree = _chainAB().build(expiryBlock);
         TreeSubmission memory sub = _submission(tree, 0);
         b.bump();
-        vm.expectPartialRevert(StateChangeHandlerLib.RevertingContext.selector);
-        a.verifyAndUpdateTree(sub);
+        _expectChildRevert(a, sub, IGasKillerNested.LeafMismatch.selector);
         assertEq(_load(a, SLOT_X), 0);
         assertEq(a.stateTransitionCount(), 0);
     }
@@ -301,8 +296,7 @@ contract GasKillerSDKNestedTest is Test {
         b.setBlockStaleMeasure(3);
         TreeSubmission memory sub = _submission(tree, 0);
         sub.sig = _signAt(tree.root, block.number - 5);
-        vm.expectPartialRevert(StateChangeHandlerLib.RevertingContext.selector);
-        a.verifyAndUpdateTree(sub);
+        _expectChildRevert(a, sub, GasKillerSDK.StaleBlockNumber.selector);
     }
 
     function test_treeAfterExpiryReverts() public {
@@ -462,6 +456,27 @@ contract GasKillerSDKNestedTest is Test {
     function _signAt(bytes32 root, uint256 refBlock) private returns (QuorumSignature memory) {
         (uint256 s, address r) = SchnorrSigner.sign(OPERATOR_KEY, uint256(keccak256(abi.encode(root, refBlock))), root);
         return QuorumSignature(s, r, new address[](0), refBlock);
+    }
+
+    /// A child's failure reaches the root wrapped in `RevertingContext`; unwrap it and check why.
+    function _expectChildRevert(NestedNode root, TreeSubmission memory sub, bytes4 childReason) private {
+        try root.verifyAndUpdateTree(sub) {
+            fail("tree settled");
+        } catch (bytes memory err) {
+            assertEq(_selector(err), StateChangeHandlerLib.RevertingContext.selector, "wrapped");
+            bytes memory body = new bytes(err.length - 4);
+            for (uint256 i = 0; i < body.length; ++i) {
+                body[i] = err[i + 4];
+            }
+            (,, bytes memory childRevert,) = abi.decode(body, (uint256, address, bytes, bytes));
+            assertEq(_selector(childRevert), childReason, "child reason");
+        }
+    }
+
+    function _selector(bytes memory data) private pure returns (bytes4 selector) {
+        assembly {
+            selector := mload(add(data, 0x20))
+        }
     }
 
     function _load(NestedNode node, bytes32 slot) private view returns (uint256) {
