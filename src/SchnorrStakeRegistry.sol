@@ -3,7 +3,9 @@ pragma solidity ^0.8.27;
 
 import {Secp256k1} from "./libraries/Secp256k1.sol";
 import {SchnorrVerify} from "./libraries/SchnorrVerify.sol";
+import {NestedFrames} from "./libraries/NestedFrames.sol";
 import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
+import {ISchnorrApprovalRegistry, QuorumSignature} from "./interface/ISchnorrApprovalRegistry.sol";
 
 /// @title SchnorrStakeRegistry
 /// @notice Stake registry for the **aggregate Schnorr** quorum scheme — the Schnorr
@@ -49,7 +51,12 @@ import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
 ///      key that signed), not the watermark: advancing `effectiveBlock` does not restrict which
 ///      quorums are acceptable, it guarantees the cached aggregate and weights are the ones in
 ///      force at `refBlock` so the registry never answers for a snapshot it no longer holds.
-contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
+///
+///      For nested settlement, `verifyAndApprove` runs the same verification once for a tree's
+///      root and records the approval in transient storage, where every frame of the tree reads
+///      it through `approvedRefBlock`. Approvals never touch persistent storage, so the slot
+///      layout above is unchanged and an approval cannot outlive its transaction.
+contract SchnorrStakeRegistry is ISchnorrApprovalRegistry {
     /// Domain tag for the proof-of-possession message — must equal the Rust `POP_TAG`.
     bytes internal constant POP_TAG = "gas-killer/schnorr/pop/v1";
 
@@ -163,6 +170,10 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
     /// land in the past and make a change committable immediately, defeating the window. The
     /// bound is ~1.4e14 blocks, so it constrains nothing reachable.
     uint256 internal constant MAX_NOTICE_WINDOW = uint256(type(uint48).max) / 2;
+
+    /// keccak256("gaskiller.registry.approval") - 1; a root's approval lives in transient slot
+    /// `keccak256(abi.encode(APPROVAL_NAMESPACE, root))`.
+    bytes32 internal constant APPROVAL_NAMESPACE = 0x46b23aa16c26504969dc09800f811911d430d166240c299f498c943297b40365;
 
     constructor(uint256 _thresholdNum, uint256 _thresholdDen, address _owner, uint256 _noticeWindow) {
         require(_thresholdDen != 0 && _thresholdNum <= _thresholdDen, "bad threshold");
@@ -510,6 +521,64 @@ contract SchnorrStakeRegistry is ISchnorrStakeRegistry {
         address[] calldata nonSigners,
         uint256 refBlock
     ) external view override returns (bool ok) {
+        return _isValidSignature(message, s, Raddr, nonSigners, refBlock);
+    }
+
+    /// @inheritdoc ISchnorrApprovalRegistry
+    /// @dev Expiry is checked here rather than by each frame, so no approval, and so no nested
+    ///      frame, can exist after it whatever contract sits above that frame.
+    function verifyAndApprove(
+        bytes32 root,
+        address rootContract,
+        uint256 expiryBlock,
+        bytes32[] calldata expiryProof,
+        QuorumSignature calldata sig
+    ) external override {
+        if (block.number > expiryBlock) revert ApprovalExpired(expiryBlock);
+        if (!NestedFrames.isMemberCalldata(expiryProof, root, NestedFrames.expiryLeaf(rootContract, expiryBlock))) {
+            revert InvalidExpiryProof();
+        }
+        if (!_isValidSignature(root, sig.s, sig.Raddr, sig.nonSigners, sig.refBlock)) {
+            revert InvalidApprovalSignature();
+        }
+
+        bytes32 slot = _approvalSlot(root);
+        uint256 stored;
+        assembly {
+            stored := tload(slot)
+        }
+        // First approval wins, so a later call in the same transaction cannot move the
+        // reference block that frames already checked their staleness against.
+        if (stored == 0) {
+            uint256 value = sig.refBlock + 1;
+            assembly {
+                tstore(slot, value)
+            }
+        }
+    }
+
+    /// @inheritdoc ISchnorrApprovalRegistry
+    function approvedRefBlock(bytes32 root) external view override returns (bool approved, uint256 refBlock) {
+        bytes32 slot = _approvalSlot(root);
+        uint256 stored;
+        assembly {
+            stored := tload(slot)
+        }
+        if (stored == 0 || stored - 1 < effectiveBlock) return (false, 0);
+        return (true, stored - 1);
+    }
+
+    function _approvalSlot(bytes32 root) private pure returns (bytes32) {
+        return keccak256(abi.encode(APPROVAL_NAMESPACE, root));
+    }
+
+    function _isValidSignature(
+        bytes32 message,
+        uint256 s,
+        address Raddr,
+        address[] calldata nonSigners,
+        uint256 refBlock
+    ) private view returns (bool) {
         if (refBlock >= block.number) revert FutureReferenceBlock();
         // Fail-closed: the cached aggregate/weights only equal their value at refBlock when
         // no operator-set mutation happened after it.
