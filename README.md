@@ -27,9 +27,10 @@ rogue-key-safe.
 
 ## Chain requirements
 
-`TransitionGuard` (used by `GasKillerSDK.verifyAndUpdate` and `verifyAndUpdateBatch`, see
+`TransitionGuard` (used by every `GasKillerSDK` settlement entrypoint, see
 `src/TransitionGuard.sol`) is a reentrancy/in-transition guard built on EIP-1153 transient
-storage, and has no fallback path for a pre-Cancun EVM — deploying it to a chain
+storage, and nested settlement keeps its registry approvals and pending-child markers there too.
+None of these has a fallback path for a pre-Cancun EVM — deploying it to a chain
 without EIP-1153 breaks settlement itself, not just the guard. `foundry.toml` pins
 `evm_version = "cancun"` accordingly. Ethereum mainnet has supported EIP-1153 since Dencun;
 before deploying to any other chain (in particular an L2 settlement target), confirm it has
@@ -138,17 +139,56 @@ send the sum of what the applied submissions spend; the batch is atomic, so a sh
 of them unwinds all of them. A submission skipped as already-settled — the front-run tolerance
 described above — spends nothing, so its share simply lands in the retained-surplus case.
 
+## Nested settlement
+
+A transition can extend down a call stack when the contracts it calls are SDK consumers too.
+If `A` calls `B` and `B` calls `C`, and all three inherit `GasKillerSDK`, the whole call stack
+settles as one tree: each contract applies its own signed frame instead of `B` and `C` running
+natively.
+
+- **One signature.** The quorum signs a Merkle root over an expiry leaf and one leaf per frame,
+  in execution order. The root contract settles it through `verifyAndUpdateTree`. The registry
+  verifies the signature and the expiry once, through `verifyAndApprove`, and caches the approval
+  in transient storage for the rest of the transaction.
+- **Frames apply in place.** Where the native call happened, the parent's program holds a
+  `NESTED` op naming the child's leaf. The parent calls `applyNested` on the child with the
+  child's program and proof, and the child checks the approval in its own registry, its leaf,
+  the proof, and that the parent reports this leaf as its pending child.
+- **What binds a frame.** A frame's leaf hashes its contract, caller, ETH value and transition
+  index from the call itself. A frame applied by anyone but its signed parent, with any other
+  value, or out of order fails. A frame cannot be applied after the signed expiry, whatever
+  contract calls it.
+- **Cycles work.** `A → B → A` applies two `A` frames in one tree. The transition guard holds the
+  active root, so a frame of the same root may re-enter, and every other re-entry still reverts.
+- **The single-transition digest is unchanged.** A root frame's leaf is exactly the
+  `verifyAndUpdate` digest, so consumers that never nest sign and settle as before.
+
+Rules for a contract that may be nested:
+
+- The function called into must be `trackState`, and the counter increment must come before any
+  other storage write or external call in that function. Replay increments first.
+- It must use the same registry as the root contract, and that registry must implement
+  `ISchnorrApprovalRegistry`.
+- Its own `blockStaleMeasure` still bounds the reference block it accepts, so the tightest window
+  in a tree applies to the whole tree.
+- Every nested frame pins its contract's transition index. Any other transition on that contract
+  between signing and settlement reverts the whole tree, so a contract with heavy native traffic
+  may be better left as a plain `CALL`.
+
+See `src/examples/nested-chain` (`NestedRouter` → `NestedVault` → `NestedLedger`) and
+`src/examples/nested-cycle` (`CycleRoot` → `CycleRelay` → `CycleRoot`).
+
 ## Repository Structure
 
 - **`src/`** — Core SDK contracts
   - `GasKillerSDK.sol` — Abstract base; inherit this in your consumer
   - `SchnorrStakeRegistry.sol` — Aggregate-key registry with proof-of-possession registration and non-signer subtraction
   - `StateTracker.sol` — Tracks state transitions via an ERC-7201 storage slot
-  - `StateChangeHandlerLib.sol` — Executes batched `STORE`, `CALL`, `LOG` and `CREATE` operations
-  - `TransitionGuard.sol` — EIP-1153 reentrancy / in-transition latch
-  - `interface/` — `IGasKillerSDK`, `IGasKillerSDKBatch`, `ISchnorrStakeRegistry`, and the Alloy-compatible `IStateUpdateTypes`
-  - `libraries/` — `Secp256k1` (affine point math) and `SchnorrVerify` (constant-gas `ecrecover`-trick verify)
-- **`src/examples/`** — Demo apps: `ArraySummation`(`Factory`) and `ReentrantCheckpoint`(`Factory`)
+  - `StateChangeHandlerLib.sol` — Executes batched `STORE`, `CALL`, `LOG`, `CREATE` and `NESTED` operations
+  - `TransitionGuard.sol` — EIP-1153 reentrancy / in-transition latch, keyed by the active nested root
+  - `interface/` — `IGasKillerSDK`, `IGasKillerSDKBatch`, `IGasKillerNested`, `ISchnorrStakeRegistry`, `ISchnorrApprovalRegistry`, and the Alloy-compatible `IStateUpdateTypes`
+  - `libraries/` — `Secp256k1` (affine point math), `SchnorrVerify` (constant-gas `ecrecover`-trick verify) and `NestedFrames` (nested-settlement leaves, tree membership and witnesses)
+- **`src/examples/`** — Demo apps: `ArraySummation`(`Factory`), `ReentrantCheckpoint`(`Factory`), and the nested-settlement `nested-chain` and `nested-cycle` examples
 - **`script/`** — Deployment scripts
 - **`test/`** — Unit and integration tests
 
@@ -217,9 +257,11 @@ of the following, applied in order:
 | `LOG0`–`LOG4` | Emit a log with 0–4 topics | `(bytes data[, bytes32 topic1, ...])` |
 | `CREATE` | Deploy via `CREATE` | `(uint256 value, bytes initcode)` |
 | `CREATE2` | Deploy via `CREATE2` | `(bytes32 salt, uint256 value, bytes initcode)` |
+| `NESTED` | Apply an SDK callee's own frame of a nested tree (tree settlement only) | `(address target, uint256 value, bytes32 childLeaf)` |
 
 See [Funding value-bearing state updates](#funding-value-bearing-state-updates) for how `CALL`,
-`CREATE` and `CREATE2` are paid for.
+`CREATE`, `CREATE2` and `NESTED` are paid for. A `NESTED` op forwards its value out of the parent's
+balance, exactly as the native call would have.
 
 ## Development
 
