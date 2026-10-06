@@ -1304,309 +1304,70 @@ abstract contract GasKillerSDK is
     }
 }
 
-// src/examples/array-summation/ArraySummation.sol
+// src/examples/nested-chain/NestedLedger.sol
 
-/// @title ArraySummation
-/// @notice Example Gas Killer SDK consumer that maintains an on-chain array and computes sums off-chain
-/// @dev `verifyAndUpdate` is inherited from `GasKillerSDK`, so state updates are approved by
-///      a single aggregate Schnorr signature verified against a `SchnorrStakeRegistry`.
-contract ArraySummation is GasKillerSDK {
-    /// @notice Thrown when constructor arguments would produce an unusable contract
+/// @title NestedLedger
+/// @notice The innermost contract of the nested-chain example (`NestedRouter` → `NestedVault`
+///         → `NestedLedger`). Keeps a hash chain over every credit it records, which makes
+///         `record` deliberately expensive to execute natively.
+/// @dev `record` is `trackState`, so when the vault calls it inside a traced task it becomes
+///      its own nested frame and settles through `applyNested` without running the hash chain.
+contract NestedLedger is GasKillerSDK {
     error InvalidConfiguration();
 
-    /// @notice Emitted whenever a new sum is computed and stored
-    /// @param newSum The newly computed sum
-    /// @param timestamp The block timestamp at the time of computation
-    event SumCalculated(uint256 newSum, uint256 timestamp);
+    event Recorded(address indexed user, uint256 amount, bytes32 head);
 
-    /// @notice Emitted once during construction after the array is populated
-    /// @param size The number of elements initialised in the array
-    event ArrayInitialized(uint256 size);
+    /// @notice Head of the hash chain over every recorded credit (slot 0).
+    bytes32 public head;
+    /// @notice Number of credits recorded (slot 1).
+    uint256 public entries;
 
-    /// @notice Number of elements in `values`; fixed at construction
-    uint256 public immutable arraySize;
+    /// @notice Hash rounds per recorded credit.
+    uint256 public immutable rounds;
 
-    /// @notice Upper bound (exclusive) for randomly generated array element values
-    uint256 public immutable maxValue;
-
-    /// @notice The most recently computed sum of selected array elements
-    uint256 public currentSum;
-
-    /// @notice The underlying array of pseudorandom values
-    uint256[] public values;
-
-    /// @notice Deploy a new ArraySummation contract and initialise the array
-    /// @param _avsAddress The AVS service manager address this contract is scoped to
-    /// @param _schnorrStakeRegistry The Schnorr stake registry verifying aggregate operator quorums
-    /// @param _arraySize Number of elements to generate; must be > 0
-    /// @param _maxValue Exclusive upper bound for element values; must be > 0
-    /// @param _seed Seed for pseudorandom generation; 0 falls back to `block.timestamp`
-    constructor(
-        address _avsAddress,
-        address _schnorrStakeRegistry,
-        uint256 _arraySize,
-        uint256 _maxValue,
-        uint256 _seed
-    ) {
+    constructor(address _avsAddress, address _schnorrStakeRegistry, uint256 _rounds) {
+        if (_rounds == 0) revert InvalidConfiguration();
         _setAvsAddress(_avsAddress);
         _setSchnorrRegistry(_schnorrStakeRegistry);
+        rounds = _rounds;
+    }
 
-        if (_arraySize == 0 || _maxValue == 0) {
-            revert InvalidConfiguration();
+    function record(address user, uint256 amount) external trackState {
+        bytes32 h = head;
+        for (uint256 i = 0; i < rounds; ++i) {
+            h = keccak256(abi.encode(h, user, amount, i));
         }
-
-        arraySize = _arraySize;
-        maxValue = _maxValue;
-
-        _initializeArray(_seed);
-    }
-
-    /// @notice Populate `values` with `arraySize` pseudorandom entries bounded by `maxValue`
-    /// @param _seed Entropy source; falls back to `block.timestamp` when 0
-    function _initializeArray(uint256 _seed) private {
-        if (_seed == 0) {
-            _seed = block.timestamp;
-        }
-
-        uint256 hashedSeed = uint256(keccak256(abi.encode(_seed)));
-        for (uint256 i = 0; i < arraySize; ++i) {
-            values.push(uint256(keccak256(abi.encode(hashedSeed, i))) % maxValue);
-        }
-
-        emit ArrayInitialized(arraySize);
-    }
-
-    /// @notice Calculate the sum of specified array elements and record the state transition
-    /// @dev Pass an empty `indexes` array to sum all elements
-    /// @param indexes Zero-based positions in `values` to include in the sum
-    function sum(uint256[] calldata indexes) public trackState {
-        _calculateSum(indexes);
-    }
-
-    /// @notice Compute the sum of the specified elements and store it in `currentSum`
-    /// @param indexes Zero-based positions to sum; sums the full array when empty
-    function _calculateSum(uint256[] calldata indexes) internal {
-        uint256 total = 0;
-
-        if (indexes.length == 0) {
-            // If no indexes provided, sum all elements
-            uint256 length = values.length;
-            for (uint256 i = 0; i < length; ++i) {
-                total += values[i];
-            }
-        } else {
-            // Sum only specified indexes
-            uint256 valuesLength = values.length;
-            uint256 indexesLength = indexes.length;
-            for (uint256 i = 0; i < indexesLength; ++i) {
-                require(indexes[i] < valuesLength, "Index out of bounds");
-                total += values[indexes[i]];
-            }
-        }
-
-        currentSum = total;
-        emit SumCalculated(total, block.timestamp);
-    }
-
-    /// @notice Return the value at a specific array index
-    /// @param index Zero-based position in `values`
-    /// @return The element stored at `index`
-    function getArrayElement(uint256 index) public view returns (uint256) {
-        require(index < values.length, "Index out of bounds");
-        return values[index];
-    }
-
-    /// @notice Return the number of elements in `values`
-    /// @return The length of the array
-    function getArrayLength() public view returns (uint256) {
-        return values.length;
-    }
-
-    /// @notice Return a memory copy of the full `values` array
-    /// @return The entire array of stored values
-    function getFullArray() public view returns (uint256[] memory) {
-        return values;
-    }
-
-    /// @notice Overwrite a single array element and record the state transition
-    /// @param index Zero-based position in `values` to update
-    /// @param newValue Replacement value to store at `index`
-    function setArrayElement(uint256 index, uint256 newValue) public trackState {
-        require(index < values.length, "Index out of bounds");
-        values[index] = newValue;
-    }
-
-    /// @notice Clear the array and reinitialise it with a new seed, recording the state transition
-    /// @param _seed Entropy source for regeneration; 0 falls back to `block.timestamp`
-    function resetArray(uint256 _seed) public trackState {
-        delete values;
-        _initializeArray(_seed);
+        head = h;
+        entries += 1;
+        emit Recorded(user, amount, h);
     }
 }
 
-// src/examples/array-summation/ArraySummationFactory.sol
+// src/examples/nested-chain/NestedVault.sol
 
-/// @title ArraySummationFactory
-/// @notice Factory contract for deploying ArraySummation contracts
-/// @dev Allows permissionless deployment of new array summation contracts
-///      and provides tracking functionality for deployed contracts
-contract ArraySummationFactory {
-    /// @notice Emitted when a new ArraySummation contract is deployed via this factory
-    /// @param contractAddress Address of the newly deployed ArraySummation contract
-    /// @param avsAddress The AVS service manager address passed to the contract
-    /// @param schnorrStakeRegistry The Schnorr stake registry passed to the contract
-    /// @param arraySize Number of elements in the initialised array
-    /// @param maxValue Upper bound used for element generation
-    /// @param seed Entropy seed used for array initialisation
-    /// @param deploymentIndex Zero-based position of this deployment in `deployedContracts`
-    event ArraySummationDeployed(
-        address indexed contractAddress,
-        address indexed avsAddress,
-        address indexed schnorrStakeRegistry,
-        uint256 arraySize,
-        uint256 maxValue,
-        uint256 seed,
-        uint256 deploymentIndex
-    );
+/// @title NestedVault
+/// @notice The middle contract of the nested-chain example. Credits a user with a weighted
+///         sum of their inputs and records the credit in the ledger.
+contract NestedVault is GasKillerSDK {
+    event Credited(address indexed user, uint256 amount);
 
-    /// @notice Ordered list of all ArraySummation contracts deployed through this factory
-    address[] public deployedContracts;
+    /// @notice Total credit per user (slot 0).
+    mapping(address => uint256) public credits;
 
-    /// @notice Quick membership check — true if an address was deployed by this factory
-    mapping(address => bool) public isDeployedContract;
+    NestedLedger public immutable ledger;
 
-    /// @notice Deployment metadata keyed by contract address
-    mapping(address => ContractInfo) public contractInfo;
-
-    /// @notice Metadata recorded at deployment time for each ArraySummation contract
-    struct ContractInfo {
-        /// @notice The AVS service manager address the contract was configured with
-        address avsAddress;
-        /// @notice The Schnorr stake registry the contract was configured with
-        address schnorrStakeRegistry;
-        /// @notice Number of elements in the contract's array
-        uint256 arraySize;
-        /// @notice Upper bound used for element generation
-        uint256 maxValue;
-        /// @notice Entropy seed used at deployment
-        uint256 seed;
-        /// @notice Zero-based index of this contract in `deployedContracts`
-        uint256 deploymentIndex;
-        /// @notice `block.timestamp` at the time of deployment
-        uint256 deploymentTimestamp;
+    constructor(address _avsAddress, address _schnorrStakeRegistry, NestedLedger _ledger) {
+        _setAvsAddress(_avsAddress);
+        _setSchnorrRegistry(_schnorrStakeRegistry);
+        ledger = _ledger;
     }
 
-    /// @notice Deploy a new ArraySummation contract
-    /// @param _avsAddress The AVS service manager address for the new contract
-    /// @param _schnorrStakeRegistry The Schnorr stake registry verifying aggregate operator quorums
-    /// @param _arraySize The size of the array to initialize
-    /// @param _maxValue The maximum value for array elements
-    /// @param _seed The seed for array initialization
-    /// @return contractAddress The address of the deployed contract
-    function deployArraySummation(
-        address _avsAddress,
-        address _schnorrStakeRegistry,
-        uint256 _arraySize,
-        uint256 _maxValue,
-        uint256 _seed
-    ) external returns (address contractAddress) {
-        require(_avsAddress != address(0), "Invalid AVS address");
-
-        // Deploy the new contract
-        ArraySummation newContract =
-            new ArraySummation(_avsAddress, _schnorrStakeRegistry, _arraySize, _maxValue, _seed);
-        contractAddress = address(newContract);
-
-        // Track the deployment
-        uint256 deploymentIndex = deployedContracts.length;
-        deployedContracts.push(contractAddress);
-        isDeployedContract[contractAddress] = true;
-
-        contractInfo[contractAddress] = ContractInfo({
-            avsAddress: _avsAddress,
-            schnorrStakeRegistry: _schnorrStakeRegistry,
-            arraySize: _arraySize,
-            maxValue: _maxValue,
-            seed: _seed,
-            deploymentIndex: deploymentIndex,
-            deploymentTimestamp: block.timestamp
-        });
-
-        emit ArraySummationDeployed(
-            contractAddress, _avsAddress, _schnorrStakeRegistry, _arraySize, _maxValue, _seed, deploymentIndex
-        );
-    }
-
-    /// @notice Return the total number of contracts deployed by this factory
-    /// @return count The number of deployed contracts
-    function getDeployedContractCount() external view returns (uint256 count) {
-        return deployedContracts.length;
-    }
-
-    /// @notice Return all contract addresses deployed by this factory
-    /// @return addresses Array of all deployed contract addresses
-    function getAllDeployedContracts() external view returns (address[] memory addresses) {
-        return deployedContracts;
-    }
-
-    /// @notice Return a slice of deployed contract addresses
-    /// @param _startIndex Starting index (inclusive)
-    /// @param _endIndex Ending index (exclusive)
-    /// @return addresses Array of contract addresses in the specified range
-    function getDeployedContractsRange(uint256 _startIndex, uint256 _endIndex)
-        external
-        view
-        returns (address[] memory addresses)
-    {
-        require(_startIndex < deployedContracts.length, "Start index out of bounds");
-        require(_endIndex <= deployedContracts.length, "End index out of bounds");
-        require(_startIndex < _endIndex, "Invalid range");
-
-        uint256 length = _endIndex - _startIndex;
-        addresses = new address[](length);
-
-        for (uint256 i = 0; i < length; ++i) {
-            addresses[i] = deployedContracts[_startIndex + i];
+    function credit(address user, uint256[] calldata weights) external trackState returns (uint256 amount) {
+        for (uint256 i = 0; i < weights.length; ++i) {
+            amount += weights[i] * (i + 1);
         }
-    }
-
-    /// @notice Return the deployment metadata for a specific contract
-    /// @param _contractAddress The address of the deployed contract
-    /// @return info The contract information
-    function getContractInfo(address _contractAddress) external view returns (ContractInfo memory info) {
-        require(isDeployedContract[_contractAddress], "Contract not deployed by factory");
-        return contractInfo[_contractAddress];
-    }
-
-    /// @notice Return all contracts deployed for a given AVS address
-    /// @param _avsAddress The AVS address to filter by
-    /// @return addresses Array of contract addresses deployed by the AVS
-    function getContractsByAVS(address _avsAddress) external view returns (address[] memory addresses) {
-        uint256 length = deployedContracts.length;
-        uint256 count = 0;
-
-        // First pass: count matching contracts
-        for (uint256 i = 0; i < length; ++i) {
-            if (contractInfo[deployedContracts[i]].avsAddress == _avsAddress) {
-                count++;
-            }
-        }
-
-        // Second pass: collect addresses
-        addresses = new address[](count);
-        uint256 index = 0;
-        for (uint256 i = 0; i < length; ++i) {
-            if (contractInfo[deployedContracts[i]].avsAddress == _avsAddress) {
-                addresses[index] = deployedContracts[i];
-                index++;
-            }
-        }
-    }
-
-    /// @notice Check whether a contract was deployed by this factory
-    /// @param _contractAddress The address to verify
-    /// @return deployed True if the contract was deployed by this factory
-    function isContractDeployedByFactory(address _contractAddress) external view returns (bool deployed) {
-        return isDeployedContract[_contractAddress];
+        credits[user] += amount;
+        ledger.record(user, amount);
+        emit Credited(user, amount);
     }
 }
