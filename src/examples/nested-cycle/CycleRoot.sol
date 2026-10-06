@@ -12,7 +12,6 @@ import {CycleRelay} from "./CycleRelay.sol";
 ///      that check never runs, so the example's test checks the same property with an
 ///      observer call inside the re-entered frame.
 contract CycleRoot is GasKillerSDK {
-    error RelayAlreadySet();
     error NotRelay();
     error UnexpectedCounter(uint256 counter, uint256 expected);
 
@@ -21,17 +20,11 @@ contract CycleRoot is GasKillerSDK {
     /// @notice The counter value `finish` last confirmed (slot 1).
     uint256 public settled;
 
-    CycleRelay public relay;
+    CycleRelay public immutable relay;
 
-    constructor(address _avsAddress, address _schnorrStakeRegistry) {
+    constructor(address _avsAddress, address _schnorrStakeRegistry, CycleRelay _relay) {
         _setAvsAddress(_avsAddress);
         _setSchnorrRegistry(_schnorrStakeRegistry);
-    }
-
-    /// @dev The relay needs this contract's address and this contract needs the relay's, so one
-    ///      side is wired after deployment.
-    function setRelay(CycleRelay _relay) external {
-        if (address(relay) != address(0)) revert RelayAlreadySet();
         relay = _relay;
     }
 

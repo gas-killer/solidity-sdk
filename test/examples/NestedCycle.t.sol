@@ -51,9 +51,9 @@ contract NestedCycleTest is Test {
         registry.registerOperator(px, py, 1, popS, popR);
         vm.roll(block.number + 10);
 
-        root = new CycleRoot(address(0xA75), address(registry));
-        relay = new CycleRelay(address(0xA75), address(registry), root);
-        root.setRelay(relay);
+        relay = new CycleRelay(address(0xA75), address(registry));
+        root = new CycleRoot(address(0xA75), address(registry), relay);
+        relay.setRoot(root);
         observer = new CycleObserver();
         expiryBlock = block.number + 50;
     }
