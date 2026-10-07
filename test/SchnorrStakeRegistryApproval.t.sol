@@ -7,11 +7,16 @@ import {ISchnorrApprovalRegistry, QuorumSignature} from "../src/interface/ISchno
 import {NestedFrames} from "../src/libraries/NestedFrames.sol";
 import {SchnorrSigner} from "./utils/SchnorrSigner.sol";
 import {MerkleBuilder} from "./utils/MerkleBuilder.sol";
+import {Bundler} from "./utils/Bundler.sol";
 
 /// @notice `verifyAndApprove` / `approvedRefBlock`: the per-transaction root approval that
 ///         nested frames read instead of re-verifying the quorum signature.
+/// @dev An approval only exists within the transaction that made it, so every test that reads
+///      one back approves and reads inside a single bundled call. The bundler also owns the
+///      registry, so an operator-set change can land between the two.
 contract SchnorrStakeRegistryApprovalTest is Test {
     SchnorrStakeRegistry registry;
+    Bundler bundler;
 
     uint256 constant OPERATOR_KEY = 0xA11CE5;
     uint256 constant LATE_OPERATOR_KEY = 0xB0B5;
@@ -23,7 +28,8 @@ contract SchnorrStakeRegistryApprovalTest is Test {
 
     function setUp() public {
         vm.roll(1000);
-        registry = new SchnorrStakeRegistry(2, 3, address(this), 0);
+        bundler = new Bundler();
+        registry = new SchnorrStakeRegistry(2, 3, address(bundler), 0);
         _register(OPERATOR_KEY, 1);
         vm.roll(block.number + 10);
 
@@ -42,8 +48,7 @@ contract SchnorrStakeRegistryApprovalTest is Test {
 
     function test_approveRecordsRefBlock() public {
         uint256 refBlock = block.number - 1;
-        registry.verifyAndApprove(root, ROOT_CONTRACT, expiryBlock, _expiryProof(), _sign(root, refBlock));
-        (bool approved, uint256 got) = registry.approvedRefBlock(root);
+        (bool approved, uint256 got) = _approveThenRead(_approveCall(_sign(root, refBlock)));
         assertTrue(approved);
         assertEq(got, refBlock);
     }
@@ -97,8 +102,7 @@ contract SchnorrStakeRegistryApprovalTest is Test {
 
     function test_approvalAtExpiryBlockSucceeds() public {
         vm.roll(expiryBlock);
-        registry.verifyAndApprove(root, ROOT_CONTRACT, expiryBlock, _expiryProof(), _sign(root, block.number - 1));
-        (bool approved,) = registry.approvedRefBlock(root);
+        (bool approved,) = _approveThenRead(_approveCall(_sign(root, block.number - 1)));
         assertTrue(approved);
     }
 
@@ -112,29 +116,39 @@ contract SchnorrStakeRegistryApprovalTest is Test {
     }
 
     function test_secondApprovalKeepsFirstRefBlock() public {
-        uint256 first = block.number - 1;
-        registry.verifyAndApprove(root, ROOT_CONTRACT, expiryBlock, _expiryProof(), _sign(root, first));
-        vm.roll(block.number + 5);
-        registry.verifyAndApprove(root, ROOT_CONTRACT, expiryBlock, _expiryProof(), _sign(root, block.number - 1));
-        (, uint256 got) = registry.approvedRefBlock(root);
+        uint256 first = block.number - 6;
+        Bundler.Call[] memory calls = new Bundler.Call[](3);
+        calls[0] = _approveCall(_sign(root, first));
+        calls[1] = _approveCall(_sign(root, block.number - 1));
+        calls[2] = _readCall();
+        (bytes[] memory results,) = bundler.run(calls);
+        (, uint256 got) = abi.decode(results[2], (bool, uint256));
         assertEq(got, first);
     }
 
     function test_secondApprovalStillChecksTheSignature() public {
-        registry.verifyAndApprove(root, ROOT_CONTRACT, expiryBlock, _expiryProof(), _sign(root, block.number - 1));
-        QuorumSignature memory bad = _sign(keccak256("other root"), block.number - 1);
-        bytes32[] memory proof = _expiryProof();
+        Bundler.Call[] memory calls = new Bundler.Call[](2);
+        calls[0] = _approveCall(_sign(root, block.number - 1));
+        calls[1] = _approveCall(_sign(keccak256("other root"), block.number - 1));
         vm.expectRevert(ISchnorrApprovalRegistry.InvalidApprovalSignature.selector);
-        registry.verifyAndApprove(root, ROOT_CONTRACT, expiryBlock, proof, bad);
+        bundler.run(calls);
     }
 
     function test_operatorSetMutationAfterApprovalFailsClosed() public {
-        registry.verifyAndApprove(root, ROOT_CONTRACT, expiryBlock, _expiryProof(), _sign(root, block.number - 1));
-        _register(LATE_OPERATOR_KEY, 1);
-        (bool approved,) = registry.approvedRefBlock(root);
-        assertFalse(approved);
+        Bundler.Call[] memory calls = new Bundler.Call[](4);
+        calls[0] = _approveCall(_sign(root, block.number - 1));
+        calls[1] = _readCall();
+        calls[2] = _registerCall(LATE_OPERATOR_KEY, 1);
+        calls[3] = _readCall();
+        (bytes[] memory results,) = bundler.run(calls);
+        (bool before,) = abi.decode(results[1], (bool, uint256));
+        (bool afterMutation,) = abi.decode(results[3], (bool, uint256));
+        assertTrue(before, "approved before the set changed");
+        assertFalse(afterMutation, "fails closed once the set changed");
     }
 
+    /// Each top-level call in an isolated test is its own transaction, so this pins that an
+    /// approval is gone once the transaction that made it ends.
     /// forge-config: default.isolate = true
     function test_approvalDoesNotSurviveTheTransaction() public {
         registry.verifyAndApprove(root, ROOT_CONTRACT, expiryBlock, _expiryProof(), _sign(root, block.number - 1));
@@ -143,18 +157,45 @@ contract SchnorrStakeRegistryApprovalTest is Test {
     }
 
     function test_gas_warmLookupIsCheap() public {
-        registry.verifyAndApprove(root, ROOT_CONTRACT, expiryBlock, _expiryProof(), _sign(root, block.number - 1));
-        uint256 before = gasleft();
-        registry.approvedRefBlock(root);
-        uint256 used = before - gasleft();
-        assertLt(used, 3_000, "warm approval lookup");
+        Bundler.Call[] memory calls = new Bundler.Call[](2);
+        calls[0] = _approveCall(_sign(root, block.number - 1));
+        calls[1] = _readCall();
+        (bytes[] memory results, uint256[] memory gasUsed) = bundler.run(calls);
+        (bool approved,) = abi.decode(results[1], (bool, uint256));
+        assertTrue(approved, "the lookup found the approval");
+        assertLt(gasUsed[1], 3_000, "warm approval lookup");
+    }
+
+    function _approveThenRead(Bundler.Call memory approve) private returns (bool, uint256) {
+        Bundler.Call[] memory calls = new Bundler.Call[](2);
+        calls[0] = approve;
+        calls[1] = _readCall();
+        (bytes[] memory results,) = bundler.run(calls);
+        return abi.decode(results[1], (bool, uint256));
+    }
+
+    function _approveCall(QuorumSignature memory sig) private view returns (Bundler.Call memory) {
+        return Bundler.Call(
+            address(registry),
+            abi.encodeCall(registry.verifyAndApprove, (root, ROOT_CONTRACT, expiryBlock, _expiryProof(), sig))
+        );
+    }
+
+    function _readCall() private view returns (Bundler.Call memory) {
+        return Bundler.Call(address(registry), abi.encodeCall(registry.approvedRefBlock, (root)));
     }
 
     function _register(uint256 key, uint256 weight) private {
+        Bundler.Call[] memory calls = new Bundler.Call[](1);
+        calls[0] = _registerCall(key, weight);
+        bundler.run(calls);
+    }
+
+    function _registerCall(uint256 key, uint256 weight) private returns (Bundler.Call memory) {
         (uint256 px, uint256 py) = SchnorrSigner.publicKey(key);
         (uint256 popS, address popR) =
             SchnorrSigner.sign(key, uint256(keccak256(abi.encode("pop", key))), registry.popMessage(_identity(key)));
-        registry.registerOperator(px, py, weight, popS, popR);
+        return Bundler.Call(address(registry), abi.encodeCall(registry.registerOperator, (px, py, weight, popS, popR)));
     }
 
     function _identity(uint256 key) private returns (address) {

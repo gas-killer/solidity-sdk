@@ -11,6 +11,7 @@ import {ISchnorrApprovalRegistry, QuorumSignature} from "../src/interface/ISchno
 import {NestedFrames} from "../src/libraries/NestedFrames.sol";
 import {SchnorrSigner} from "./utils/SchnorrSigner.sol";
 import {NestedTreeBuilder} from "./utils/NestedTreeBuilder.sol";
+import {Bundler} from "./utils/Bundler.sol";
 
 contract NestedNode is GasKillerSDK {
     constructor(address registry) {
@@ -42,11 +43,25 @@ contract ForwardingNode is NestedNode {
     }
 }
 
-/// Not an SDK contract: reports whatever pending child it is told to.
+/// Not an SDK contract: reports whatever pending child it is told to. Holding the public
+/// settlement signature, it approves the root itself, since an approval only exists within the
+/// transaction that makes it.
 contract AttackerParent {
     bytes32 public pendingChild;
 
-    function attack(address victim, bytes32 root, bytes32 leaf, bytes calldata witness) external {
+    struct Approval {
+        ISchnorrApprovalRegistry registry;
+        address rootContract;
+        uint256 expiryBlock;
+        bytes32[] expiryProof;
+        QuorumSignature sig;
+    }
+
+    function attack(Approval calldata approval, address victim, bytes32 root, bytes32 leaf, bytes calldata witness)
+        external
+    {
+        approval.registry
+            .verifyAndApprove(root, approval.rootContract, approval.expiryBlock, approval.expiryProof, approval.sig);
         pendingChild = leaf;
         IGasKillerNested(victim).applyNested(root, leaf, witness);
     }
@@ -84,6 +99,7 @@ contract GasKillerSDKNestedTest is Test {
     NestedNode b;
     NestedNode c;
     Probe probe;
+    Bundler bundler;
 
     uint256 constant OPERATOR_KEY = 0xA11CE5;
     bytes4 constant TASK = bytes4(keccak256("task()"));
@@ -105,6 +121,7 @@ contract GasKillerSDKNestedTest is Test {
         b = new NestedNode(address(registry));
         c = new NestedNode(address(registry));
         probe = new Probe();
+        bundler = new Bundler();
         expiryBlock = block.number + 50;
     }
 
@@ -211,9 +228,10 @@ contract GasKillerSDKNestedTest is Test {
 
     function test_directCallerOtherThanTheSignedParentFails() public {
         NestedTreeBuilder.Tree memory tree = _chainAB().build(expiryBlock);
-        _approve(tree, address(a));
+        bytes memory apply_ =
+            abi.encodeCall(IGasKillerNested.applyNested, (tree.root, tree.frameLeaves[1], tree.witnesses[1]));
         vm.expectPartialRevert(IGasKillerNested.LeafMismatch.selector);
-        b.applyNested(tree.root, tree.frameLeaves[1], tree.witnesses[1]);
+        _approveThenCall(tree, address(a), address(b), apply_);
     }
 
     function test_forwardingParentCannotBeMadeToApplyAFrameOutsideItsTree() public {
@@ -223,13 +241,12 @@ contract GasKillerSDKNestedTest is Test {
         frames[1] = _frame(address(b), address(f), 0, 0, _ops1(_store(SLOT_X, 2)));
         NestedTreeBuilder.Tree memory tree = frames.build(expiryBlock);
 
-        _approve(tree, address(f));
         bytes memory call =
             abi.encodeCall(IGasKillerNested.applyNested, (tree.root, tree.frameLeaves[1], tree.witnesses[1]));
         vm.expectRevert(
             abi.encodeWithSelector(IGasKillerNested.NotPendingChild.selector, address(f), tree.frameLeaves[1])
         );
-        f.forward(address(b), call);
+        _approveThenCall(tree, address(f), address(f), abi.encodeCall(ForwardingNode.forward, (address(b), call)));
         assertEq(b.stateTransitionCount(), 0);
     }
 
@@ -239,20 +256,18 @@ contract GasKillerSDKNestedTest is Test {
         frames[0] = _frame(address(a), address(0), 0, 0, _ops1(_nested(address(c), 0, 1)));
         frames[1] = _frame(address(c), address(attacker), 0, 0, _ops1(_store(SLOT_X, 66)));
         NestedTreeBuilder.Tree memory tree = frames.build(expiryBlock);
-        QuorumSignature memory sig = _sign(tree.root);
+        AttackerParent.Approval memory approval =
+            AttackerParent.Approval(registry, address(a), expiryBlock, tree.expiryProof, _sign(tree.root));
 
         uint256 snapshot = vm.snapshotState();
-        registry.verifyAndApprove(tree.root, address(a), expiryBlock, tree.expiryProof, sig);
-        attacker.attack(address(c), tree.root, tree.frameLeaves[1], tree.witnesses[1]);
+        attacker.attack(approval, address(c), tree.root, tree.frameLeaves[1], tree.witnesses[1]);
         assertEq(_load(c, SLOT_X), 66, "within expiry only the named frame applies");
         assertEq(a.stateTransitionCount(), 0);
 
         vm.revertToState(snapshot);
         vm.roll(expiryBlock + 1);
         vm.expectRevert(abi.encodeWithSelector(ISchnorrApprovalRegistry.ApprovalExpired.selector, expiryBlock));
-        registry.verifyAndApprove(tree.root, address(a), expiryBlock, tree.expiryProof, sig);
-        vm.expectRevert(abi.encodeWithSelector(IGasKillerNested.NotApproved.selector, tree.root));
-        attacker.attack(address(c), tree.root, tree.frameLeaves[1], tree.witnesses[1]);
+        attacker.attack(approval, address(c), tree.root, tree.frameLeaves[1], tree.witnesses[1]);
     }
 
     function test_unapprovedRootIsRejected() public {
@@ -445,8 +460,23 @@ contract GasKillerSDKNestedTest is Test {
         );
     }
 
-    function _approve(NestedTreeBuilder.Tree memory tree, address rootContract) private {
-        registry.verifyAndApprove(tree.root, rootContract, expiryBlock, tree.expiryProof, _sign(tree.root));
+    /// Approves `tree` and then calls `target`, in one transaction: the only way an approval and
+    /// a frame applied outside the tree's own settlement can meet.
+    function _approveThenCall(
+        NestedTreeBuilder.Tree memory tree,
+        address rootContract,
+        address target,
+        bytes memory data
+    ) private {
+        Bundler.Call[] memory calls = new Bundler.Call[](2);
+        calls[0] = Bundler.Call(
+            address(registry),
+            abi.encodeCall(
+                registry.verifyAndApprove, (tree.root, rootContract, expiryBlock, tree.expiryProof, _sign(tree.root))
+            )
+        );
+        calls[1] = Bundler.Call(target, data);
+        bundler.run(calls);
     }
 
     function _sign(bytes32 root) private returns (QuorumSignature memory) {
