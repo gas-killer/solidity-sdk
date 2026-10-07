@@ -9,6 +9,7 @@ import {IERC721Metadata} from "@openzeppelin/contracts/token/ERC721/extensions/I
 
 import {GasKillerSDK} from "../src/GasKillerSDK.sol";
 import {IGasKillerSDK} from "../src/interface/IGasKillerSDK.sol";
+import {IGasKillerNested} from "../src/interface/IGasKillerNested.sol";
 import {IGasKillerSDKBatch} from "../src/interface/IGasKillerSDKBatch.sol";
 
 /// A target that inherits the SDK and an OpenZeppelin module, resolving the clash the way
@@ -41,6 +42,7 @@ contract ERC165CompositionTest is Test {
 
         assertTrue(target.supportsInterface(type(IGasKillerSDK).interfaceId), "gas killer id");
         assertTrue(target.supportsInterface(type(IGasKillerSDKBatch).interfaceId), "batch id");
+        assertTrue(target.supportsInterface(type(IGasKillerNested).interfaceId), "nested id");
         assertTrue(target.supportsInterface(type(IERC721).interfaceId), "erc721 id");
         assertTrue(target.supportsInterface(type(IERC721Metadata).interfaceId), "erc721 metadata id");
         assertTrue(target.supportsInterface(type(IERC165).interfaceId), "erc165 id");
@@ -52,6 +54,7 @@ contract ERC165CompositionTest is Test {
 
         assertTrue(target.supportsInterface(type(IGasKillerSDK).interfaceId), "gas killer id");
         assertTrue(target.supportsInterface(type(IGasKillerSDKBatch).interfaceId), "batch id");
+        assertTrue(target.supportsInterface(type(IGasKillerNested).interfaceId), "nested id");
         assertTrue(target.supportsInterface(type(IERC721).interfaceId), "erc721 id");
         assertTrue(target.supportsInterface(type(IERC721Metadata).interfaceId), "erc721 metadata id");
         assertTrue(target.supportsInterface(type(IERC165).interfaceId), "erc165 id");

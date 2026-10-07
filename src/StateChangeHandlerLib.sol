@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.27;
+
+import {IGasKillerNested} from "./interface/IGasKillerNested.sol";
 
 /// @notice Discriminator enum for the type of state update operation to execute
 /// @dev Each variant maps to a different EVM operation: storage writes, external calls, log emissions, or contract deployment
@@ -21,13 +23,45 @@ enum StateUpdateType {
     /// @notice Deploy a contract using CREATE (nonce-derived address)
     CREATE,
     /// @notice Deploy a contract using CREATE2 (salt-derived deterministic address)
-    CREATE2
+    CREATE2,
+    /// @notice Apply an SDK-enabled callee's own signed frame of a nested tree
+    NESTED
+}
+
+/// @notice The tree a program runs inside, when it runs inside one.
+/// @dev `root` is zero for single-transition settlement, where `NESTED` ops are rejected.
+///      `children` holds one witness per `NESTED` op in program order; `consumed` counts the
+///      ones handed out so far.
+struct NestedContext {
+    bytes32 root;
+    bytes[] children;
+    uint256 consumed;
 }
 
 /// @title StateChangeHandlerLib
 /// @notice Library for decoding and executing batched state update operations
-/// @dev Processes ABI-encoded arrays of typed state updates; supports STORE, CALL, LOG0-LOG4, CREATE, and CREATE2
+/// @dev Processes ABI-encoded arrays of typed state updates; supports STORE, CALL, LOG0-LOG4, CREATE, CREATE2 and NESTED
 library StateChangeHandlerLib {
+    /// keccak256("gasKiller.pendingChild") - 1, following `StateTracker`'s slot convention.
+    bytes32 internal constant PENDING_CHILD_SLOT = 0x70b036af5917f7c22df33faec4b5fd311a27d9e8310987dea3cc060d66152963;
+
+    function _pendingChild() internal view returns (bytes32 leaf) {
+        assembly {
+            leaf := tload(PENDING_CHILD_SLOT)
+        }
+    }
+
+    function _setPendingChild(bytes32 leaf) private {
+        assembly {
+            tstore(PENDING_CHILD_SLOT, leaf)
+        }
+    }
+
+    function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args) internal {
+        NestedContext memory none;
+        _runStateUpdates(types, args, none);
+    }
+
     /// @notice Decodes and executes a series of state updates
     /// @dev This function processes an array of state updates, executing them in sequence. Each update can be one of:
     ///      - STORE: Direct storage writes using assembly
@@ -35,10 +69,12 @@ library StateChangeHandlerLib {
     ///      - LOG0-LOG4: Event emission with 0-4 indexed topics
     ///      - CREATE: Contract deployment via CREATE opcode
     ///      - CREATE2: Deterministic contract deployment via CREATE2 opcode
+    ///      - NESTED: Hand a callee its own signed frame of the tree in `ctx`
     /// @param types Array of StateUpdateType enums indicating the type of each state update operation
     /// @param args Array of ABI-encoded arguments corresponding to each operation type
+    /// @param ctx The tree this program runs inside; a zero root rejects every NESTED op
     /// @dev types and args arrays must be equal length, with args[i] containing the encoded parameters for types[i]
-    function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args) internal {
+    function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args, NestedContext memory ctx) internal {
         uint256 length = types.length;
         require(length == args.length, InvalidArguments());
         for (uint256 i = 0; i < length; ++i) {
@@ -139,7 +175,41 @@ library StateChangeHandlerLib {
                     deployed := create2(value, add(initcode, 0x20), mload(initcode), salt)
                 }
                 require(deployed != address(0), DeploymentFailed());
+            } else if (stateUpdateType == StateUpdateType.NESTED) {
+                _runNested(i, arg, ctx);
             }
+        }
+        if (ctx.consumed != ctx.children.length) revert UnconsumedWitnesses(ctx.children.length, ctx.consumed);
+    }
+
+    /// @dev The child checks `pendingChild()` on its caller before applying anything, which is
+    ///      what stops a frame from being applied anywhere but this op. The previous value is
+    ///      restored afterwards because a cycle can nest pending children on one contract.
+    function _runNested(uint256 i, bytes memory arg, NestedContext memory ctx) private {
+        if (ctx.root == bytes32(0)) revert NestedOutsideTree();
+        (address target, uint256 value, bytes32 childLeaf) = abi.decode(arg, (address, uint256, bytes32));
+        if (ctx.consumed >= ctx.children.length) revert MissingWitness(i);
+        bytes memory callargs =
+            abi.encodeCall(IGasKillerNested.applyNested, (ctx.root, childLeaf, ctx.children[ctx.consumed++]));
+
+        bytes32 previous = _pendingChild();
+        _setPendingChild(childLeaf);
+        bool success;
+        assembly {
+            success := call(gas(), target, value, add(callargs, 0x20), mload(callargs), 0, 0)
+        }
+        _setPendingChild(previous);
+
+        if (!success) {
+            uint256 size;
+            assembly {
+                size := returndatasize()
+            }
+            bytes memory revertData = new bytes(size);
+            assembly {
+                returndatacopy(add(revertData, 0x20), 0, size)
+            }
+            revert RevertingContext(i, target, revertData, callargs);
         }
     }
 
@@ -179,6 +249,16 @@ library StateChangeHandlerLib {
     /// @param revertData The raw revert data returned by the failed call
     /// @param callargs The calldata that was passed to the failed call
     error RevertingContext(uint256 index, address target, bytes revertData, bytes callargs);
+
+    /// @notice Thrown when a NESTED operation appears in a program settled outside a tree
+    error NestedOutsideTree();
+
+    /// @notice Thrown when a NESTED operation has no witness left to hand its child
+    /// @param index The zero-based position of the NESTED operation in the batch
+    error MissingWitness(uint256 index);
+
+    /// @notice Thrown when a program finishes with witnesses no NESTED operation consumed
+    error UnconsumedWitnesses(uint256 supplied, uint256 consumed);
 
     /// @notice Thrown when a CREATE or CREATE2 operation returns address(0)
     error DeploymentFailed();
