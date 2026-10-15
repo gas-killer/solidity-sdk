@@ -711,7 +711,8 @@ interface IGasKillerNested {
     /// @param root         the approved root.
     /// @param expectedLeaf the leaf hash the parent's signed program names.
     /// @param witness      `abi.encode(NestedFrames.Witness)` for this frame.
-    function applyNested(bytes32 root, bytes32 expectedLeaf, bytes calldata witness) external payable;
+    /// @return             `applyNested.selector`; the parent rejects any other return.
+    function applyNested(bytes32 root, bytes32 expectedLeaf, bytes calldata witness) external payable returns (bytes4);
 
     /// @notice The leaf of the child this contract is calling right now, or zero.
     function pendingChild() external view returns (bytes32);
@@ -901,6 +902,8 @@ library StateChangeHandlerLib {
     /// @dev The child checks `pendingChild()` on its caller before applying anything, which is
     ///      what stops a frame from being applied anywhere but this op. The previous value is
     ///      restored afterwards because a cycle can nest pending children on one contract.
+    ///      A call to an address without code, or to a permissive fallback, also succeeds, so
+    ///      success alone does not show the frame applied; the child must echo its selector.
     function _runNested(uint256 i, bytes memory arg, NestedContext memory ctx) private {
         if (ctx.root == bytes32(0)) revert NestedOutsideTree();
         (address target, uint256 value, bytes32 childLeaf) = abi.decode(arg, (address, uint256, bytes32));
@@ -911,8 +914,13 @@ library StateChangeHandlerLib {
         bytes32 previous = _pendingChild();
         _setPendingChild(childLeaf);
         bool success;
+        bytes32 ack;
         assembly {
             success := call(gas(), target, value, add(callargs, 0x20), mload(callargs), 0, 0)
+            if eq(returndatasize(), 0x20) {
+                returndatacopy(0, 0, 0x20)
+                ack := mload(0)
+            }
         }
         _setPendingChild(previous);
 
@@ -927,6 +935,7 @@ library StateChangeHandlerLib {
             }
             revert RevertingContext(i, target, revertData, callargs);
         }
+        if (ack != bytes32(IGasKillerNested.applyNested.selector)) revert NestedNotApplied(i, target);
     }
 
     /// @notice Validate that `arg` is a canonical, in-bounds ABI encoding of a LOG payload
@@ -972,6 +981,11 @@ library StateChangeHandlerLib {
     /// @notice Thrown when a NESTED operation has no witness left to hand its child
     /// @param index The zero-based position of the NESTED operation in the batch
     error MissingWitness(uint256 index);
+
+    /// @notice Thrown when a NESTED operation's call succeeds without the child acknowledging it
+    /// @param index The zero-based position of the NESTED operation in the batch
+    /// @param target The address the NESTED operation called
+    error NestedNotApplied(uint256 index, address target);
 
     /// @notice Thrown when a program finishes with witnesses no NESTED operation consumed
     error UnconsumedWitnesses(uint256 supplied, uint256 consumed);
@@ -1161,13 +1175,14 @@ abstract contract GasKillerSDK is
     ///      leaf as its pending child, which it does only while executing the `NESTED` op that
     ///      names it; without that, a parent that forwards arbitrary calls could be made to
     ///      apply the frame outside its tree.
-    function applyNested(bytes32 root, bytes32 expectedLeaf, bytes calldata witness) external payable {
+    function applyNested(bytes32 root, bytes32 expectedLeaf, bytes calldata witness) external payable returns (bytes4) {
         (bool approved, uint256 refBlock) = _approvalRegistry().approvedRefBlock(root);
         require(approved, NotApproved(root));
         require(refBlock + _getBlockStaleMeasure() >= block.number, StaleBlockNumber());
         bytes32 previous = _enterNested(root);
         _applyFrame(root, expectedLeaf, witness);
         _exitTransition(previous);
+        return IGasKillerNested.applyNested.selector;
     }
 
     /// @inheritdoc IGasKillerNested
