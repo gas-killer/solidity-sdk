@@ -1,6 +1,28 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.0 ^0.8.27;
 
+// src/examples/HashChain.sol
+
+/// @title HashChain
+/// @notice The deliberate per-call workload the nested examples use to make a frame worth
+///         nesting: the analyzer nests a callee only when its computation outweighs the
+///         per-frame overhead.
+library HashChain {
+    /// @dev Hashes in scratch space so memory stays constant: a struct-log trace records memory
+    ///      at every step, so a loop that allocates per round makes the trace grow quadratically
+    ///      and can exhaust the node serving it.
+    function extend(bytes32 seed, uint256 rounds) internal pure returns (bytes32 h) {
+        h = seed;
+        assembly ("memory-safe") {
+            for { let i := 0 } lt(i, rounds) { i := add(i, 1) } {
+                mstore(0x00, h)
+                mstore(0x20, i)
+                h := keccak256(0x00, 0x40)
+            }
+        }
+    }
+}
+
 // lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol
 
 // OpenZeppelin Contracts v4.4.1 (utils/introspection/IERC165.sol)
@@ -1325,10 +1347,13 @@ abstract contract GasKillerSDK is
 /// @notice The nested-cycle example: `start` calls the relay, which calls back `finish` on
 ///         this contract (A → B → A). Settled nested, this contract applies two frames of one
 ///         tree, the second re-entering while the first is still applying.
-/// @dev `finish` checks that it observes the intermediate state `start` left behind. On replay
+/// @dev `finish` chains a digest over every confirmed counter, which makes the re-entered frame
+///      expensive enough natively that the analyzer nests it, and the relay with it.
+///      `finish` checks that it observes the intermediate state `start` left behind. On replay
 ///      that check never runs, so the example's test checks the same property with an
 ///      observer call inside the re-entered frame.
 contract CycleRoot is GasKillerSDK {
+    error InvalidConfiguration();
     error NotRelay();
     error UnexpectedCounter(uint256 counter, uint256 expected);
 
@@ -1336,13 +1361,19 @@ contract CycleRoot is GasKillerSDK {
     uint256 public counter;
     /// @notice The counter value `finish` last confirmed (slot 1).
     uint256 public settled;
+    /// @notice Head of the hash chain over every confirmed counter (slot 2).
+    bytes32 public digest;
 
     CycleRelay public immutable relay;
+    /// @notice Hash rounds per confirmation.
+    uint256 public immutable rounds;
 
-    constructor(address _avsAddress, address _schnorrStakeRegistry, CycleRelay _relay) {
+    constructor(address _avsAddress, address _schnorrStakeRegistry, CycleRelay _relay, uint256 _rounds) {
+        if (_rounds == 0) revert InvalidConfiguration();
         _setAvsAddress(_avsAddress);
         _setSchnorrRegistry(_schnorrStakeRegistry);
         relay = _relay;
+        rounds = _rounds;
     }
 
     function start() external trackState {
@@ -1354,6 +1385,7 @@ contract CycleRoot is GasKillerSDK {
         if (msg.sender != address(relay)) revert NotRelay();
         if (counter != expected) revert UnexpectedCounter(counter, expected);
         settled = expected;
+        digest = HashChain.extend(keccak256(abi.encode(digest, expected)), rounds);
     }
 }
 

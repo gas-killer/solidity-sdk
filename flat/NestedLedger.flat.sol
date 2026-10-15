@@ -1,6 +1,28 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.0 ^0.8.27;
 
+// src/examples/HashChain.sol
+
+/// @title HashChain
+/// @notice The deliberate per-call workload the nested examples use to make a frame worth
+///         nesting: the analyzer nests a callee only when its computation outweighs the
+///         per-frame overhead.
+library HashChain {
+    /// @dev Hashes in scratch space so memory stays constant: a struct-log trace records memory
+    ///      at every step, so a loop that allocates per round makes the trace grow quadratically
+    ///      and can exhaust the node serving it.
+    function extend(bytes32 seed, uint256 rounds) internal pure returns (bytes32 h) {
+        h = seed;
+        assembly ("memory-safe") {
+            for { let i := 0 } lt(i, rounds) { i := add(i, 1) } {
+                mstore(0x00, h)
+                mstore(0x20, i)
+                h := keccak256(0x00, 0x40)
+            }
+        }
+    }
+}
+
 // lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol
 
 // OpenZeppelin Contracts v4.4.1 (utils/introspection/IERC165.sol)
@@ -1348,10 +1370,7 @@ contract NestedLedger is GasKillerSDK {
     }
 
     function record(address user, uint256 amount) external trackState {
-        bytes32 h = head;
-        for (uint256 i = 0; i < rounds; ++i) {
-            h = keccak256(abi.encode(h, user, amount, i));
-        }
+        bytes32 h = HashChain.extend(keccak256(abi.encode(head, user, amount)), rounds);
         head = h;
         entries += 1;
         emit Recorded(user, amount, h);
