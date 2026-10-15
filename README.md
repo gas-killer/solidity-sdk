@@ -177,8 +177,12 @@ Rules for a contract that may be nested:
   between signing and settlement reverts the whole tree, so a contract with heavy native traffic
   may be better left as a plain `CALL`.
 
-See `src/examples/nested-chain` (`NestedRouter` → `NestedVault` → `NestedLedger`) and
-`src/examples/nested-cycle` (`CycleRoot` → `CycleRelay` → `CycleRoot`).
+See `src/examples/nested-chain` (`NestedRouter` → `NestedVault` → `NestedLedger`),
+`src/examples/nested-cycle` (`CycleRoot` → `CycleRelay` → `CycleRoot`) and
+`src/examples/nested-deposit` (`DepositGateway` → `DepositVault`, a `NESTED` op that forwards
+ETH). Until the root leaf binds `msg.value` (#104), credit inbound ETH in a nested frame, whose
+leaf binds the value it receives, and keep the root from holding ETH at rest, as the deposit
+example does.
 
 ## Repository Structure
 
@@ -190,7 +194,7 @@ See `src/examples/nested-chain` (`NestedRouter` → `NestedVault` → `NestedLed
   - `TransitionGuard.sol` — EIP-1153 reentrancy / in-transition latch, keyed by the active nested root
   - `interface/` — `IGasKillerSDK`, `IGasKillerSDKBatch`, `IGasKillerNested`, `ISchnorrStakeRegistry`, `ISchnorrApprovalRegistry`, and the Alloy-compatible `IStateUpdateTypes`
   - `libraries/` — `Secp256k1` (affine point math), `SchnorrVerify` (constant-gas `ecrecover`-trick verify) and `NestedFrames` (nested-settlement leaves, tree membership and witnesses)
-- **`src/examples/`** — Demo apps: `ArraySummation`(`Factory`), `ReentrantCheckpoint`(`Factory`), and the nested-settlement `nested-chain` and `nested-cycle` examples
+- **`src/examples/`** — Demo apps: `ArraySummation`(`Factory`), `ReentrantCheckpoint`(`Factory`), and the nested-settlement `nested-chain`, `nested-cycle` and `nested-deposit` examples
 - **`script/`** — Deployment scripts
 - **`test/`** — Unit and integration tests
 
