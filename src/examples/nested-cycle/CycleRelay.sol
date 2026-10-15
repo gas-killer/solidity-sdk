@@ -9,13 +9,19 @@ import {CycleRoot} from "./CycleRoot.sol";
 ///         calls back into the root.
 contract CycleRelay is GasKillerSDK {
     error RootAlreadySet();
+    error NotDeployer();
 
     /// @notice The last value relayed (slot 0).
     uint256 public relayed;
 
     CycleRoot public root;
 
+    /// @dev `setRoot` is write-once, so an open setter would let anyone front-run the wiring
+    ///      and brick the relay.
+    address private immutable deployer;
+
     constructor(address _avsAddress, address _schnorrStakeRegistry) {
+        deployer = msg.sender;
         _setAvsAddress(_avsAddress);
         _setSchnorrRegistry(_schnorrStakeRegistry);
     }
@@ -23,6 +29,7 @@ contract CycleRelay is GasKillerSDK {
     /// @dev The root needs this contract's address and this contract needs the root's, so one
     ///      side is wired after deployment.
     function setRoot(CycleRoot _root) external {
+        if (msg.sender != deployer) revert NotDeployer();
         if (address(root) != address(0)) revert RootAlreadySet();
         root = _root;
     }

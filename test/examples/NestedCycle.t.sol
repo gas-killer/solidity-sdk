@@ -76,6 +76,17 @@ contract NestedCycleTest is Test {
         assertFalse(root.inTransition());
     }
 
+    function test_onlyDeployerWiresRoot() public {
+        CycleRelay fresh = new CycleRelay(address(0xA75), address(registry));
+        vm.prank(address(0xBAD));
+        vm.expectRevert(CycleRelay.NotDeployer.selector);
+        fresh.setRoot(root);
+
+        fresh.setRoot(root);
+        vm.expectRevert(CycleRelay.RootAlreadySet.selector);
+        fresh.setRoot(root);
+    }
+
     function test_reenteredFrameAppliedTooEarlyIsCaught() public {
         // Moving the root frame's final re-assertion of `settled` ahead of the NESTED call makes
         // the re-entered frame observe final state, which native execution never shows it.
