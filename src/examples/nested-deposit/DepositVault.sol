@@ -2,6 +2,7 @@
 pragma solidity ^0.8.27;
 
 import {GasKillerSDK} from "../../GasKillerSDK.sol";
+import {HashChain} from "../HashChain.sol";
 
 /// @title DepositVault
 /// @notice The callee of the nested-deposit example: credits the ETH its gateway forwards,
@@ -41,10 +42,7 @@ contract DepositVault is GasKillerSDK {
     function deposit(address account) external payable trackState {
         if (msg.sender != gateway) revert NotGateway();
         balances[account] += msg.value;
-        bytes32 h = receipt;
-        for (uint256 i = 0; i < receiptRounds; ++i) {
-            h = keccak256(abi.encode(h, account, msg.value, i));
-        }
+        bytes32 h = HashChain.extend(keccak256(abi.encode(receipt, account, msg.value)), receiptRounds);
         receipt = h;
         emit Deposited(account, msg.value, h);
     }

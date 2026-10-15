@@ -22,7 +22,7 @@ contract NestedChainTest is Test {
 
     bytes32 constant TRACKER_SLOT = 0xdebfdfd5a50ad117c10898d68b5ccf0893c6b40d4f443f902e2e7646601bdeaf;
     uint256 constant OPERATOR_KEY = 0xA11CE5;
-    uint256 constant ROUNDS = 300;
+    uint256 constant ROUNDS = 1000;
     uint256 constant WEIGHTS = 100;
 
     SchnorrStakeRegistry registry;

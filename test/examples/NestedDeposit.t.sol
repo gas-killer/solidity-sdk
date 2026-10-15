@@ -8,6 +8,7 @@ import {IGasKillerNested, TreeSubmission} from "../../src/interface/IGasKillerNe
 import {QuorumSignature} from "../../src/interface/ISchnorrApprovalRegistry.sol";
 import {DepositGateway} from "../../src/examples/nested-deposit/DepositGateway.sol";
 import {DepositVault} from "../../src/examples/nested-deposit/DepositVault.sol";
+import {HashChain} from "../../src/examples/HashChain.sol";
 import {SchnorrSigner} from "../utils/SchnorrSigner.sol";
 import {NestedTreeBuilder} from "../utils/NestedTreeBuilder.sol";
 
@@ -19,7 +20,7 @@ contract NestedDepositTest is Test {
     bytes32 constant TRACKER_SLOT = 0xdebfdfd5a50ad117c10898d68b5ccf0893c6b40d4f443f902e2e7646601bdeaf;
     uint256 constant OPERATOR_KEY = 0xA11CE5;
     uint256 constant DEPOSIT = 1 ether;
-    uint256 constant ROUNDS = 300;
+    uint256 constant ROUNDS = 1000;
 
     SchnorrStakeRegistry registry;
     DepositGateway gateway;
@@ -178,10 +179,8 @@ contract NestedDepositTest is Test {
         f.args = new bytes[](ops);
     }
 
-    function _receipt(uint256 amount) private view returns (bytes32 h) {
-        for (uint256 i = 0; i < ROUNDS; ++i) {
-            h = keccak256(abi.encode(h, account, amount, i));
-        }
+    function _receipt(uint256 amount) private view returns (bytes32) {
+        return HashChain.extend(keccak256(abi.encode(bytes32(0), account, amount)), ROUNDS);
     }
 
     function _op(NestedTreeBuilder.Frame memory f, uint256 i, StateUpdateType kind, bytes memory arg) private pure {

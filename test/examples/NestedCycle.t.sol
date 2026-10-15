@@ -8,6 +8,7 @@ import {TreeSubmission} from "../../src/interface/IGasKillerNested.sol";
 import {QuorumSignature} from "../../src/interface/ISchnorrApprovalRegistry.sol";
 import {CycleRoot} from "../../src/examples/nested-cycle/CycleRoot.sol";
 import {CycleRelay} from "../../src/examples/nested-cycle/CycleRelay.sol";
+import {HashChain} from "../../src/examples/HashChain.sol";
 import {SchnorrSigner} from "../utils/SchnorrSigner.sol";
 import {NestedTreeBuilder} from "../utils/NestedTreeBuilder.sol";
 
@@ -35,6 +36,7 @@ contract NestedCycleTest is Test {
 
     bytes32 constant TRACKER_SLOT = 0xdebfdfd5a50ad117c10898d68b5ccf0893c6b40d4f443f902e2e7646601bdeaf;
     uint256 constant OPERATOR_KEY = 0xA11CE5;
+    uint256 constant ROUNDS = 1000;
 
     SchnorrStakeRegistry registry;
     CycleRoot root;
@@ -52,7 +54,7 @@ contract NestedCycleTest is Test {
         vm.roll(block.number + 10);
 
         relay = new CycleRelay(address(0xA75), address(registry));
-        root = new CycleRoot(address(0xA75), address(registry), relay);
+        root = new CycleRoot(address(0xA75), address(registry), relay, ROUNDS);
         relay.setRoot(root);
         observer = new CycleObserver();
         expiryBlock = block.number + 50;
@@ -63,12 +65,14 @@ contract NestedCycleTest is Test {
         root.start();
         (uint256 counter, uint256 settled, uint256 relayed) = (root.counter(), root.settled(), relay.relayed());
         (uint256 rootCount, uint256 relayCount) = (root.stateTransitionCount(), relay.stateTransitionCount());
+        bytes32 digest = root.digest();
         vm.revertToState(snapshot);
 
         root.verifyAndUpdateTree(_submission(counter));
 
         assertEq(root.counter(), counter);
         assertEq(root.settled(), settled);
+        assertEq(root.digest(), digest);
         assertEq(relay.relayed(), relayed);
         assertEq(root.stateTransitionCount(), rootCount, "two root frames, two transitions");
         assertEq(relay.stateTransitionCount(), relayCount);
@@ -123,7 +127,7 @@ contract NestedCycleTest is Test {
     function _frames(uint256 n, bool settleEarly) private view returns (NestedTreeBuilder.Frame[] memory frames) {
         frames = new NestedTreeBuilder.Frame[](3);
 
-        frames[0] = _frame(address(root), address(0), 0, CycleRoot.start.selector, "", settleEarly ? 6 : 5);
+        frames[0] = _frame(address(root), address(0), 0, CycleRoot.start.selector, "", settleEarly ? 7 : 6);
         uint256 i;
         _op(frames[0], i++, StateUpdateType.STORE, abi.encode(TRACKER_SLOT, bytes32(uint256(1))));
         _op(frames[0], i++, StateUpdateType.STORE, abi.encode(bytes32(0), bytes32(n)));
@@ -131,13 +135,14 @@ contract NestedCycleTest is Test {
         _op(frames[0], i++, StateUpdateType.NESTED, abi.encode(address(relay), uint256(0), uint256(1)));
         _op(frames[0], i++, StateUpdateType.STORE, abi.encode(TRACKER_SLOT, bytes32(uint256(2))));
         _op(frames[0], i++, StateUpdateType.STORE, abi.encode(bytes32(uint256(1)), bytes32(n)));
+        _op(frames[0], i++, StateUpdateType.STORE, abi.encode(bytes32(uint256(2)), _digest(n)));
 
         frames[1] = _frame(address(relay), address(root), 0, bytes4(0), abi.encodeCall(CycleRelay.relay, (n)), 3);
         _op(frames[1], 0, StateUpdateType.STORE, abi.encode(TRACKER_SLOT, bytes32(uint256(1))));
         _op(frames[1], 1, StateUpdateType.STORE, abi.encode(bytes32(0), bytes32(n)));
         _op(frames[1], 2, StateUpdateType.NESTED, abi.encode(address(root), uint256(0), uint256(2)));
 
-        frames[2] = _frame(address(root), address(relay), 1, bytes4(0), abi.encodeCall(CycleRoot.finish, (n)), 3);
+        frames[2] = _frame(address(root), address(relay), 1, bytes4(0), abi.encodeCall(CycleRoot.finish, (n)), 4);
         _op(frames[2], 0, StateUpdateType.STORE, abi.encode(TRACKER_SLOT, bytes32(uint256(2))));
         _op(
             frames[2],
@@ -146,6 +151,11 @@ contract NestedCycleTest is Test {
             abi.encode(address(observer), uint256(0), abi.encodeCall(CycleObserver.check, (root, n)))
         );
         _op(frames[2], 2, StateUpdateType.STORE, abi.encode(bytes32(uint256(1)), bytes32(n)));
+        _op(frames[2], 3, StateUpdateType.STORE, abi.encode(bytes32(uint256(2)), _digest(n)));
+    }
+
+    function _digest(uint256 n) private pure returns (bytes32) {
+        return HashChain.extend(keccak256(abi.encode(bytes32(0), n)), ROUNDS);
     }
 
     function _toSubmission(NestedTreeBuilder.Tree memory tree) private returns (TreeSubmission memory) {

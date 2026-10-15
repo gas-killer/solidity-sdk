@@ -2,6 +2,7 @@
 pragma solidity ^0.8.27;
 
 import {GasKillerSDK} from "../../GasKillerSDK.sol";
+import {HashChain} from "../HashChain.sol";
 
 /// @title NestedLedger
 /// @notice The innermost contract of the nested-chain example (`NestedRouter` → `NestedVault`
@@ -30,10 +31,7 @@ contract NestedLedger is GasKillerSDK {
     }
 
     function record(address user, uint256 amount) external trackState {
-        bytes32 h = head;
-        for (uint256 i = 0; i < rounds; ++i) {
-            h = keccak256(abi.encode(h, user, amount, i));
-        }
+        bytes32 h = HashChain.extend(keccak256(abi.encode(head, user, amount)), rounds);
         head = h;
         entries += 1;
         emit Recorded(user, amount, h);
