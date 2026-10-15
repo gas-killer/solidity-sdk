@@ -41,13 +41,26 @@ contract RecordingChild {
         shouldRevert = v;
     }
 
-    function applyNested(bytes32 root, bytes32 expectedLeaf, bytes calldata witness) external payable {
+    function applyNested(bytes32 root, bytes32 expectedLeaf, bytes calldata witness) external payable returns (bytes4) {
         require(!shouldRevert, "child refused");
         seen.push(Seen(root, expectedLeaf, witness, msg.value, IGasKillerNested(msg.sender).pendingChild()));
+        return IGasKillerNested.applyNested.selector;
     }
 
     function count() external view returns (uint256) {
         return seen.length;
+    }
+}
+
+/// Not an SDK callee: accepts any call, as a proxy upgraded away from the SDK might.
+contract PermissiveFallback {
+    fallback() external payable {}
+}
+
+/// Returns a full word that is not the acknowledgement.
+contract WrongAck {
+    fallback(bytes calldata) external payable returns (bytes memory) {
+        return abi.encode(bytes32(uint256(1)));
     }
 }
 
@@ -136,6 +149,18 @@ contract StateChangeHandlerNestedTest is Test {
         assertEq(parent.pendingChild(), bytes32(0));
     }
 
+    function test_targetWithoutCodeIsNotTreatedAsApplied() public {
+        _expectNotApplied(address(0xC0DE));
+    }
+
+    function test_permissiveFallbackIsNotTreatedAsApplied() public {
+        _expectNotApplied(address(new PermissiveFallback()));
+    }
+
+    function test_wrongAcknowledgementIsNotTreatedAsApplied() public {
+        _expectNotApplied(address(new WrongAck()));
+    }
+
     function test_plainProgramsRunUnchanged() public {
         StateUpdateType[] memory types = new StateUpdateType[](1);
         bytes[] memory args = new bytes[](1);
@@ -161,6 +186,16 @@ contract StateChangeHandlerNestedTest is Test {
             types[i] = StateUpdateType.NESTED;
             args[i] = abi.encode(address(child), value, _leaf(i));
         }
+    }
+
+    function _expectNotApplied(address target) private {
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        bytes[] memory args = new bytes[](1);
+        types[0] = StateUpdateType.NESTED;
+        args[0] = abi.encode(target, uint256(0), _leaf(0));
+        bytes[] memory children = new bytes[](1);
+        vm.expectRevert(abi.encodeWithSelector(StateChangeHandlerLib.NestedNotApplied.selector, 0, target));
+        parent.runInTree(ROOT, types, args, children);
     }
 
     function _leaf(uint256 i) private pure returns (bytes32) {

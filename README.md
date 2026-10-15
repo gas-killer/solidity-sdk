@@ -153,7 +153,9 @@ natively.
 - **Frames apply in place.** Where the native call happened, the parent's program holds a
   `NESTED` op naming the child's leaf. The parent calls `applyNested` on the child with the
   child's program and proof, and the child checks the approval in its own registry, its leaf,
-  the proof, and that the parent reports this leaf as its pending child.
+  the proof, and that the parent reports this leaf as its pending child. The child returns the
+  `applyNested` selector, and the parent reverts with `NestedNotApplied` on any other return, so a
+  target with no code or a permissive fallback cannot silently skip its frame.
 - **What binds a frame.** A frame's leaf hashes its contract, caller, ETH value and transition
   index from the call itself. A frame applied by anyone but its signed parent, with any other
   value, or out of order fails. A frame cannot be applied after the signed expiry, whatever

@@ -45,7 +45,8 @@ interface IGasKillerNested {
     /// @param root         the approved root.
     /// @param expectedLeaf the leaf hash the parent's signed program names.
     /// @param witness      `abi.encode(NestedFrames.Witness)` for this frame.
-    function applyNested(bytes32 root, bytes32 expectedLeaf, bytes calldata witness) external payable;
+    /// @return             `applyNested.selector`; the parent rejects any other return.
+    function applyNested(bytes32 root, bytes32 expectedLeaf, bytes calldata witness) external payable returns (bytes4);
 
     /// @notice The leaf of the child this contract is calling right now, or zero.
     function pendingChild() external view returns (bytes32);

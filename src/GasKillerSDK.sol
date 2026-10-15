@@ -192,13 +192,14 @@ abstract contract GasKillerSDK is
     ///      leaf as its pending child, which it does only while executing the `NESTED` op that
     ///      names it; without that, a parent that forwards arbitrary calls could be made to
     ///      apply the frame outside its tree.
-    function applyNested(bytes32 root, bytes32 expectedLeaf, bytes calldata witness) external payable {
+    function applyNested(bytes32 root, bytes32 expectedLeaf, bytes calldata witness) external payable returns (bytes4) {
         (bool approved, uint256 refBlock) = _approvalRegistry().approvedRefBlock(root);
         require(approved, NotApproved(root));
         require(refBlock + _getBlockStaleMeasure() >= block.number, StaleBlockNumber());
         bytes32 previous = _enterNested(root);
         _applyFrame(root, expectedLeaf, witness);
         _exitTransition(previous);
+        return IGasKillerNested.applyNested.selector;
     }
 
     /// @inheritdoc IGasKillerNested
