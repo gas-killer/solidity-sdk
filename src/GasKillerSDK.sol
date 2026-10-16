@@ -3,12 +3,16 @@ pragma solidity ^0.8.27;
 
 import {ERC165} from "@openzeppelin/contracts/utils/introspection/ERC165.sol";
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+import {ERC165Checker} from "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
 import {IGasKillerSDK} from "./interface/IGasKillerSDK.sol";
 import {IGasKillerSDKBatch, TaskSubmission} from "./interface/IGasKillerSDKBatch.sol";
 import {StateTracker} from "./StateTracker.sol";
 import {TransitionGuard} from "./TransitionGuard.sol";
-import {StateChangeHandlerLib, StateUpdateType} from "./StateChangeHandlerLib.sol";
+import {StateChangeHandlerLib, StateUpdateType, NestedContext} from "./StateChangeHandlerLib.sol";
 import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
+import {ISchnorrApprovalRegistry} from "./interface/ISchnorrApprovalRegistry.sol";
+import {IGasKillerNested, TreeSubmission} from "./interface/IGasKillerNested.sol";
+import {NestedFrames} from "./libraries/NestedFrames.sol";
 
 /// @title GasKillerSDK
 /// @notice Base contract for Gas Killer targets. Authorises a state transition with a
@@ -27,7 +31,20 @@ import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
 ///
 ///      Both entrypoints are also `payable`, so a caller can fund value-bearing state
 ///      updates out of `msg.value` — see the per-function docs for the funding rules.
-abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKillerSDK, IGasKillerSDKBatch {
+///
+///      Nested settlement (`IGasKillerNested`) extends this down a client's call stack: one
+///      quorum signature over a Merkle root covers a frame per SDK-enabled contract, the root
+///      contract settles through `verifyAndUpdateTree`, and each callee applies its own frame
+///      through `applyNested`. Nested settlement needs the registry to implement
+///      `ISchnorrApprovalRegistry`; `verifyAndUpdate` and `verifyAndUpdateBatch` do not.
+abstract contract GasKillerSDK is
+    StateTracker,
+    TransitionGuard,
+    ERC165,
+    IGasKillerSDK,
+    IGasKillerSDKBatch,
+    IGasKillerNested
+{
     struct GasKillerSDKStorage {
         address avsAddress;
         ISchnorrStakeRegistry registry;
@@ -156,6 +173,84 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKil
         _stateChangeHandler(storageUpdates);
     }
 
+    /// @notice Settle a nested tree whose root frame belongs to this contract.
+    /// @dev The registry checks the signature and the signed expiry once and caches the
+    ///      approval for the rest of the transaction; every callee frame reads that approval
+    ///      instead of re-verifying. A tree always carries an expiry leaf, so its root can never
+    ///      equal a single-transition digest and the two settlement paths cannot replay each
+    ///      other's signatures. Payable on the same terms as `verifyAndUpdate`; value moved by
+    ///      `NESTED` ops comes out of this contract's balance just as a `CALL` op's does.
+    function verifyAndUpdateTree(TreeSubmission calldata submission) external payable {
+        _enterExclusive(submission.root);
+        _settleRoot(submission);
+        _exitTransition(bytes32(0));
+    }
+
+    /// @notice Apply this contract's frame of an approved tree.
+    /// @dev Contract, caller, value and transition index are taken from the call itself and
+    ///      hashed into the leaf, so a frame applied by anyone but its signed parent, with any
+    ///      other value, or out of order fails the leaf check. The parent must also report this
+    ///      leaf as its pending child, which it does only while executing the `NESTED` op that
+    ///      names it; without that, a parent that forwards arbitrary calls could be made to
+    ///      apply the frame outside its tree.
+    function applyNested(bytes32 root, bytes32 expectedLeaf, bytes calldata witness) external payable returns (bytes4) {
+        (bool approved, uint256 refBlock) = _approvalRegistry().approvedRefBlock(root);
+        require(approved, NotApproved(root));
+        require(refBlock + _getBlockStaleMeasure() >= block.number, StaleBlockNumber());
+        bytes32 previous = _enterNested(root);
+        _applyFrame(root, expectedLeaf, witness);
+        _exitTransition(previous);
+        return IGasKillerNested.applyNested.selector;
+    }
+
+    /// @inheritdoc IGasKillerNested
+    function pendingChild() external view returns (bytes32) {
+        return StateChangeHandlerLib._pendingChild();
+    }
+
+    function _settleRoot(TreeSubmission calldata submission) private trackState {
+        uint256 refBlock = submission.sig.refBlock;
+        require(refBlock < block.number, FutureBlockNumber());
+        require(refBlock + _getBlockStaleMeasure() >= block.number, StaleBlockNumber());
+        require(submission.transitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
+
+        bytes32 leaf = NestedFrames.rootLeaf(
+            submission.transitionIndex, address(this), submission.targetFunction, submission.storageUpdates
+        );
+        require(NestedFrames.isMemberCalldata(submission.proof, submission.root, leaf), NotTreeMember(leaf));
+
+        _approvalRegistry()
+            .verifyAndApprove(
+                submission.root, address(this), submission.expiryBlock, submission.expiryProof, submission.sig
+            );
+        _runProgram(submission.storageUpdates, NestedContext(submission.root, submission.children, 0));
+    }
+
+    function _applyFrame(bytes32 root, bytes32 expectedLeaf, bytes calldata encodedWitness) private trackState {
+        NestedFrames.Witness memory witness = NestedFrames.decodeWitness(encodedWitness);
+        bytes32 leaf = NestedFrames.nestedLeaf(
+            address(this),
+            stateTransitionCount() - 1,
+            msg.sender,
+            msg.value,
+            witness.calldataHash,
+            witness.storageUpdates
+        );
+        require(leaf == expectedLeaf, LeafMismatch(expectedLeaf, leaf));
+        require(IGasKillerNested(msg.sender).pendingChild() == leaf, NotPendingChild(msg.sender, leaf));
+        require(NestedFrames.isMember(witness.proof, root, leaf), NotTreeMember(leaf));
+        _runProgram(witness.storageUpdates, NestedContext(root, witness.children, 0));
+    }
+
+    function _runProgram(bytes memory storageUpdates, NestedContext memory ctx) private {
+        (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
+        StateChangeHandlerLib._runStateUpdates(types, args, ctx);
+    }
+
+    function _approvalRegistry() private view returns (ISchnorrApprovalRegistry) {
+        return ISchnorrApprovalRegistry(address(_sto().registry));
+    }
+
     function _verifyQuorum(
         bytes32 msgHash,
         uint256 s,
@@ -175,14 +270,25 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKil
     /// @notice Query if a contract implements an interface
     /// @dev Supports ERC-165, IGasKillerSDK detection (the router's preflight
     ///      probes the schnorr `verifyAndUpdate` selector before submitting), and the
-    ///      IGasKillerSDKBatch batching/latch extension. Defers to `super` so a
+    ///      IGasKillerSDKBatch batching/latch extension, plus IGasKillerNested while the registry
+    ///      supports nested settlement. Defers to `super` so a
     ///      contract inheriting both this SDK and another OpenZeppelin ERC-165 module reports
     ///      the union of both ID sets.
     /// @param interfaceId The interface identifier, as specified in ERC-165
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
     function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
+        if (interfaceId == type(IGasKillerNested).interfaceId) return _registrySupportsNesting();
         return interfaceId == type(IGasKillerSDK).interfaceId || interfaceId == type(IGasKillerSDKBatch).interfaceId
             || super.supportsInterface(interfaceId);
+    }
+
+    /// @dev Nested settlement reverts against a registry without `ISchnorrApprovalRegistry`, and
+    ///      the router plans trees from the nested ID alone, so the ID follows the registry. The
+    ///      unchecked probe returns false for a registry without ERC-165 rather than reverting.
+    function _registrySupportsNesting() private view returns (bool) {
+        return ERC165Checker.supportsERC165InterfaceUnchecked(
+            address(_sto().registry), type(ISchnorrApprovalRegistry).interfaceId
+        );
     }
 
     /// @notice Compute the expected message hash for a given transition, function, and storage updates

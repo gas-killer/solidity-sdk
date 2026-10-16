@@ -74,4 +74,14 @@ interface IStateUpdateTypes {
         /// @notice Fourth indexed topic
         bytes32 topic4;
     }
+
+    /// @notice Payload for a NESTED operation — apply a callee's own signed frame of the tree
+    struct Nested {
+        /// @notice The SDK-enabled callee whose frame this is
+        address target;
+        /// @notice ETH value (in wei) forwarded to the callee, as in the native call
+        uint256 value;
+        /// @notice The callee frame's leaf hash, signed as part of this program
+        bytes32 childLeaf;
+    }
 }
