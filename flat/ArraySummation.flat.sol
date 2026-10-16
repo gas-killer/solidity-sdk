@@ -110,229 +110,6 @@ interface ISchnorrStakeRegistry {
     ) external view returns (bool);
 }
 
-// lib/openzeppelin-contracts/contracts/utils/cryptography/MerkleProof.sol
-
-// OpenZeppelin Contracts (last updated v4.9.0) (utils/cryptography/MerkleProof.sol)
-
-/**
- * @dev These functions deal with verification of Merkle Tree proofs.
- *
- * The tree and the proofs can be generated using our
- * https://github.com/OpenZeppelin/merkle-tree[JavaScript library].
- * You will find a quickstart guide in the readme.
- *
- * WARNING: You should avoid using leaf values that are 64 bytes long prior to
- * hashing, or use a hash function other than keccak256 for hashing leaves.
- * This is because the concatenation of a sorted pair of internal nodes in
- * the merkle tree could be reinterpreted as a leaf value.
- * OpenZeppelin's JavaScript library generates merkle trees that are safe
- * against this attack out of the box.
- */
-library MerkleProof {
-    /**
-     * @dev Returns true if a `leaf` can be proved to be a part of a Merkle tree
-     * defined by `root`. For this, a `proof` must be provided, containing
-     * sibling hashes on the branch from the leaf to the root of the tree. Each
-     * pair of leaves and each pair of pre-images are assumed to be sorted.
-     */
-    function verify(bytes32[] memory proof, bytes32 root, bytes32 leaf) internal pure returns (bool) {
-        return processProof(proof, leaf) == root;
-    }
-
-    /**
-     * @dev Calldata version of {verify}
-     *
-     * _Available since v4.7._
-     */
-    function verifyCalldata(bytes32[] calldata proof, bytes32 root, bytes32 leaf) internal pure returns (bool) {
-        return processProofCalldata(proof, leaf) == root;
-    }
-
-    /**
-     * @dev Returns the rebuilt hash obtained by traversing a Merkle tree up
-     * from `leaf` using `proof`. A `proof` is valid if and only if the rebuilt
-     * hash matches the root of the tree. When processing the proof, the pairs
-     * of leafs & pre-images are assumed to be sorted.
-     *
-     * _Available since v4.4._
-     */
-    function processProof(bytes32[] memory proof, bytes32 leaf) internal pure returns (bytes32) {
-        bytes32 computedHash = leaf;
-        for (uint256 i = 0; i < proof.length; i++) {
-            computedHash = _hashPair(computedHash, proof[i]);
-        }
-        return computedHash;
-    }
-
-    /**
-     * @dev Calldata version of {processProof}
-     *
-     * _Available since v4.7._
-     */
-    function processProofCalldata(bytes32[] calldata proof, bytes32 leaf) internal pure returns (bytes32) {
-        bytes32 computedHash = leaf;
-        for (uint256 i = 0; i < proof.length; i++) {
-            computedHash = _hashPair(computedHash, proof[i]);
-        }
-        return computedHash;
-    }
-
-    /**
-     * @dev Returns true if the `leaves` can be simultaneously proven to be a part of a merkle tree defined by
-     * `root`, according to `proof` and `proofFlags` as described in {processMultiProof}.
-     *
-     * CAUTION: Not all merkle trees admit multiproofs. See {processMultiProof} for details.
-     *
-     * _Available since v4.7._
-     */
-    function multiProofVerify(
-        bytes32[] memory proof,
-        bool[] memory proofFlags,
-        bytes32 root,
-        bytes32[] memory leaves
-    ) internal pure returns (bool) {
-        return processMultiProof(proof, proofFlags, leaves) == root;
-    }
-
-    /**
-     * @dev Calldata version of {multiProofVerify}
-     *
-     * CAUTION: Not all merkle trees admit multiproofs. See {processMultiProof} for details.
-     *
-     * _Available since v4.7._
-     */
-    function multiProofVerifyCalldata(
-        bytes32[] calldata proof,
-        bool[] calldata proofFlags,
-        bytes32 root,
-        bytes32[] memory leaves
-    ) internal pure returns (bool) {
-        return processMultiProofCalldata(proof, proofFlags, leaves) == root;
-    }
-
-    /**
-     * @dev Returns the root of a tree reconstructed from `leaves` and sibling nodes in `proof`. The reconstruction
-     * proceeds by incrementally reconstructing all inner nodes by combining a leaf/inner node with either another
-     * leaf/inner node or a proof sibling node, depending on whether each `proofFlags` item is true or false
-     * respectively.
-     *
-     * CAUTION: Not all merkle trees admit multiproofs. To use multiproofs, it is sufficient to ensure that: 1) the tree
-     * is complete (but not necessarily perfect), 2) the leaves to be proven are in the opposite order they are in the
-     * tree (i.e., as seen from right to left starting at the deepest layer and continuing at the next layer).
-     *
-     * _Available since v4.7._
-     */
-    function processMultiProof(
-        bytes32[] memory proof,
-        bool[] memory proofFlags,
-        bytes32[] memory leaves
-    ) internal pure returns (bytes32 merkleRoot) {
-        // This function rebuilds the root hash by traversing the tree up from the leaves. The root is rebuilt by
-        // consuming and producing values on a queue. The queue starts with the `leaves` array, then goes onto the
-        // `hashes` array. At the end of the process, the last hash in the `hashes` array should contain the root of
-        // the merkle tree.
-        uint256 leavesLen = leaves.length;
-        uint256 totalHashes = proofFlags.length;
-
-        // Check proof validity.
-        require(leavesLen + proof.length - 1 == totalHashes, "MerkleProof: invalid multiproof");
-
-        // The xxxPos values are "pointers" to the next value to consume in each array. All accesses are done using
-        // `xxx[xxxPos++]`, which return the current value and increment the pointer, thus mimicking a queue's "pop".
-        bytes32[] memory hashes = new bytes32[](totalHashes);
-        uint256 leafPos = 0;
-        uint256 hashPos = 0;
-        uint256 proofPos = 0;
-        // At each step, we compute the next hash using two values:
-        // - a value from the "main queue". If not all leaves have been consumed, we get the next leaf, otherwise we
-        //   get the next hash.
-        // - depending on the flag, either another value from the "main queue" (merging branches) or an element from the
-        //   `proof` array.
-        for (uint256 i = 0; i < totalHashes; i++) {
-            bytes32 a = leafPos < leavesLen ? leaves[leafPos++] : hashes[hashPos++];
-            bytes32 b = proofFlags[i]
-                ? (leafPos < leavesLen ? leaves[leafPos++] : hashes[hashPos++])
-                : proof[proofPos++];
-            hashes[i] = _hashPair(a, b);
-        }
-
-        if (totalHashes > 0) {
-            unchecked {
-                return hashes[totalHashes - 1];
-            }
-        } else if (leavesLen > 0) {
-            return leaves[0];
-        } else {
-            return proof[0];
-        }
-    }
-
-    /**
-     * @dev Calldata version of {processMultiProof}.
-     *
-     * CAUTION: Not all merkle trees admit multiproofs. See {processMultiProof} for details.
-     *
-     * _Available since v4.7._
-     */
-    function processMultiProofCalldata(
-        bytes32[] calldata proof,
-        bool[] calldata proofFlags,
-        bytes32[] memory leaves
-    ) internal pure returns (bytes32 merkleRoot) {
-        // This function rebuilds the root hash by traversing the tree up from the leaves. The root is rebuilt by
-        // consuming and producing values on a queue. The queue starts with the `leaves` array, then goes onto the
-        // `hashes` array. At the end of the process, the last hash in the `hashes` array should contain the root of
-        // the merkle tree.
-        uint256 leavesLen = leaves.length;
-        uint256 totalHashes = proofFlags.length;
-
-        // Check proof validity.
-        require(leavesLen + proof.length - 1 == totalHashes, "MerkleProof: invalid multiproof");
-
-        // The xxxPos values are "pointers" to the next value to consume in each array. All accesses are done using
-        // `xxx[xxxPos++]`, which return the current value and increment the pointer, thus mimicking a queue's "pop".
-        bytes32[] memory hashes = new bytes32[](totalHashes);
-        uint256 leafPos = 0;
-        uint256 hashPos = 0;
-        uint256 proofPos = 0;
-        // At each step, we compute the next hash using two values:
-        // - a value from the "main queue". If not all leaves have been consumed, we get the next leaf, otherwise we
-        //   get the next hash.
-        // - depending on the flag, either another value from the "main queue" (merging branches) or an element from the
-        //   `proof` array.
-        for (uint256 i = 0; i < totalHashes; i++) {
-            bytes32 a = leafPos < leavesLen ? leaves[leafPos++] : hashes[hashPos++];
-            bytes32 b = proofFlags[i]
-                ? (leafPos < leavesLen ? leaves[leafPos++] : hashes[hashPos++])
-                : proof[proofPos++];
-            hashes[i] = _hashPair(a, b);
-        }
-
-        if (totalHashes > 0) {
-            unchecked {
-                return hashes[totalHashes - 1];
-            }
-        } else if (leavesLen > 0) {
-            return leaves[0];
-        } else {
-            return proof[0];
-        }
-    }
-
-    function _hashPair(bytes32 a, bytes32 b) private pure returns (bytes32) {
-        return a < b ? _efficientHash(a, b) : _efficientHash(b, a);
-    }
-
-    function _efficientHash(bytes32 a, bytes32 b) private pure returns (bytes32 value) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x00, a)
-            mstore(0x20, b)
-            value := keccak256(0x00, 0x40)
-        }
-    }
-}
-
 // src/StateTracker.sol
 
 /// @title StateTracker
@@ -484,130 +261,6 @@ abstract contract ERC165 is IERC165 {
     }
 }
 
-// lib/openzeppelin-contracts/contracts/utils/introspection/ERC165Checker.sol
-
-// OpenZeppelin Contracts (last updated v4.9.0) (utils/introspection/ERC165Checker.sol)
-
-/**
- * @dev Library used to query support of an interface declared via {IERC165}.
- *
- * Note that these functions return the actual result of the query: they do not
- * `revert` if an interface is not supported. It is up to the caller to decide
- * what to do in these cases.
- */
-library ERC165Checker {
-    // As per the EIP-165 spec, no interface should ever match 0xffffffff
-    bytes4 private constant _INTERFACE_ID_INVALID = 0xffffffff;
-
-    /**
-     * @dev Returns true if `account` supports the {IERC165} interface.
-     */
-    function supportsERC165(address account) internal view returns (bool) {
-        // Any contract that implements ERC165 must explicitly indicate support of
-        // InterfaceId_ERC165 and explicitly indicate non-support of InterfaceId_Invalid
-        return
-            supportsERC165InterfaceUnchecked(account, type(IERC165).interfaceId) &&
-            !supportsERC165InterfaceUnchecked(account, _INTERFACE_ID_INVALID);
-    }
-
-    /**
-     * @dev Returns true if `account` supports the interface defined by
-     * `interfaceId`. Support for {IERC165} itself is queried automatically.
-     *
-     * See {IERC165-supportsInterface}.
-     */
-    function supportsInterface(address account, bytes4 interfaceId) internal view returns (bool) {
-        // query support of both ERC165 as per the spec and support of _interfaceId
-        return supportsERC165(account) && supportsERC165InterfaceUnchecked(account, interfaceId);
-    }
-
-    /**
-     * @dev Returns a boolean array where each value corresponds to the
-     * interfaces passed in and whether they're supported or not. This allows
-     * you to batch check interfaces for a contract where your expectation
-     * is that some interfaces may not be supported.
-     *
-     * See {IERC165-supportsInterface}.
-     *
-     * _Available since v3.4._
-     */
-    function getSupportedInterfaces(
-        address account,
-        bytes4[] memory interfaceIds
-    ) internal view returns (bool[] memory) {
-        // an array of booleans corresponding to interfaceIds and whether they're supported or not
-        bool[] memory interfaceIdsSupported = new bool[](interfaceIds.length);
-
-        // query support of ERC165 itself
-        if (supportsERC165(account)) {
-            // query support of each interface in interfaceIds
-            for (uint256 i = 0; i < interfaceIds.length; i++) {
-                interfaceIdsSupported[i] = supportsERC165InterfaceUnchecked(account, interfaceIds[i]);
-            }
-        }
-
-        return interfaceIdsSupported;
-    }
-
-    /**
-     * @dev Returns true if `account` supports all the interfaces defined in
-     * `interfaceIds`. Support for {IERC165} itself is queried automatically.
-     *
-     * Batch-querying can lead to gas savings by skipping repeated checks for
-     * {IERC165} support.
-     *
-     * See {IERC165-supportsInterface}.
-     */
-    function supportsAllInterfaces(address account, bytes4[] memory interfaceIds) internal view returns (bool) {
-        // query support of ERC165 itself
-        if (!supportsERC165(account)) {
-            return false;
-        }
-
-        // query support of each interface in interfaceIds
-        for (uint256 i = 0; i < interfaceIds.length; i++) {
-            if (!supportsERC165InterfaceUnchecked(account, interfaceIds[i])) {
-                return false;
-            }
-        }
-
-        // all interfaces supported
-        return true;
-    }
-
-    /**
-     * @notice Query if a contract implements an interface, does not check ERC165 support
-     * @param account The address of the contract to query for support of an interface
-     * @param interfaceId The interface identifier, as specified in ERC-165
-     * @return true if the contract at account indicates support of the interface with
-     * identifier interfaceId, false otherwise
-     * @dev Assumes that account contains a contract that supports ERC165, otherwise
-     * the behavior of this method is undefined. This precondition can be checked
-     * with {supportsERC165}.
-     *
-     * Some precompiled contracts will falsely indicate support for a given interface, so caution
-     * should be exercised when using this function.
-     *
-     * Interface identification is specified in ERC-165.
-     */
-    function supportsERC165InterfaceUnchecked(address account, bytes4 interfaceId) internal view returns (bool) {
-        // prepare call
-        bytes memory encodedParams = abi.encodeWithSelector(IERC165.supportsInterface.selector, interfaceId);
-
-        // perform static call
-        bool success;
-        uint256 returnSize;
-        uint256 returnValue;
-        assembly {
-            success := staticcall(30000, account, add(encodedParams, 0x20), mload(encodedParams), 0x00, 0x20)
-            returnSize := returndatasize()
-            returnValue := mload(0x00)
-        }
-
-        return success && returnSize >= 0x20 && returnValue > 0;
-    }
-}
-
 // src/interface/IGasKillerSDK.sol
 
 /// @title IGasKillerSDK
@@ -701,96 +354,6 @@ interface ISchnorrApprovalRegistry is ISchnorrStakeRegistry {
     /// @dev Reports unapproved once an operator-set change has moved `effectiveBlock` past the
     ///      approved `refBlock`, so a mid-transaction mutation fails closed.
     function approvedRefBlock(bytes32 root) external view returns (bool approved, uint256 refBlock);
-}
-
-// src/libraries/NestedFrames.sol
-
-/// @title NestedFrames
-/// @notice Leaf hashing, tree membership and witness decoding for nested settlement, where
-///         one quorum signature over a Merkle root authorizes every frame of a call tree.
-/// @dev A tree's leaves are an expiry leaf followed by one leaf per frame in execution order.
-///      Internal nodes use OpenZeppelin's sorted-pair keccak. Every leaf is a sha256 digest
-///      computed here from typed fields, so callers never hand in a leaf hash and an internal
-///      node can never be presented as a leaf.
-///
-///      Three leaf types:
-///        - root leaf:   today's single-transition digest, unchanged, so a consumer settled
-///                       without nesting signs exactly what it signed before;
-///        - nested leaf: a callee frame, binding chain, contract, caller, value and index;
-///        - expiry leaf: the block after which neither the root nor any frame may settle.
-///      The nested and expiry tags are keccak-derived words in the first slot of their
-///      preimages, where the root leaf carries a transition index, so no preimage of one type
-///      can equal a preimage of another.
-library NestedFrames {
-    /// keccak256("gaskiller.nested.leaf.v1")
-    bytes32 internal constant NESTED_LEAF_TAG = 0x292ca629b989c44a85e556e7c24acc26f9ab093b2b23c689f951e91718228c18;
-    /// keccak256("gaskiller.nested.expiry.v1")
-    bytes32 internal constant EXPIRY_LEAF_TAG = 0xc5763e3656f5ee85e7416218ca476fe6364ba9f67d13b29c7331d1d1131dd88a;
-
-    /// @notice The only frame mode this build accepts: transition-counter pinning.
-    /// @dev Compiled in, never read from a witness, so a contract built before a new mode
-    ///      cannot be made to accept leaves signed for it.
-    uint8 internal constant MODE = 0;
-
-    /// @notice The unsigned data a parent passes to a child alongside the child's leaf hash.
-    /// @dev `children` are opaque `abi.encode(Witness)` blobs because the ABI cannot express a
-    ///      recursive struct. Everything here is authenticated through the leaf and the proof;
-    ///      `calldataHash` is recorded for fraud proofs and re-derived by nothing on-chain.
-    struct Witness {
-        bytes32 calldataHash;
-        bytes storageUpdates;
-        bytes32[] proof;
-        bytes[] children;
-    }
-
-    function rootLeaf(uint256 transitionIndex, address target, bytes4 targetFunction, bytes memory storageUpdates)
-        internal
-        pure
-        returns (bytes32)
-    {
-        return sha256(abi.encode(transitionIndex, target, targetFunction, storageUpdates));
-    }
-
-    function nestedLeaf(
-        address target,
-        uint256 transitionIndex,
-        address caller,
-        uint256 value,
-        bytes32 calldataHash,
-        bytes memory storageUpdates
-    ) internal view returns (bytes32) {
-        return sha256(
-            abi.encode(
-                NESTED_LEAF_TAG,
-                block.chainid,
-                target,
-                transitionIndex,
-                caller,
-                value,
-                calldataHash,
-                MODE,
-                storageUpdates
-            )
-        );
-    }
-
-    function expiryLeaf(address rootContract, uint256 expiryBlock) internal view returns (bytes32) {
-        return sha256(abi.encode(EXPIRY_LEAF_TAG, block.chainid, rootContract, expiryBlock));
-    }
-
-    function isMember(bytes32[] memory proof, bytes32 root, bytes32 leaf) internal pure returns (bool) {
-        return MerkleProof.verify(proof, root, leaf);
-    }
-
-    function isMemberCalldata(bytes32[] calldata proof, bytes32 root, bytes32 leaf) internal pure returns (bool) {
-        return MerkleProof.verifyCalldata(proof, root, leaf);
-    }
-
-    /// @dev `abi.decode` bounds-checks every offset and length, so a malformed witness reverts
-    ///      rather than decoding garbage.
-    function decodeWitness(bytes memory encoded) internal pure returns (Witness memory) {
-        return abi.decode(encoded, (Witness));
-    }
 }
 
 // src/interface/IGasKillerNested.sol
@@ -900,9 +463,16 @@ library StateChangeHandlerLib {
         }
     }
 
+    /// @dev Runs a program outside any tree, rejecting every NESTED op. Dispatching NESTED
+    ///      through a function pointer keeps `_runNested` out of consumers that never nest.
     function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args) internal {
         NestedContext memory none;
-        _runStateUpdates(types, args, none);
+        _run(types, args, none, _rejectNested);
+    }
+
+    /// @dev Runs a program inside the tree in `ctx`.
+    function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args, NestedContext memory ctx) internal {
+        _run(types, args, ctx, _runNested);
     }
 
     /// @notice Decodes and executes a series of state updates
@@ -916,8 +486,14 @@ library StateChangeHandlerLib {
     /// @param types Array of StateUpdateType enums indicating the type of each state update operation
     /// @param args Array of ABI-encoded arguments corresponding to each operation type
     /// @param ctx The tree this program runs inside; a zero root rejects every NESTED op
+    /// @param nested The NESTED handler: `_runNested` inside a tree, `_rejectNested` outside one
     /// @dev types and args arrays must be equal length, with args[i] containing the encoded parameters for types[i]
-    function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args, NestedContext memory ctx) internal {
+    function _run(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        NestedContext memory ctx,
+        function(uint256, bytes memory, NestedContext memory) nested
+    ) private {
         uint256 length = types.length;
         require(length == args.length, InvalidArguments());
         for (uint256 i = 0; i < length; ++i) {
@@ -1019,10 +595,14 @@ library StateChangeHandlerLib {
                 }
                 require(deployed != address(0), DeploymentFailed());
             } else if (stateUpdateType == StateUpdateType.NESTED) {
-                _runNested(i, arg, ctx);
+                nested(i, arg, ctx);
             }
         }
         if (ctx.consumed != ctx.children.length) revert UnconsumedWitnesses(ctx.children.length, ctx.consumed);
+    }
+
+    function _rejectNested(uint256, bytes memory, NestedContext memory) private pure {
+        revert NestedOutsideTree();
     }
 
     /// @dev The child checks `pendingChild()` on its caller before applying anything, which is
@@ -1140,19 +720,9 @@ library StateChangeHandlerLib {
 ///      Both entrypoints are also `payable`, so a caller can fund value-bearing state
 ///      updates out of `msg.value` — see the per-function docs for the funding rules.
 ///
-///      Nested settlement (`IGasKillerNested`) extends this down a client's call stack: one
-///      quorum signature over a Merkle root covers a frame per SDK-enabled contract, the root
-///      contract settles through `verifyAndUpdateTree`, and each callee applies its own frame
-///      through `applyNested`. Nested settlement needs the registry to implement
-///      `ISchnorrApprovalRegistry`; `verifyAndUpdate` and `verifyAndUpdateBatch` do not.
-abstract contract GasKillerSDK is
-    StateTracker,
-    TransitionGuard,
-    ERC165,
-    IGasKillerSDK,
-    IGasKillerSDKBatch,
-    IGasKillerNested
-{
+///      Nested settlement is opt-in through `GasKillerNestedSDK`, so a consumer that never
+///      nests does not carry its bytecode; a `NESTED` op settled here reverts.
+abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKillerSDK, IGasKillerSDKBatch {
     struct GasKillerSDKStorage {
         address avsAddress;
         ISchnorrStakeRegistry registry;
@@ -1281,84 +851,6 @@ abstract contract GasKillerSDK is
         _stateChangeHandler(storageUpdates);
     }
 
-    /// @notice Settle a nested tree whose root frame belongs to this contract.
-    /// @dev The registry checks the signature and the signed expiry once and caches the
-    ///      approval for the rest of the transaction; every callee frame reads that approval
-    ///      instead of re-verifying. A tree always carries an expiry leaf, so its root can never
-    ///      equal a single-transition digest and the two settlement paths cannot replay each
-    ///      other's signatures. Payable on the same terms as `verifyAndUpdate`; value moved by
-    ///      `NESTED` ops comes out of this contract's balance just as a `CALL` op's does.
-    function verifyAndUpdateTree(TreeSubmission calldata submission) external payable {
-        _enterExclusive(submission.root);
-        _settleRoot(submission);
-        _exitTransition(bytes32(0));
-    }
-
-    /// @notice Apply this contract's frame of an approved tree.
-    /// @dev Contract, caller, value and transition index are taken from the call itself and
-    ///      hashed into the leaf, so a frame applied by anyone but its signed parent, with any
-    ///      other value, or out of order fails the leaf check. The parent must also report this
-    ///      leaf as its pending child, which it does only while executing the `NESTED` op that
-    ///      names it; without that, a parent that forwards arbitrary calls could be made to
-    ///      apply the frame outside its tree.
-    function applyNested(bytes32 root, bytes32 expectedLeaf, bytes calldata witness) external payable returns (bytes4) {
-        (bool approved, uint256 refBlock) = _approvalRegistry().approvedRefBlock(root);
-        require(approved, NotApproved(root));
-        require(refBlock + _getBlockStaleMeasure() >= block.number, StaleBlockNumber());
-        bytes32 previous = _enterNested(root);
-        _applyFrame(root, expectedLeaf, witness);
-        _exitTransition(previous);
-        return IGasKillerNested.applyNested.selector;
-    }
-
-    /// @inheritdoc IGasKillerNested
-    function pendingChild() external view returns (bytes32) {
-        return StateChangeHandlerLib._pendingChild();
-    }
-
-    function _settleRoot(TreeSubmission calldata submission) private trackState {
-        uint256 refBlock = submission.sig.refBlock;
-        require(refBlock < block.number, FutureBlockNumber());
-        require(refBlock + _getBlockStaleMeasure() >= block.number, StaleBlockNumber());
-        require(submission.transitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
-
-        bytes32 leaf = NestedFrames.rootLeaf(
-            submission.transitionIndex, address(this), submission.targetFunction, submission.storageUpdates
-        );
-        require(NestedFrames.isMemberCalldata(submission.proof, submission.root, leaf), NotTreeMember(leaf));
-
-        _approvalRegistry()
-            .verifyAndApprove(
-                submission.root, address(this), submission.expiryBlock, submission.expiryProof, submission.sig
-            );
-        _runProgram(submission.storageUpdates, NestedContext(submission.root, submission.children, 0));
-    }
-
-    function _applyFrame(bytes32 root, bytes32 expectedLeaf, bytes calldata encodedWitness) private trackState {
-        NestedFrames.Witness memory witness = NestedFrames.decodeWitness(encodedWitness);
-        bytes32 leaf = NestedFrames.nestedLeaf(
-            address(this),
-            stateTransitionCount() - 1,
-            msg.sender,
-            msg.value,
-            witness.calldataHash,
-            witness.storageUpdates
-        );
-        require(leaf == expectedLeaf, LeafMismatch(expectedLeaf, leaf));
-        require(IGasKillerNested(msg.sender).pendingChild() == leaf, NotPendingChild(msg.sender, leaf));
-        require(NestedFrames.isMember(witness.proof, root, leaf), NotTreeMember(leaf));
-        _runProgram(witness.storageUpdates, NestedContext(root, witness.children, 0));
-    }
-
-    function _runProgram(bytes memory storageUpdates, NestedContext memory ctx) private {
-        (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        StateChangeHandlerLib._runStateUpdates(types, args, ctx);
-    }
-
-    function _approvalRegistry() private view returns (ISchnorrApprovalRegistry) {
-        return ISchnorrApprovalRegistry(address(_sto().registry));
-    }
-
     function _verifyQuorum(
         bytes32 msgHash,
         uint256 s,
@@ -1366,7 +858,7 @@ abstract contract GasKillerSDK is
         address[] calldata nonSigners,
         uint32 referenceBlockNumber
     ) private view {
-        bool ok = _sto().registry.isValidSignature(msgHash, s, Raddr, nonSigners, referenceBlockNumber);
+        bool ok = _schnorrRegistry().isValidSignature(msgHash, s, Raddr, nonSigners, referenceBlockNumber);
         require(ok, InvalidQuorumSignature());
     }
 
@@ -1378,25 +870,14 @@ abstract contract GasKillerSDK is
     /// @notice Query if a contract implements an interface
     /// @dev Supports ERC-165, IGasKillerSDK detection (the router's preflight
     ///      probes the schnorr `verifyAndUpdate` selector before submitting), and the
-    ///      IGasKillerSDKBatch batching/latch extension, plus IGasKillerNested while the registry
-    ///      supports nested settlement. Defers to `super` so a
+    ///      IGasKillerSDKBatch batching/latch extension. Defers to `super` so a
     ///      contract inheriting both this SDK and another OpenZeppelin ERC-165 module reports
     ///      the union of both ID sets.
     /// @param interfaceId The interface identifier, as specified in ERC-165
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
     function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
-        if (interfaceId == type(IGasKillerNested).interfaceId) return _registrySupportsNesting();
         return interfaceId == type(IGasKillerSDK).interfaceId || interfaceId == type(IGasKillerSDKBatch).interfaceId
             || super.supportsInterface(interfaceId);
-    }
-
-    /// @dev Nested settlement reverts against a registry without `ISchnorrApprovalRegistry`, and
-    ///      the router plans trees from the nested ID alone, so the ID follows the registry. The
-    ///      unchecked probe returns false for a registry without ERC-165 rather than reverting.
-    function _registrySupportsNesting() private view returns (bool) {
-        return ERC165Checker.supportsERC165InterfaceUnchecked(
-            address(_sto().registry), type(ISchnorrApprovalRegistry).interfaceId
-        );
     }
 
     /// @notice Compute the expected message hash for a given transition, function, and storage updates
@@ -1420,7 +901,7 @@ abstract contract GasKillerSDK is
     }
 
     function schnorrRegistry() external view returns (address) {
-        return address(_sto().registry);
+        return address(_schnorrRegistry());
     }
 
     function avsAddress() external view returns (address) {
@@ -1437,6 +918,10 @@ abstract contract GasKillerSDK is
 
     function _setSchnorrRegistry(address _registry) internal {
         _sto().registry = ISchnorrStakeRegistry(_registry);
+    }
+
+    function _schnorrRegistry() internal view returns (ISchnorrStakeRegistry) {
+        return _sto().registry;
     }
 
     function _setBlockStaleMeasure(uint256 _blockStaleMeasure) internal {
