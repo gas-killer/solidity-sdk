@@ -3,6 +3,7 @@ pragma solidity ^0.8.29;
 
 import {Test, Vm} from "forge-std/Test.sol";
 import {GasKillerSDK} from "../src/GasKillerSDK.sol";
+import {GasKillerNestedSDK} from "../src/GasKillerNestedSDK.sol";
 import {SchnorrStakeRegistry} from "../src/SchnorrStakeRegistry.sol";
 import {StateChangeHandlerLib, StateUpdateType} from "../src/StateChangeHandlerLib.sol";
 import {TransitionGuard} from "../src/TransitionGuard.sol";
@@ -13,7 +14,7 @@ import {SchnorrSigner} from "./utils/SchnorrSigner.sol";
 import {NestedTreeBuilder} from "./utils/NestedTreeBuilder.sol";
 import {Bundler} from "./utils/Bundler.sol";
 
-contract NestedNode is GasKillerSDK {
+contract NestedNode is GasKillerNestedSDK {
     constructor(address registry) {
         _setSchnorrRegistry(registry);
         _setAvsAddress(address(0xA75));

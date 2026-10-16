@@ -651,7 +651,31 @@ contract GasKillerSDKHardeningTest is Test {
         // A change here is an interface break for every already-deployed router.
         assertEq(type(IGasKillerSDK).interfaceId, bytes4(0x82b35a01), "core id must not drift");
         assertEq(type(IGasKillerSDKBatch).interfaceId, bytes4(0x2ea5ee1d), "batch id must not drift");
-        assertFalse(sdk.supportsInterface(type(IGasKillerNested).interfaceId), "mock registry cannot approve trees");
+        assertFalse(sdk.supportsInterface(type(IGasKillerNested).interfaceId), "nested is opt-in");
         assertEq(type(IGasKillerNested).interfaceId, bytes4(0x78481874), "nested id must not drift");
+    }
+
+    /// A base consumer has no nested entrypoints, and a NESTED op in a flat program reverts.
+    function test_baseConsumer_rejectsNestedOp() public {
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        types[0] = StateUpdateType.NESTED;
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encode(address(sdk), uint256(0), bytes32(uint256(1)));
+        TaskSubmission memory sub = _submission(0, abi.encode(types, args));
+
+        vm.expectRevert(StateChangeHandlerLib.NestedOutsideTree.selector);
+        sdk.verifyAndUpdate(
+            sub.msgHash,
+            sub.referenceBlockNumber,
+            sub.storageUpdates,
+            sub.transitionIndex,
+            sub.targetFunction,
+            sub.s,
+            sub.Raddr,
+            sub.nonSigners
+        );
+
+        (bool ok,) = address(sdk).call(abi.encodeCall(IGasKillerNested.pendingChild, ()));
+        assertFalse(ok, "no nested entrypoints");
     }
 }

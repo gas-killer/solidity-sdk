@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.27;
 
-import {GasKillerSDK} from "../../GasKillerSDK.sol";
+import {GasKillerNestedSDK} from "../../GasKillerNestedSDK.sol";
 import {CycleRoot} from "./CycleRoot.sol";
 
 /// @title CycleRelay
 /// @notice The middle contract of the nested-cycle example: records the value it was handed and
 ///         calls back into the root.
-contract CycleRelay is GasKillerSDK {
+contract CycleRelay is GasKillerNestedSDK {
     error RootAlreadySet();
     error NotDeployer();
 

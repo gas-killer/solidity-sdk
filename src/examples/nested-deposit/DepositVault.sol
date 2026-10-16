@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.27;
 
-import {GasKillerSDK} from "../../GasKillerSDK.sol";
+import {GasKillerNestedSDK} from "../../GasKillerNestedSDK.sol";
 import {HashChain} from "../HashChain.sol";
 
 /// @title DepositVault
@@ -13,7 +13,7 @@ import {HashChain} from "../HashChain.sol";
 ///      would be credited for any `msg.value` (gas-killer/solidity-sdk#104); reached only
 ///      through the gateway, it is either a nested frame, whose leaf binds the value, or a
 ///      native call carrying real ETH.
-contract DepositVault is GasKillerSDK {
+contract DepositVault is GasKillerNestedSDK {
     error InvalidConfiguration();
     error NotGateway();
     error InsufficientBalance(uint256 balance, uint256 amount);

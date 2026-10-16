@@ -9,6 +9,7 @@ import {IERC721Metadata} from "@openzeppelin/contracts/token/ERC721/extensions/I
 
 import {GasKillerSDK} from "../src/GasKillerSDK.sol";
 import {SchnorrStakeRegistry} from "../src/SchnorrStakeRegistry.sol";
+import {GasKillerNestedSDK} from "../src/GasKillerNestedSDK.sol";
 import {IGasKillerSDK} from "../src/interface/IGasKillerSDK.sol";
 import {IGasKillerNested} from "../src/interface/IGasKillerNested.sol";
 import {IGasKillerSDKBatch} from "../src/interface/IGasKillerSDKBatch.sol";
@@ -37,6 +38,16 @@ contract Erc721FirstNft is ERC721, GasKillerSDK {
     }
 }
 
+contract NestedNft is GasKillerNestedSDK, ERC721 {
+    constructor(address registry) ERC721("Nested", "NS") {
+        _setSchnorrRegistry(registry);
+    }
+
+    function supportsInterface(bytes4 interfaceId) public view override(GasKillerNestedSDK, ERC721) returns (bool) {
+        return super.supportsInterface(interfaceId);
+    }
+}
+
 /// The router gates every submission on an ERC-165 probe, so an SDK interface ID that a
 /// target fails to report is indistinguishable from a target that does not implement the
 /// SDK at all: the round is rejected before any signature is checked. A target composing
@@ -49,7 +60,7 @@ contract ERC165CompositionTest is Test {
 
         assertTrue(target.supportsInterface(type(IGasKillerSDK).interfaceId), "gas killer id");
         assertTrue(target.supportsInterface(type(IGasKillerSDKBatch).interfaceId), "batch id");
-        assertTrue(target.supportsInterface(type(IGasKillerNested).interfaceId), "nested id");
+        assertFalse(target.supportsInterface(type(IGasKillerNested).interfaceId), "nested is opt-in");
         assertTrue(target.supportsInterface(type(IERC721).interfaceId), "erc721 id");
         assertTrue(target.supportsInterface(type(IERC721Metadata).interfaceId), "erc721 metadata id");
         assertTrue(target.supportsInterface(type(IERC165).interfaceId), "erc165 id");
@@ -61,9 +72,20 @@ contract ERC165CompositionTest is Test {
 
         assertTrue(target.supportsInterface(type(IGasKillerSDK).interfaceId), "gas killer id");
         assertTrue(target.supportsInterface(type(IGasKillerSDKBatch).interfaceId), "batch id");
-        assertTrue(target.supportsInterface(type(IGasKillerNested).interfaceId), "nested id");
+        assertFalse(target.supportsInterface(type(IGasKillerNested).interfaceId), "nested is opt-in");
         assertTrue(target.supportsInterface(type(IERC721).interfaceId), "erc721 id");
         assertTrue(target.supportsInterface(type(IERC721Metadata).interfaceId), "erc721 metadata id");
+        assertTrue(target.supportsInterface(type(IERC165).interfaceId), "erc165 id");
+        assertFalse(target.supportsInterface(0xffffffff), "invalid id");
+    }
+
+    function test_nested_reportsUnionOfInterfaceIds() public {
+        NestedNft target = new NestedNft(registry);
+
+        assertTrue(target.supportsInterface(type(IGasKillerSDK).interfaceId), "gas killer id");
+        assertTrue(target.supportsInterface(type(IGasKillerSDKBatch).interfaceId), "batch id");
+        assertTrue(target.supportsInterface(type(IGasKillerNested).interfaceId), "nested id");
+        assertTrue(target.supportsInterface(type(IERC721).interfaceId), "erc721 id");
         assertTrue(target.supportsInterface(type(IERC165).interfaceId), "erc165 id");
         assertFalse(target.supportsInterface(0xffffffff), "invalid id");
     }

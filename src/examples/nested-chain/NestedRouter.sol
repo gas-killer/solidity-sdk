@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.27;
 
-import {GasKillerSDK} from "../../GasKillerSDK.sol";
+import {GasKillerNestedSDK} from "../../GasKillerNestedSDK.sol";
 import {NestedVault} from "./NestedVault.sol";
 
 /// @title NestedRouter
 /// @notice The root contract of the nested-chain example. A traced `process` call settles as
 ///         one tree: the router's frame, the vault's frame and the ledger's frame, under a
 ///         single quorum signature submitted to `verifyAndUpdateTree`.
-contract NestedRouter is GasKillerSDK {
+contract NestedRouter is GasKillerNestedSDK {
     /// @notice Number of processed requests (slot 0).
     uint256 public processed;
 
