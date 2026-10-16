@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.27;
 
-import {GasKillerSDK} from "../../GasKillerSDK.sol";
+import {GasKillerNestedSDK} from "../../GasKillerNestedSDK.sol";
 import {DepositVault} from "./DepositVault.sol";
 
 /// @title DepositGateway
@@ -13,7 +13,7 @@ import {DepositVault} from "./DepositVault.sol";
 ///      The gateway does not bind who pays: over-payment is not refunded and ETH can be forced
 ///      in, and any balance left here can fund a later settlement sent with less than its
 ///      deposit. A balance check in `deposit` would not help, since settlement never runs it.
-contract DepositGateway is GasKillerSDK {
+contract DepositGateway is GasKillerNestedSDK {
     /// @notice Number of deposits forwarded (slot 0).
     uint256 public deposits;
 

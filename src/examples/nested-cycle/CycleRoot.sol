@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.27;
 
-import {GasKillerSDK} from "../../GasKillerSDK.sol";
+import {GasKillerNestedSDK} from "../../GasKillerNestedSDK.sol";
 import {HashChain} from "../HashChain.sol";
 import {CycleRelay} from "./CycleRelay.sol";
 
@@ -14,7 +14,7 @@ import {CycleRelay} from "./CycleRelay.sol";
 ///      `finish` checks that it observes the intermediate state `start` left behind. On replay
 ///      that check never runs, so the example's test checks the same property with an
 ///      observer call inside the re-entered frame.
-contract CycleRoot is GasKillerSDK {
+contract CycleRoot is GasKillerNestedSDK {
     error InvalidConfiguration();
     error NotRelay();
     error UnexpectedCounter(uint256 counter, uint256 expected);

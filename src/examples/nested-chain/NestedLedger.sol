@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.27;
 
-import {GasKillerSDK} from "../../GasKillerSDK.sol";
+import {GasKillerNestedSDK} from "../../GasKillerNestedSDK.sol";
 import {HashChain} from "../HashChain.sol";
 
 /// @title NestedLedger
@@ -10,7 +10,7 @@ import {HashChain} from "../HashChain.sol";
 ///         `record` deliberately expensive to execute natively.
 /// @dev `record` is `trackState`, so when the vault calls it inside a traced task it becomes
 ///      its own nested frame and settles through `applyNested` without running the hash chain.
-contract NestedLedger is GasKillerSDK {
+contract NestedLedger is GasKillerNestedSDK {
     error InvalidConfiguration();
 
     event Recorded(address indexed user, uint256 amount, bytes32 head);

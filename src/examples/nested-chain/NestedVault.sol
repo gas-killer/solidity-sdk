@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.27;
 
-import {GasKillerSDK} from "../../GasKillerSDK.sol";
+import {GasKillerNestedSDK} from "../../GasKillerNestedSDK.sol";
 import {NestedLedger} from "./NestedLedger.sol";
 
 /// @title NestedVault
 /// @notice The middle contract of the nested-chain example. Credits a user with a weighted
 ///         sum of their inputs and records the credit in the ledger.
-contract NestedVault is GasKillerSDK {
+contract NestedVault is GasKillerNestedSDK {
     event Credited(address indexed user, uint256 amount);
 
     /// @notice Total credit per user (slot 0).

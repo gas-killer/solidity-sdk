@@ -922,9 +922,16 @@ library StateChangeHandlerLib {
         }
     }
 
+    /// @dev Runs a program outside any tree, rejecting every NESTED op. Dispatching NESTED
+    ///      through a function pointer keeps `_runNested` out of consumers that never nest.
     function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args) internal {
         NestedContext memory none;
-        _runStateUpdates(types, args, none);
+        _run(types, args, none, _rejectNested);
+    }
+
+    /// @dev Runs a program inside the tree in `ctx`.
+    function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args, NestedContext memory ctx) internal {
+        _run(types, args, ctx, _runNested);
     }
 
     /// @notice Decodes and executes a series of state updates
@@ -938,8 +945,14 @@ library StateChangeHandlerLib {
     /// @param types Array of StateUpdateType enums indicating the type of each state update operation
     /// @param args Array of ABI-encoded arguments corresponding to each operation type
     /// @param ctx The tree this program runs inside; a zero root rejects every NESTED op
+    /// @param nested The NESTED handler: `_runNested` inside a tree, `_rejectNested` outside one
     /// @dev types and args arrays must be equal length, with args[i] containing the encoded parameters for types[i]
-    function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args, NestedContext memory ctx) internal {
+    function _run(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        NestedContext memory ctx,
+        function(uint256, bytes memory, NestedContext memory) nested
+    ) private {
         uint256 length = types.length;
         require(length == args.length, InvalidArguments());
         for (uint256 i = 0; i < length; ++i) {
@@ -1041,10 +1054,14 @@ library StateChangeHandlerLib {
                 }
                 require(deployed != address(0), DeploymentFailed());
             } else if (stateUpdateType == StateUpdateType.NESTED) {
-                _runNested(i, arg, ctx);
+                nested(i, arg, ctx);
             }
         }
         if (ctx.consumed != ctx.children.length) revert UnconsumedWitnesses(ctx.children.length, ctx.consumed);
+    }
+
+    function _rejectNested(uint256, bytes memory, NestedContext memory) private pure {
+        revert NestedOutsideTree();
     }
 
     /// @dev The child checks `pendingChild()` on its caller before applying anything, which is
@@ -1162,19 +1179,9 @@ library StateChangeHandlerLib {
 ///      Both entrypoints are also `payable`, so a caller can fund value-bearing state
 ///      updates out of `msg.value` — see the per-function docs for the funding rules.
 ///
-///      Nested settlement (`IGasKillerNested`) extends this down a client's call stack: one
-///      quorum signature over a Merkle root covers a frame per SDK-enabled contract, the root
-///      contract settles through `verifyAndUpdateTree`, and each callee applies its own frame
-///      through `applyNested`. Nested settlement needs the registry to implement
-///      `ISchnorrApprovalRegistry`; `verifyAndUpdate` and `verifyAndUpdateBatch` do not.
-abstract contract GasKillerSDK is
-    StateTracker,
-    TransitionGuard,
-    ERC165,
-    IGasKillerSDK,
-    IGasKillerSDKBatch,
-    IGasKillerNested
-{
+///      Nested settlement is opt-in through `GasKillerNestedSDK`, so a consumer that never
+///      nests does not carry its bytecode; a `NESTED` op settled here reverts.
+abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKillerSDK, IGasKillerSDKBatch {
     struct GasKillerSDKStorage {
         address avsAddress;
         ISchnorrStakeRegistry registry;
@@ -1303,6 +1310,107 @@ abstract contract GasKillerSDK is
         _stateChangeHandler(storageUpdates);
     }
 
+    function _verifyQuorum(
+        bytes32 msgHash,
+        uint256 s,
+        address Raddr,
+        address[] calldata nonSigners,
+        uint32 referenceBlockNumber
+    ) private view {
+        bool ok = _schnorrRegistry().isValidSignature(msgHash, s, Raddr, nonSigners, referenceBlockNumber);
+        require(ok, InvalidQuorumSignature());
+    }
+
+    function _stateChangeHandler(bytes calldata storageUpdates) internal {
+        (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
+        StateChangeHandlerLib._runStateUpdates(types, args);
+    }
+
+    /// @notice Query if a contract implements an interface
+    /// @dev Supports ERC-165, IGasKillerSDK detection (the router's preflight
+    ///      probes the schnorr `verifyAndUpdate` selector before submitting), and the
+    ///      IGasKillerSDKBatch batching/latch extension. Defers to `super` so a
+    ///      contract inheriting both this SDK and another OpenZeppelin ERC-165 module reports
+    ///      the union of both ID sets.
+    /// @param interfaceId The interface identifier, as specified in ERC-165
+    /// @return `true` if the contract implements `interfaceId` and `false` otherwise
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
+        return interfaceId == type(IGasKillerSDK).interfaceId || interfaceId == type(IGasKillerSDKBatch).interfaceId
+            || super.supportsInterface(interfaceId);
+    }
+
+    /// @notice Compute the expected message hash for a given transition, function, and storage updates
+    /// @dev Exact mirror of the ECDSA `GasKillerSDK.getMessageHash` — the digest is
+    ///      scheme-agnostic, so off-chain parity checks work unchanged.
+    /// @param transitionIndex The transition index
+    /// @param targetFunction The target function selector
+    /// @param storageUpdates The ABI-encoded storage updates
+    /// @return The expected SHA-256 hash
+    function getMessageHash(uint256 transitionIndex, bytes4 targetFunction, bytes calldata storageUpdates)
+        external
+        view
+        returns (bytes32)
+    {
+        return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
+    }
+
+    /// @inheritdoc TransitionGuard
+    function inTransition() public view override(TransitionGuard, IGasKillerSDKBatch) returns (bool locked) {
+        return TransitionGuard.inTransition();
+    }
+
+    function schnorrRegistry() external view returns (address) {
+        return address(_schnorrRegistry());
+    }
+
+    function avsAddress() external view returns (address) {
+        return _sto().avsAddress;
+    }
+
+    function blockStaleMeasure() external view returns (uint256) {
+        return _getBlockStaleMeasure();
+    }
+
+    function _setAvsAddress(address _avsAddress) internal {
+        _sto().avsAddress = _avsAddress;
+    }
+
+    function _setSchnorrRegistry(address _registry) internal {
+        _sto().registry = ISchnorrStakeRegistry(_registry);
+    }
+
+    function _schnorrRegistry() internal view returns (ISchnorrStakeRegistry) {
+        return _sto().registry;
+    }
+
+    function _setBlockStaleMeasure(uint256 _blockStaleMeasure) internal {
+        require(_blockStaleMeasure <= type(uint96).max, BlockStaleMeasureOverflow());
+        _sto().blockStaleMeasure = uint96(_blockStaleMeasure);
+    }
+
+    function _getBlockStaleMeasure() internal view returns (uint256) {
+        uint256 v = _sto().blockStaleMeasure;
+        return v == 0 ? DEFAULT_BLOCK_STALE_MEASURE : v;
+    }
+
+    function _sto() private pure returns (GasKillerSDKStorage storage $) {
+        assembly {
+            $.slot := STORAGE_LOCATION
+        }
+    }
+}
+
+// src/GasKillerNestedSDK.sol
+
+/// @title GasKillerNestedSDK
+/// @notice `GasKillerSDK` plus nested settlement. Inherit this instead of `GasKillerSDK` in
+///         every contract that roots a tree or applies a frame of one.
+/// @dev Nested settlement (`IGasKillerNested`) extends settlement down a client's call stack:
+///      one quorum signature over a Merkle root covers a frame per SDK-enabled contract, the
+///      root contract settles through `verifyAndUpdateTree`, and each callee applies its own
+///      frame through `applyNested`. Nested settlement needs the registry to implement
+///      `ISchnorrApprovalRegistry`; `verifyAndUpdate` and `verifyAndUpdateBatch` do not.
+abstract contract GasKillerNestedSDK is GasKillerSDK, IGasKillerNested {
     /// @notice Settle a nested tree whose root frame belongs to this contract.
     /// @dev The registry checks the signature and the signed expiry once and caches the
     ///      approval for the rest of the transaction; every callee frame reads that approval
@@ -1336,6 +1444,14 @@ abstract contract GasKillerSDK is
     /// @inheritdoc IGasKillerNested
     function pendingChild() external view returns (bytes32) {
         return StateChangeHandlerLib._pendingChild();
+    }
+
+    /// @notice Query if a contract implements an interface
+    /// @dev Adds the `IGasKillerNested` extension, which the router probes on every frame
+    ///      contract of a tree; a root that does not report it settles flat.
+    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+        if (interfaceId == type(IGasKillerNested).interfaceId) return _registrySupportsNesting();
+        return super.supportsInterface(interfaceId);
     }
 
     function _settleRoot(TreeSubmission calldata submission) private trackState {
@@ -1377,104 +1493,17 @@ abstract contract GasKillerSDK is
         StateChangeHandlerLib._runStateUpdates(types, args, ctx);
     }
 
-    function _approvalRegistry() private view returns (ISchnorrApprovalRegistry) {
-        return ISchnorrApprovalRegistry(address(_sto().registry));
-    }
-
-    function _verifyQuorum(
-        bytes32 msgHash,
-        uint256 s,
-        address Raddr,
-        address[] calldata nonSigners,
-        uint32 referenceBlockNumber
-    ) private view {
-        bool ok = _sto().registry.isValidSignature(msgHash, s, Raddr, nonSigners, referenceBlockNumber);
-        require(ok, InvalidQuorumSignature());
-    }
-
-    function _stateChangeHandler(bytes calldata storageUpdates) internal {
-        (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        StateChangeHandlerLib._runStateUpdates(types, args);
-    }
-
-    /// @notice Query if a contract implements an interface
-    /// @dev Supports ERC-165, IGasKillerSDK detection (the router's preflight
-    ///      probes the schnorr `verifyAndUpdate` selector before submitting), and the
-    ///      IGasKillerSDKBatch batching/latch extension, plus IGasKillerNested while the registry
-    ///      supports nested settlement. Defers to `super` so a
-    ///      contract inheriting both this SDK and another OpenZeppelin ERC-165 module reports
-    ///      the union of both ID sets.
-    /// @param interfaceId The interface identifier, as specified in ERC-165
-    /// @return `true` if the contract implements `interfaceId` and `false` otherwise
-    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
-        if (interfaceId == type(IGasKillerNested).interfaceId) return _registrySupportsNesting();
-        return interfaceId == type(IGasKillerSDK).interfaceId || interfaceId == type(IGasKillerSDKBatch).interfaceId
-            || super.supportsInterface(interfaceId);
-    }
-
     /// @dev Nested settlement reverts against a registry without `ISchnorrApprovalRegistry`, and
     ///      the router plans trees from the nested ID alone, so the ID follows the registry. The
     ///      unchecked probe returns false for a registry without ERC-165 rather than reverting.
     function _registrySupportsNesting() private view returns (bool) {
         return ERC165Checker.supportsERC165InterfaceUnchecked(
-            address(_sto().registry), type(ISchnorrApprovalRegistry).interfaceId
+            address(_schnorrRegistry()), type(ISchnorrApprovalRegistry).interfaceId
         );
     }
 
-    /// @notice Compute the expected message hash for a given transition, function, and storage updates
-    /// @dev Exact mirror of the ECDSA `GasKillerSDK.getMessageHash` — the digest is
-    ///      scheme-agnostic, so off-chain parity checks work unchanged.
-    /// @param transitionIndex The transition index
-    /// @param targetFunction The target function selector
-    /// @param storageUpdates The ABI-encoded storage updates
-    /// @return The expected SHA-256 hash
-    function getMessageHash(uint256 transitionIndex, bytes4 targetFunction, bytes calldata storageUpdates)
-        external
-        view
-        returns (bytes32)
-    {
-        return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
-    }
-
-    /// @inheritdoc TransitionGuard
-    function inTransition() public view override(TransitionGuard, IGasKillerSDKBatch) returns (bool locked) {
-        return TransitionGuard.inTransition();
-    }
-
-    function schnorrRegistry() external view returns (address) {
-        return address(_sto().registry);
-    }
-
-    function avsAddress() external view returns (address) {
-        return _sto().avsAddress;
-    }
-
-    function blockStaleMeasure() external view returns (uint256) {
-        return _getBlockStaleMeasure();
-    }
-
-    function _setAvsAddress(address _avsAddress) internal {
-        _sto().avsAddress = _avsAddress;
-    }
-
-    function _setSchnorrRegistry(address _registry) internal {
-        _sto().registry = ISchnorrStakeRegistry(_registry);
-    }
-
-    function _setBlockStaleMeasure(uint256 _blockStaleMeasure) internal {
-        require(_blockStaleMeasure <= type(uint96).max, BlockStaleMeasureOverflow());
-        _sto().blockStaleMeasure = uint96(_blockStaleMeasure);
-    }
-
-    function _getBlockStaleMeasure() internal view returns (uint256) {
-        uint256 v = _sto().blockStaleMeasure;
-        return v == 0 ? DEFAULT_BLOCK_STALE_MEASURE : v;
-    }
-
-    function _sto() private pure returns (GasKillerSDKStorage storage $) {
-        assembly {
-            $.slot := STORAGE_LOCATION
-        }
+    function _approvalRegistry() private view returns (ISchnorrApprovalRegistry) {
+        return ISchnorrApprovalRegistry(address(_schnorrRegistry()));
     }
 }
 
@@ -1486,7 +1515,7 @@ abstract contract GasKillerSDK is
 ///         `record` deliberately expensive to execute natively.
 /// @dev `record` is `trackState`, so when the vault calls it inside a traced task it becomes
 ///      its own nested frame and settles through `applyNested` without running the hash chain.
-contract NestedLedger is GasKillerSDK {
+contract NestedLedger is GasKillerNestedSDK {
     error InvalidConfiguration();
 
     event Recorded(address indexed user, uint256 amount, bytes32 head);
@@ -1519,7 +1548,7 @@ contract NestedLedger is GasKillerSDK {
 /// @title NestedVault
 /// @notice The middle contract of the nested-chain example. Credits a user with a weighted
 ///         sum of their inputs and records the credit in the ledger.
-contract NestedVault is GasKillerSDK {
+contract NestedVault is GasKillerNestedSDK {
     event Credited(address indexed user, uint256 amount);
 
     /// @notice Total credit per user (slot 0).
@@ -1549,7 +1578,7 @@ contract NestedVault is GasKillerSDK {
 /// @notice The root contract of the nested-chain example. A traced `process` call settles as
 ///         one tree: the router's frame, the vault's frame and the ledger's frame, under a
 ///         single quorum signature submitted to `verifyAndUpdateTree`.
-contract NestedRouter is GasKillerSDK {
+contract NestedRouter is GasKillerNestedSDK {
     /// @notice Number of processed requests (slot 0).
     uint256 public processed;
 

@@ -57,9 +57,16 @@ library StateChangeHandlerLib {
         }
     }
 
+    /// @dev Runs a program outside any tree, rejecting every NESTED op. Dispatching NESTED
+    ///      through a function pointer keeps `_runNested` out of consumers that never nest.
     function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args) internal {
         NestedContext memory none;
-        _runStateUpdates(types, args, none);
+        _run(types, args, none, _rejectNested);
+    }
+
+    /// @dev Runs a program inside the tree in `ctx`.
+    function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args, NestedContext memory ctx) internal {
+        _run(types, args, ctx, _runNested);
     }
 
     /// @notice Decodes and executes a series of state updates
@@ -73,8 +80,14 @@ library StateChangeHandlerLib {
     /// @param types Array of StateUpdateType enums indicating the type of each state update operation
     /// @param args Array of ABI-encoded arguments corresponding to each operation type
     /// @param ctx The tree this program runs inside; a zero root rejects every NESTED op
+    /// @param nested The NESTED handler: `_runNested` inside a tree, `_rejectNested` outside one
     /// @dev types and args arrays must be equal length, with args[i] containing the encoded parameters for types[i]
-    function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args, NestedContext memory ctx) internal {
+    function _run(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        NestedContext memory ctx,
+        function(uint256, bytes memory, NestedContext memory) nested
+    ) private {
         uint256 length = types.length;
         require(length == args.length, InvalidArguments());
         for (uint256 i = 0; i < length; ++i) {
@@ -176,10 +189,14 @@ library StateChangeHandlerLib {
                 }
                 require(deployed != address(0), DeploymentFailed());
             } else if (stateUpdateType == StateUpdateType.NESTED) {
-                _runNested(i, arg, ctx);
+                nested(i, arg, ctx);
             }
         }
         if (ctx.consumed != ctx.children.length) revert UnconsumedWitnesses(ctx.children.length, ctx.consumed);
+    }
+
+    function _rejectNested(uint256, bytes memory, NestedContext memory) private pure {
+        revert NestedOutsideTree();
     }
 
     /// @dev The child checks `pendingChild()` on its caller before applying anything, which is

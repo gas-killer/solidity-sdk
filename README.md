@@ -142,9 +142,14 @@ described above — spends nothing, so its share simply lands in the retained-su
 ## Nested settlement
 
 A transition can extend down a call stack when the contracts it calls are SDK consumers too.
-If `A` calls `B` and `B` calls `C`, and all three inherit `GasKillerSDK`, the whole call stack
-settles as one tree: each contract applies its own signed frame instead of `B` and `C` running
-natively.
+If `A` calls `B` and `B` calls `C`, and all three inherit `GasKillerNestedSDK`, the whole call
+stack settles as one tree: each contract applies its own signed frame instead of `B` and `C`
+running natively.
+
+Nesting is opt-in. `GasKillerNestedSDK` extends `GasKillerSDK` with the tree entrypoints and adds
+about 4 KB of runtime bytecode, so a contract that never nests should inherit `GasKillerSDK` and
+not carry it. Only contracts that report `IGasKillerNested` through ERC-165 can join a tree; a
+root that does not report it settles flat.
 
 - **One signature.** The quorum signs a Merkle root over an expiry leaf and one leaf per frame,
   in execution order. The root contract settles it through `verifyAndUpdateTree`. The registry
@@ -167,6 +172,7 @@ natively.
 
 Rules for a contract that may be nested:
 
+- It must inherit `GasKillerNestedSDK`.
 - The function called into must be `trackState`, and the counter increment must come before any
   other storage write or external call in that function. Replay increments first.
 - It must use the same registry as the root contract, and that registry must implement
@@ -188,6 +194,7 @@ example does.
 
 - **`src/`** — Core SDK contracts
   - `GasKillerSDK.sol` — Abstract base; inherit this in your consumer
+  - `GasKillerNestedSDK.sol` — `GasKillerSDK` plus nested settlement; inherit this instead in a contract that roots or joins a tree
   - `SchnorrStakeRegistry.sol` — Aggregate-key registry with proof-of-possession registration and non-signer subtraction
   - `StateTracker.sol` — Tracks state transitions via an ERC-7201 storage slot
   - `StateChangeHandlerLib.sol` — Executes batched `STORE`, `CALL`, `LOG`, `CREATE` and `NESTED` operations
