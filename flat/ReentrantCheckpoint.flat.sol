@@ -484,6 +484,130 @@ abstract contract ERC165 is IERC165 {
     }
 }
 
+// lib/openzeppelin-contracts/contracts/utils/introspection/ERC165Checker.sol
+
+// OpenZeppelin Contracts (last updated v4.9.0) (utils/introspection/ERC165Checker.sol)
+
+/**
+ * @dev Library used to query support of an interface declared via {IERC165}.
+ *
+ * Note that these functions return the actual result of the query: they do not
+ * `revert` if an interface is not supported. It is up to the caller to decide
+ * what to do in these cases.
+ */
+library ERC165Checker {
+    // As per the EIP-165 spec, no interface should ever match 0xffffffff
+    bytes4 private constant _INTERFACE_ID_INVALID = 0xffffffff;
+
+    /**
+     * @dev Returns true if `account` supports the {IERC165} interface.
+     */
+    function supportsERC165(address account) internal view returns (bool) {
+        // Any contract that implements ERC165 must explicitly indicate support of
+        // InterfaceId_ERC165 and explicitly indicate non-support of InterfaceId_Invalid
+        return
+            supportsERC165InterfaceUnchecked(account, type(IERC165).interfaceId) &&
+            !supportsERC165InterfaceUnchecked(account, _INTERFACE_ID_INVALID);
+    }
+
+    /**
+     * @dev Returns true if `account` supports the interface defined by
+     * `interfaceId`. Support for {IERC165} itself is queried automatically.
+     *
+     * See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(address account, bytes4 interfaceId) internal view returns (bool) {
+        // query support of both ERC165 as per the spec and support of _interfaceId
+        return supportsERC165(account) && supportsERC165InterfaceUnchecked(account, interfaceId);
+    }
+
+    /**
+     * @dev Returns a boolean array where each value corresponds to the
+     * interfaces passed in and whether they're supported or not. This allows
+     * you to batch check interfaces for a contract where your expectation
+     * is that some interfaces may not be supported.
+     *
+     * See {IERC165-supportsInterface}.
+     *
+     * _Available since v3.4._
+     */
+    function getSupportedInterfaces(
+        address account,
+        bytes4[] memory interfaceIds
+    ) internal view returns (bool[] memory) {
+        // an array of booleans corresponding to interfaceIds and whether they're supported or not
+        bool[] memory interfaceIdsSupported = new bool[](interfaceIds.length);
+
+        // query support of ERC165 itself
+        if (supportsERC165(account)) {
+            // query support of each interface in interfaceIds
+            for (uint256 i = 0; i < interfaceIds.length; i++) {
+                interfaceIdsSupported[i] = supportsERC165InterfaceUnchecked(account, interfaceIds[i]);
+            }
+        }
+
+        return interfaceIdsSupported;
+    }
+
+    /**
+     * @dev Returns true if `account` supports all the interfaces defined in
+     * `interfaceIds`. Support for {IERC165} itself is queried automatically.
+     *
+     * Batch-querying can lead to gas savings by skipping repeated checks for
+     * {IERC165} support.
+     *
+     * See {IERC165-supportsInterface}.
+     */
+    function supportsAllInterfaces(address account, bytes4[] memory interfaceIds) internal view returns (bool) {
+        // query support of ERC165 itself
+        if (!supportsERC165(account)) {
+            return false;
+        }
+
+        // query support of each interface in interfaceIds
+        for (uint256 i = 0; i < interfaceIds.length; i++) {
+            if (!supportsERC165InterfaceUnchecked(account, interfaceIds[i])) {
+                return false;
+            }
+        }
+
+        // all interfaces supported
+        return true;
+    }
+
+    /**
+     * @notice Query if a contract implements an interface, does not check ERC165 support
+     * @param account The address of the contract to query for support of an interface
+     * @param interfaceId The interface identifier, as specified in ERC-165
+     * @return true if the contract at account indicates support of the interface with
+     * identifier interfaceId, false otherwise
+     * @dev Assumes that account contains a contract that supports ERC165, otherwise
+     * the behavior of this method is undefined. This precondition can be checked
+     * with {supportsERC165}.
+     *
+     * Some precompiled contracts will falsely indicate support for a given interface, so caution
+     * should be exercised when using this function.
+     *
+     * Interface identification is specified in ERC-165.
+     */
+    function supportsERC165InterfaceUnchecked(address account, bytes4 interfaceId) internal view returns (bool) {
+        // prepare call
+        bytes memory encodedParams = abi.encodeWithSelector(IERC165.supportsInterface.selector, interfaceId);
+
+        // perform static call
+        bool success;
+        uint256 returnSize;
+        uint256 returnValue;
+        assembly {
+            success := staticcall(30000, account, add(encodedParams, 0x20), mload(encodedParams), 0x00, 0x20)
+            returnSize := returndatasize()
+            returnValue := mload(0x00)
+        }
+
+        return success && returnSize >= 0x20 && returnValue > 0;
+    }
+}
+
 // src/interface/IGasKillerSDK.sol
 
 /// @title IGasKillerSDK
@@ -546,7 +670,9 @@ struct QuorumSignature {
 ///         is verified once, and every frame of the tree checks the cached approval in its own
 ///         registry instead of re-verifying the signature.
 /// @dev Kept separate from `ISchnorrStakeRegistry` so consumers that never nest, and the
-///      mocks they are tested against, see no new surface.
+///      mocks they are tested against, see no new surface. Implementations must report this
+///      interface through ERC-165: a consumer reports `IGasKillerNested` only when its registry
+///      does.
 interface ISchnorrApprovalRegistry is ISchnorrStakeRegistry {
     error ApprovalExpired(uint256 expiryBlock);
     error InvalidExpiryProof();
@@ -1252,14 +1378,25 @@ abstract contract GasKillerSDK is
     /// @notice Query if a contract implements an interface
     /// @dev Supports ERC-165, IGasKillerSDK detection (the router's preflight
     ///      probes the schnorr `verifyAndUpdate` selector before submitting), and the
-    ///      IGasKillerSDKBatch batching/latch extension. Defers to `super` so a
+    ///      IGasKillerSDKBatch batching/latch extension, plus IGasKillerNested while the registry
+    ///      supports nested settlement. Defers to `super` so a
     ///      contract inheriting both this SDK and another OpenZeppelin ERC-165 module reports
     ///      the union of both ID sets.
     /// @param interfaceId The interface identifier, as specified in ERC-165
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
     function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
+        if (interfaceId == type(IGasKillerNested).interfaceId) return _registrySupportsNesting();
         return interfaceId == type(IGasKillerSDK).interfaceId || interfaceId == type(IGasKillerSDKBatch).interfaceId
-            || interfaceId == type(IGasKillerNested).interfaceId || super.supportsInterface(interfaceId);
+            || super.supportsInterface(interfaceId);
+    }
+
+    /// @dev Nested settlement reverts against a registry without `ISchnorrApprovalRegistry`, and
+    ///      the router plans trees from the nested ID alone, so the ID follows the registry. The
+    ///      unchecked probe returns false for a registry without ERC-165 rather than reverting.
+    function _registrySupportsNesting() private view returns (bool) {
+        return ERC165Checker.supportsERC165InterfaceUnchecked(
+            address(_sto().registry), type(ISchnorrApprovalRegistry).interfaceId
+        );
     }
 
     /// @notice Compute the expected message hash for a given transition, function, and storage updates

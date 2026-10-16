@@ -1,6 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.0 ^0.8.27;
 
+// lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol
+
+// OpenZeppelin Contracts v4.4.1 (utils/introspection/IERC165.sol)
+
+/**
+ * @dev Interface of the ERC165 standard, as defined in the
+ * https://eips.ethereum.org/EIPS/eip-165[EIP].
+ *
+ * Implementers can declare support of contract interfaces, which can then be
+ * queried by others ({ERC165Checker}).
+ *
+ * For an implementation, see {ERC165}.
+ */
+interface IERC165 {
+    /**
+     * @dev Returns true if this contract implements the interface defined by
+     * `interfaceId`. See the corresponding
+     * https://eips.ethereum.org/EIPS/eip-165#how-interfaces-are-identified[EIP section]
+     * to learn more about how these ids are created.
+     *
+     * This function call must use less than 30 000 gas.
+     */
+    function supportsInterface(bytes4 interfaceId) external view returns (bool);
+}
+
 // src/interface/ISchnorrStakeRegistry.sol
 
 /// @title ISchnorrStakeRegistry
@@ -384,6 +409,33 @@ library Secp256k1 {
     }
 }
 
+// lib/openzeppelin-contracts/contracts/utils/introspection/ERC165.sol
+
+// OpenZeppelin Contracts v4.4.1 (utils/introspection/ERC165.sol)
+
+/**
+ * @dev Implementation of the {IERC165} interface.
+ *
+ * Contracts that want to implement ERC165 should inherit from this contract and override {supportsInterface} to check
+ * for the additional interface id that will be supported. For example:
+ *
+ * ```solidity
+ * function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+ *     return interfaceId == type(MyInterface).interfaceId || super.supportsInterface(interfaceId);
+ * }
+ * ```
+ *
+ * Alternatively, {ERC165Storage} provides an easier to use but more expensive implementation.
+ */
+abstract contract ERC165 is IERC165 {
+    /**
+     * @dev See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+        return interfaceId == type(IERC165).interfaceId;
+    }
+}
+
 // src/interface/ISchnorrApprovalRegistry.sol
 
 /// @notice An aggregate Schnorr quorum signature and the reference block it is checked at.
@@ -399,7 +451,9 @@ struct QuorumSignature {
 ///         is verified once, and every frame of the tree checks the cached approval in its own
 ///         registry instead of re-verifying the signature.
 /// @dev Kept separate from `ISchnorrStakeRegistry` so consumers that never nest, and the
-///      mocks they are tested against, see no new surface.
+///      mocks they are tested against, see no new surface. Implementations must report this
+///      interface through ERC-165: a consumer reports `IGasKillerNested` only when its registry
+///      does.
 interface ISchnorrApprovalRegistry is ISchnorrStakeRegistry {
     error ApprovalExpired(uint256 expiryBlock);
     error InvalidExpiryProof();
@@ -571,7 +625,7 @@ library NestedFrames {
 ///      root and records the approval in transient storage, where every frame of the tree reads
 ///      it through `approvedRefBlock`. Approvals never touch persistent storage, so the slot
 ///      layout above is unchanged and an approval cannot outlive its transaction.
-contract SchnorrStakeRegistry is ISchnorrApprovalRegistry {
+contract SchnorrStakeRegistry is ISchnorrApprovalRegistry, ERC165 {
     /// Domain tag for the proof-of-possession message — must equal the Rust `POP_TAG`.
     bytes internal constant POP_TAG = "gas-killer/schnorr/pop/v1";
 
@@ -698,6 +752,13 @@ contract SchnorrStakeRegistry is ISchnorrApprovalRegistry {
         owner = _owner;
         noticeWindow = _noticeWindow;
         effectiveBlock = block.number;
+    }
+
+    /// @dev Consumers report `IGasKillerNested` only while their registry reports
+    ///      `ISchnorrApprovalRegistry` here, so a router never plans a tree this cannot settle.
+    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+        return interfaceId == type(ISchnorrApprovalRegistry).interfaceId
+            || interfaceId == type(ISchnorrStakeRegistry).interfaceId || super.supportsInterface(interfaceId);
     }
 
     /// @dev The check is wrapped rather than inlined in the modifier body so the revert is emitted

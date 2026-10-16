@@ -38,7 +38,9 @@ struct QuorumSignature {
 ///         is verified once, and every frame of the tree checks the cached approval in its own
 ///         registry instead of re-verifying the signature.
 /// @dev Kept separate from `ISchnorrStakeRegistry` so consumers that never nest, and the
-///      mocks they are tested against, see no new surface.
+///      mocks they are tested against, see no new surface. Implementations must report this
+///      interface through ERC-165: a consumer reports `IGasKillerNested` only when its registry
+///      does.
 interface ISchnorrApprovalRegistry is ISchnorrStakeRegistry {
     error ApprovalExpired(uint256 expiryBlock);
     error InvalidExpiryProof();
