@@ -15,14 +15,10 @@ import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 interface IGasKillerSDK is IERC165 {
     /// @notice Verify the operators' aggregate Schnorr quorum signature and apply the
     ///         encoded state updates
-    /// @dev Payable so a caller can fund value-bearing `CALL`/`CREATE`/`CREATE2` state updates
-    ///      out of `msg.value`. The value each update moves is fixed inside the quorum-signed
-    ///      `storageUpdates`, so `msg.value` only tops up the contract's balance — it cannot
-    ///      redirect value anywhere the quorum did not sign. Under-funding reverts the whole
-    ///      transition. Over-funding is NOT refunded: whatever the updates do not consume stays
-    ///      in the contract, and recovering it is the responsibility of the inheriting contract
-    ///      (e.g. a withdrawal function, or a refund executed as a signed CALL update in a
-    ///      later transition).
+    /// @dev Payable, and `msg.value` is part of the signed digest: the transition settles only
+    ///      with exactly the value the task was analyzed with, so a function that credits
+    ///      `msg.value` cannot be settled without its ETH. Value moved by state updates is fixed
+    ///      inside the signed `storageUpdates`; a shortfall reverts the whole transition.
     ///
     ///      `payable` does not change the function selector, so
     ///      `type(IGasKillerSDK).interfaceId` — which the router's ERC-165 preflight

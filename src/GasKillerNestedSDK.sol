@@ -22,8 +22,9 @@ abstract contract GasKillerNestedSDK is GasKillerSDK, IGasKillerNested {
     ///      approval for the rest of the transaction; every callee frame reads that approval
     ///      instead of re-verifying. A tree always carries an expiry leaf, so its root can never
     ///      equal a single-transition digest and the two settlement paths cannot replay each
-    ///      other's signatures. Payable on the same terms as `verifyAndUpdate`; value moved by
-    ///      `NESTED` ops comes out of this contract's balance just as a `CALL` op's does.
+    ///      other's signatures. The root leaf binds `msg.value` exactly as `verifyAndUpdate`'s
+    ///      digest does, so the tree settles only with the value it was analyzed with; value
+    ///      moved by `NESTED` ops comes out of this contract's balance just as a `CALL` op's does.
     function verifyAndUpdateTree(TreeSubmission calldata submission) external payable {
         _enterExclusive(submission.root);
         _settleRoot(submission);
@@ -67,7 +68,7 @@ abstract contract GasKillerNestedSDK is GasKillerSDK, IGasKillerNested {
         require(submission.transitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
 
         bytes32 leaf = NestedFrames.rootLeaf(
-            submission.transitionIndex, address(this), submission.targetFunction, submission.storageUpdates
+            submission.transitionIndex, address(this), submission.targetFunction, submission.storageUpdates, msg.value
         );
         require(NestedFrames.isMemberCalldata(submission.proof, submission.root, leaf), NotTreeMember(leaf));
 

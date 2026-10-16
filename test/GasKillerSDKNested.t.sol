@@ -196,12 +196,29 @@ contract GasKillerSDKNestedTest is Test {
 
     function test_valueForwardedThroughNestedOp() public {
         NestedTreeBuilder.Frame[] memory frames = new NestedTreeBuilder.Frame[](2);
-        frames[0] = _frame(address(a), address(0), 0, 0, _ops1(_nested(address(b), 1 ether, 1)));
+        frames[0] = _frame(address(a), address(0), 0, 1 ether, _ops1(_nested(address(b), 1 ether, 1)));
         frames[1] = _frame(address(b), address(a), 0, 1 ether, _ops1(_store(SLOT_X, 9)));
         NestedTreeBuilder.Tree memory tree = frames.build(expiryBlock);
         a.verifyAndUpdateTree{value: 1 ether}(_submission(tree, 0));
         assertEq(address(b).balance, 1 ether);
         assertEq(address(a).balance, 0);
+    }
+
+    /// The root leaf binds the root's `msg.value` like the single-transition digest does, so a
+    /// tree signed for a deposit cannot settle without it (gas-killer/solidity-sdk#104).
+    function test_rootSettledWithAnotherValueFailsItsLeaf() public {
+        NestedTreeBuilder.Frame[] memory frames = new NestedTreeBuilder.Frame[](1);
+        frames[0] = _frame(address(a), address(0), 0, 1 ether, _ops1(_store(SLOT_X, 9)));
+        NestedTreeBuilder.Tree memory tree = frames.build(expiryBlock);
+        TreeSubmission memory sub = _submission(tree, 0);
+        bytes32 unpaid = NestedFrames.rootLeaf(0, address(a), TASK, tree.programs[0], 0);
+
+        vm.expectRevert(abi.encodeWithSelector(IGasKillerNested.NotTreeMember.selector, unpaid));
+        a.verifyAndUpdateTree(sub);
+
+        vm.deal(address(this), 1 ether);
+        a.verifyAndUpdateTree{value: 1 ether}(sub);
+        assertEq(_load(a, SLOT_X), 9);
     }
 
     function test_twoLeafTreeMatchesSingleTransitionSettlement() public {

@@ -44,7 +44,7 @@ library NestedTreeBuilder {
             kids[i - 1] = _resolveNested(f, tree.frameLeaves);
             tree.programs[i - 1] = abi.encode(f.types, f.args);
             tree.frameLeaves[i - 1] = i == 1
-                ? NestedFrames.rootLeaf(f.index, f.target, f.targetFunction, tree.programs[0])
+                ? NestedFrames.rootLeaf(f.index, f.target, f.targetFunction, tree.programs[0], f.value)
                 : NestedFrames.nestedLeaf(f.target, f.index, f.caller, f.value, f.calldataHash, tree.programs[i - 1]);
         }
 
