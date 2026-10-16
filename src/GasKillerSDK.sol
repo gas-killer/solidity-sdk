@@ -3,6 +3,7 @@ pragma solidity ^0.8.27;
 
 import {ERC165} from "@openzeppelin/contracts/utils/introspection/ERC165.sol";
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+import {ERC165Checker} from "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
 import {IGasKillerSDK} from "./interface/IGasKillerSDK.sol";
 import {IGasKillerSDKBatch, TaskSubmission} from "./interface/IGasKillerSDKBatch.sol";
 import {StateTracker} from "./StateTracker.sol";
@@ -269,14 +270,25 @@ abstract contract GasKillerSDK is
     /// @notice Query if a contract implements an interface
     /// @dev Supports ERC-165, IGasKillerSDK detection (the router's preflight
     ///      probes the schnorr `verifyAndUpdate` selector before submitting), and the
-    ///      IGasKillerSDKBatch batching/latch extension. Defers to `super` so a
+    ///      IGasKillerSDKBatch batching/latch extension, plus IGasKillerNested while the registry
+    ///      supports nested settlement. Defers to `super` so a
     ///      contract inheriting both this SDK and another OpenZeppelin ERC-165 module reports
     ///      the union of both ID sets.
     /// @param interfaceId The interface identifier, as specified in ERC-165
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
     function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
+        if (interfaceId == type(IGasKillerNested).interfaceId) return _registrySupportsNesting();
         return interfaceId == type(IGasKillerSDK).interfaceId || interfaceId == type(IGasKillerSDKBatch).interfaceId
-            || interfaceId == type(IGasKillerNested).interfaceId || super.supportsInterface(interfaceId);
+            || super.supportsInterface(interfaceId);
+    }
+
+    /// @dev Nested settlement reverts against a registry without `ISchnorrApprovalRegistry`, and
+    ///      the router plans trees from the nested ID alone, so the ID follows the registry. The
+    ///      unchecked probe returns false for a registry without ERC-165 rather than reverting.
+    function _registrySupportsNesting() private view returns (bool) {
+        return ERC165Checker.supportsERC165InterfaceUnchecked(
+            address(_sto().registry), type(ISchnorrApprovalRegistry).interfaceId
+        );
     }
 
     /// @notice Compute the expected message hash for a given transition, function, and storage updates

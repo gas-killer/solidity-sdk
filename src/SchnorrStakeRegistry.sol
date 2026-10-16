@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.27;
 
+import {ERC165} from "@openzeppelin/contracts/utils/introspection/ERC165.sol";
 import {Secp256k1} from "./libraries/Secp256k1.sol";
 import {SchnorrVerify} from "./libraries/SchnorrVerify.sol";
 import {NestedFrames} from "./libraries/NestedFrames.sol";
@@ -56,7 +57,7 @@ import {ISchnorrApprovalRegistry, QuorumSignature} from "./interface/ISchnorrApp
 ///      root and records the approval in transient storage, where every frame of the tree reads
 ///      it through `approvedRefBlock`. Approvals never touch persistent storage, so the slot
 ///      layout above is unchanged and an approval cannot outlive its transaction.
-contract SchnorrStakeRegistry is ISchnorrApprovalRegistry {
+contract SchnorrStakeRegistry is ISchnorrApprovalRegistry, ERC165 {
     /// Domain tag for the proof-of-possession message — must equal the Rust `POP_TAG`.
     bytes internal constant POP_TAG = "gas-killer/schnorr/pop/v1";
 
@@ -183,6 +184,13 @@ contract SchnorrStakeRegistry is ISchnorrApprovalRegistry {
         owner = _owner;
         noticeWindow = _noticeWindow;
         effectiveBlock = block.number;
+    }
+
+    /// @dev Consumers report `IGasKillerNested` only while their registry reports
+    ///      `ISchnorrApprovalRegistry` here, so a router never plans a tree this cannot settle.
+    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+        return interfaceId == type(ISchnorrApprovalRegistry).interfaceId
+            || interfaceId == type(ISchnorrStakeRegistry).interfaceId || super.supportsInterface(interfaceId);
     }
 
     /// @dev The check is wrapped rather than inlined in the modifier body so the revert is emitted

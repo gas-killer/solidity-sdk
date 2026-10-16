@@ -29,6 +29,9 @@ contract NestedNode is GasKillerSDK {
     function bump() external trackState {}
 }
 
+/// A registry deployed before nested settlement: no ERC-165, and every unknown call reverts.
+contract LegacyRegistry {}
+
 /// An SDK consumer that forwards arbitrary calls, like a multicall or smart wallet.
 contract ForwardingNode is NestedNode {
     constructor(address registry) NestedNode(registry) {}
@@ -375,6 +378,13 @@ contract GasKillerSDKNestedTest is Test {
 
     function test_reportsTheNestedInterface() public view {
         assertTrue(a.supportsInterface(type(IGasKillerNested).interfaceId));
+    }
+
+    /// A router plans trees from the nested ID alone, so a consumer whose registry cannot
+    /// approve roots must not report it.
+    function test_registryWithoutApprovalsHidesTheNestedInterface() public {
+        assertFalse(new NestedNode(address(new LegacyRegistry())).supportsInterface(type(IGasKillerNested).interfaceId));
+        assertFalse(new NestedNode(address(0)).supportsInterface(type(IGasKillerNested).interfaceId));
     }
 
     // ---------------------------------------------------------------------------------

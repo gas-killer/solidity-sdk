@@ -2,6 +2,8 @@
 pragma solidity ^0.8.29;
 
 import {Test} from "forge-std/Test.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+import {ISchnorrStakeRegistry} from "../src/interface/ISchnorrStakeRegistry.sol";
 import {SchnorrStakeRegistry} from "../src/SchnorrStakeRegistry.sol";
 import {ISchnorrApprovalRegistry, QuorumSignature} from "../src/interface/ISchnorrApprovalRegistry.sol";
 import {NestedFrames} from "../src/libraries/NestedFrames.sol";
@@ -207,6 +209,15 @@ contract SchnorrStakeRegistryApprovalTest is Test {
         (uint256 s, address r) =
             SchnorrSigner.sign(OPERATOR_KEY, uint256(keccak256(abi.encode(message, refBlock))), message);
         sig = QuorumSignature(s, r, new address[](0), refBlock);
+    }
+
+    /// Consumers gate their nested ID on this, so a drift here hides nesting fleet-wide.
+    function test_reportsTheApprovalInterface() public view {
+        assertTrue(registry.supportsInterface(type(ISchnorrApprovalRegistry).interfaceId), "approval id");
+        assertTrue(registry.supportsInterface(type(ISchnorrStakeRegistry).interfaceId), "stake registry id");
+        assertTrue(registry.supportsInterface(type(IERC165).interfaceId), "erc165 id");
+        assertFalse(registry.supportsInterface(0xffffffff), "invalid id");
+        assertEq(type(ISchnorrApprovalRegistry).interfaceId, bytes4(0xf1c57fc0), "approval id must not drift");
     }
 
     function _expiryProof() private view returns (bytes32[] memory) {
