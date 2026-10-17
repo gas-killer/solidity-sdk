@@ -768,10 +768,14 @@ contract GasKillerSDKHardeningTest is Test {
             IGasKillerSDK.verifyAndUpdate.selector,
             "core id is still exactly the verifyAndUpdate selector"
         );
-        // Pinned literals: state mutability is not part of a function signature, so making
-        // both entrypoints `payable` must leave the IDs the router preflights untouched.
-        // A change here is an interface break for every already-deployed router.
+        // Pinned literals. The core ID is what every deployed router preflights, so a change to
+        // it is an interface break for all of them; state mutability is not part of a function
+        // signature, so `payable` leaves it untouched.
         assertEq(type(IGasKillerSDK).interfaceId, bytes4(0x82b35a01), "core id must not drift");
+        // The batch ID is the `verifyAndUpdateBatch` selector, which covers the `TaskSubmission`
+        // tuple. It moved from 0x2ea5ee1d when submissions gained `value` (#104): batch callers
+        // and probes built for the old struct do not match contracts built from this SDK. Move
+        // it again only as a deliberate, announced break.
         assertEq(type(IGasKillerSDKBatch).interfaceId, bytes4(0xce8e6efc), "batch id must not drift");
         assertFalse(sdk.supportsInterface(type(IGasKillerNested).interfaceId), "nested is opt-in");
         assertEq(type(IGasKillerNested).interfaceId, bytes4(0x78481874), "nested id must not drift");
