@@ -7,12 +7,9 @@ import {DepositVault} from "./DepositVault.sol";
 /// @title DepositGateway
 /// @notice The root contract of the nested-deposit example: `deposit` forwards its ETH to the
 ///         vault, so settled nested, the tree's `NESTED` op moves value into the vault's frame.
-/// @dev The root leaf does not bind `msg.value` (gas-killer/solidity-sdk#104), so the root
-///      must not be where deposits are credited. The vault credits them instead, inside a frame
-///      whose leaf binds the value it receives, so the vault is backed by every wei it credits.
-///      The gateway does not bind who pays: over-payment is not refunded and ETH can be forced
-///      in, and any balance left here can fund a later settlement sent with less than its
-///      deposit. A balance check in `deposit` would not help, since settlement never runs it.
+/// @dev Both leaves bind value: the root leaf binds the `msg.value` the tree settles with, and
+///      the vault's leaf binds what the `NESTED` op forwards it, so a deposit settles only with
+///      its ETH and the vault is backed by every wei it credits.
 contract DepositGateway is GasKillerNestedSDK {
     /// @notice Number of deposits forwarded (slot 0).
     uint256 public deposits;

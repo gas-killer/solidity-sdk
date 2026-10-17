@@ -9,10 +9,8 @@ import {HashChain} from "../HashChain.sol";
 ///         chains a receipt over every deposit, and pays deposits back out on withdrawal.
 /// @dev The receipt chain makes `deposit` expensive enough natively that applying its frame
 ///      is cheaper, so the analyzer nests it rather than replaying it as a plain `CALL`.
-///      Only the gateway may deposit. A deposit settled as this contract's own root transition
-///      would be credited for any `msg.value` (gas-killer/solidity-sdk#104); reached only
-///      through the gateway, it is either a nested frame, whose leaf binds the value, or a
-///      native call carrying real ETH.
+///      Only the gateway may deposit, so every deposit arrives as the gateway's nested frame or
+///      as a native call carrying real ETH.
 contract DepositVault is GasKillerNestedSDK {
     error InvalidConfiguration();
     error NotGateway();
