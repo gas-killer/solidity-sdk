@@ -8,11 +8,13 @@ pragma solidity ^0.8.4;
 // on the selectors declared here. See src/examples/onchain-llm/UNBOUNDED_V3_NATIVE.md
 // (§ Error semantics).
 
+library GkVmUnavailable_0 {
 /// @notice No gkvm precompile answered at the target address
 /// @dev On any real chain the gkvm address is an empty account: the STATICCALL succeeds with
 ///      empty returndata. Raised by `GkVm.exec` itself (never by the precompile) whenever the
 ///      returndata lacks the mandatory `GKVM_OK_TAG` prefix.
 error GkVmUnavailable();
+}
 
 /// @notice The guest called `gk_abort(code, msg)`, or hit a spec'd trap (illegal instruction, bad ELF semantics)
 /// @param code Guest-chosen abort code, or a spec'd trap code
@@ -67,7 +69,7 @@ library GkVm {
     {
         (bool ok, bytes memory ret) = gkvm.staticcall(abi.encodePacked(programHash, artifactRoot, payload));
         if (!ok) _bubble(ret);
-        if (ret.length == 0 || ret[0] != GKVM_OK_TAG) revert GkVmUnavailable();
+        if (ret.length == 0 || ret[0] != GKVM_OK_TAG) revert GkVmUnavailable_0.GkVmUnavailable();
         return _stripTag(ret);
     }
 
