@@ -1,8 +1,9 @@
 # tools/gk — the gkvm guest toolchain
 
 `gk init` scaffolds a gkvm guest into a forge project, `gk build` turns guest source into
-`guest.elf` + `programHash` + a Solidity binding, `gk vectors` records golden vectors from the
-`gk-run` sidecar. Python standard library only; `python3 tools/gk --help` lists everything.
+`guest.elf` + `programHash` + a Solidity binding, `gk publish` puts that ELF on a hash-addressed
+mirror operators fetch from, `gk vectors` records golden vectors from the `gk-run` sidecar.
+Python standard library only; `python3 tools/gk --help` lists everything.
 
 Status: draft ([gas-killer/solidity-sdk#85](https://github.com/gas-killer/solidity-sdk/pull/85)).
 What a fresh project gets today is the forge emulation only — the scaffolded `guest/README.md`
@@ -48,6 +49,49 @@ The `gk` command finds `lib/solidity-sdk/tools/gk` from anywhere inside the proj
 `$GK_SDK`); without the installer, `python3 lib/solidity-sdk/tools/gk …` is the same thing
 with `GK_RUN` set by hand. The scaffolded `guest/README.md` covers the rest, including what a
 fresh project does and does not get today.
+
+## Publishing a guest: `gk publish`
+
+A guest exists on-chain only as its hash: the consumer's `programHash()` (`IGkVmConsumer` in
+`src/gkvm/`, which the scaffolded consumer implements — or the generated binding's uppercase
+`PROGRAM_HASH()` constant, which the operator side recognizes too). An operator serving a task
+reads that hash off the consumer at the task's block height, fetches the ELF from the mirrors its
+fleet knows, verifies `keccak256(elf) == programHash` and installs it. Deploying the consumer
+publishes the *name*; `gk publish` makes the *bytes* reachable under it:
+
+    gk publish cache/gkvm/build/greet/guest.elf --to s3://my-mirror/gkvm
+    PROGRAM_HASH=0x7a1c…
+    PUBLISHED=s3://my-mirror/gkvm/7a1c….elf
+    MIRROR_BASE=https://my-mirror.s3.amazonaws.com/gkvm
+    next: operators fetch https://my-mirror.s3.amazonaws.com/gkvm/7a1c….elf on the first task that names this hash — no fleet config change
+
+The layout is flat and hash-addressed: `<mirror base>/<programHash hex, lowercase, no 0x>.elf`.
+Publishing is availability, not trust — the operator verifies the keccak, so a mirror can be
+anyone's bucket, and re-publishing the same ELF is a no-op. Targets (`--to`, repeatable; the
+accepted file is `guest.elf` or the `gk build` dir holding one):
+
+| target | how it is written | `MIRROR_BASE` |
+|---|---|---|
+| `<dir>` or `file://<dir>` | atomic copy (temp file + rename, mode 0644); the directory is created | the directory's absolute path |
+| `s3://bucket[/prefix]` | `aws s3 cp` (`--public` → `--acl public-read`) | `https://<bucket>.s3.amazonaws.com[/<prefix>]`, or `<endpoint>/<bucket>[/<prefix>]` with `--endpoint` |
+| `gs://bucket[/prefix]` | `gcloud storage cp` (`--public` → `--predefined-acl=publicRead`) | `https://storage.googleapis.com/<bucket>[/<prefix>]` |
+
+An S3-compatible store is an `s3://` target plus its endpoint — Quilibrium QStorage, for one:
+
+    gk publish cache/gkvm/build/greet/guest.elf --to s3://my-mirror/gkvm --endpoint https://qstorage.quilibrium.com
+    # or once: export GK_PUBLISH_S3_ENDPOINT=https://qstorage.quilibrium.com
+
+`https://…` is refused as a target: that is what operators *read*; mirrors are written through
+the three forms above. `--program-hash 0x…` (paste the binding's `PROGRAM_HASH`) makes the
+command refuse an ELF that does not hash to it — the guard against publishing a stale build —
+and `--dry-run` prints the copies and commands without running or creating anything. Every fact
+is one `KEY=value` line on stdout, so `gk publish … | grep ^MIRROR_BASE=` works.
+
+What an operator does with `MIRROR_BASE`: adds it, once, to the fleet's mirror list. From then on
+every program any consumer names is fetched on demand — `<MIRROR_BASE>/<hex64>.elf` on the first
+task that names the hash — and verified, so publishing a new guest (or a rebuilt one, which is a
+new hash) never touches operator configuration. Several `--to` targets publish the same object to
+several mirrors.
 
 ## When it fails: `gk explain`
 

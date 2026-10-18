@@ -23,6 +23,7 @@ import gk_explain  # noqa: E402
 import gk_fast  # noqa: E402
 import gk_forge  # noqa: E402
 import gk_init  # noqa: E402
+import gk_publish  # noqa: E402
 import gk_python  # noqa: E402
 import gk_toolchain  # noqa: E402
 import gk_vectors  # noqa: E402
@@ -199,6 +200,218 @@ class Cli(unittest.TestCase):
             with open(out) as f:
                 doc = json.load(f)
         self.assertEqual(doc['vectors'][0]['stdout'], HELLO_11223344)
+
+
+class Publish(unittest.TestCase):
+    """`gk publish`: the hash-addressed layout, every target kind through an injected runner —
+    no aws, no gcloud, no network."""
+
+    # any bytes: the hash is what matters
+    ELF = b'\x7fELF' + bytes(range(256)) * 3
+    QS = 'https://qstorage.quilibrium.com'
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        self.build = os.path.join(self.tmp, 'build')
+        self.elf = os.path.join(self.build, 'guest.elf')
+        os.makedirs(self.build)
+        with open(self.elf, 'wb') as f:
+            f.write(self.ELF)
+        self.hash = hex32(keccak256_pure(self.ELF))
+        self.name = self.hash[2:] + '.elf'
+        # a machine-wide endpoint must not leak into the s3 expectations
+        env = os.environ.pop(gk_publish.ENDPOINT_ENV, None)
+        if env is not None:
+            self.addCleanup(os.environ.__setitem__, gk_publish.ENDPOINT_ENV, env)
+
+    @staticmethod
+    def ok(seen):
+        def run(argv):
+            seen.append(argv)
+            return subprocess.CompletedProcess(argv, 0)
+        return run
+
+    def test_directory_target_end_to_end(self):
+        mirror = os.path.join(self.tmp, 'mirror', 'gkvm')  # does not exist yet
+        lines = []
+        facts = gk_publish.publish(self.elf, [mirror], log=lines.append)
+        obj = os.path.join(mirror, self.name)
+        with open(obj, 'rb') as f:
+            self.assertEqual(f.read(), self.ELF)
+        self.assertEqual(os.listdir(mirror), [self.name])  # no temp file left behind
+        self.assertEqual(os.stat(obj).st_mode & 0o777, 0o644)
+        self.assertEqual(facts['PROGRAM_HASH'], self.hash)
+        self.assertEqual(facts['OBJECT'], self.name)
+        self.assertEqual(facts['PUBLISHED'], [obj])
+        self.assertEqual(facts['MIRROR_BASE'], [mirror])
+        self.assertEqual(facts['COMMANDS'], [None])
+        self.assertFalse(facts['DRY_RUN'])
+        # the printed facts: one per line, grep-friendly, the hash first
+        self.assertEqual(lines[0], 'PROGRAM_HASH=' + self.hash)
+        self.assertIn('PUBLISHED=' + obj, lines)
+        self.assertIn('MIRROR_BASE=' + mirror, lines)
+        self.assertTrue(lines[-1].startswith('next: operators fetch %s/%s on the first task'
+                                             % (mirror, self.name)), lines[-1])
+        # re-publishing is idempotent: hash-addressed, same bytes, same name
+        gk_publish.publish(self.elf, [mirror], log=quiet)
+        self.assertEqual(os.listdir(mirror), [self.name])
+
+    def test_accepts_the_build_dir_and_file_urls(self):
+        mirror = os.path.join(self.tmp, 'm')
+        facts = gk_publish.publish(self.build, ['file://' + mirror], log=quiet)
+        self.assertEqual(facts['ELF'], self.elf)
+        self.assertEqual(facts['MIRROR_BASE'], [mirror])
+        self.assertTrue(os.path.isfile(os.path.join(mirror, self.name)))
+        with self.assertRaisesRegex(gk_publish.GkPublishError, 'no such ELF'):
+            gk_publish.publish(os.path.join(self.tmp, 'nowhere'), [mirror], log=quiet)
+
+    def test_program_hash_mismatch_refuses_and_writes_nothing(self):
+        mirror = os.path.join(self.tmp, 'mirror')
+        with self.assertRaisesRegex(gk_publish.GkPublishError, 'different build'):
+            gk_publish.publish(self.elf, [mirror], program_hash='0x' + 'ab' * 32, log=quiet)
+        self.assertFalse(os.path.exists(mirror))
+        with self.assertRaisesRegex(gk_publish.GkPublishError, 'not a 32-byte hex hash'):
+            gk_publish.publish(self.elf, [mirror], program_hash='0x1234', log=quiet)
+        self.assertFalse(os.path.exists(mirror))
+        # the binding's hash, in any spelling, passes
+        for spelled in (self.hash, '0X' + self.hash[2:].upper(), self.hash[2:]):
+            gk_publish.publish(self.elf, [mirror], program_hash=spelled, log=quiet)
+        self.assertTrue(os.path.isfile(os.path.join(mirror, self.name)))
+
+    def test_object_name_and_parse_target(self):
+        self.assertEqual(gk_publish.object_name(self.hash), self.name)
+        self.assertEqual(gk_publish.object_name(self.hash[2:].upper()), self.name)
+        parse = gk_publish.parse_target
+        self.assertEqual(parse('s3://my-bucket/gkvm/programs/'), ('s3', 'my-bucket', 'gkvm/programs'))
+        self.assertEqual(parse('s3://my-bucket'), ('s3', 'my-bucket', ''))
+        self.assertEqual(parse('gs://b/p'), ('gs', 'b', 'p'))
+        self.assertEqual(parse('file:///srv/mirror/'), ('dir', '/srv/mirror', ''))
+        self.assertEqual(parse('/srv/mirror'), ('dir', '/srv/mirror', ''))
+        self.assertEqual(parse('mirror'), ('dir', os.path.abspath('mirror'), ''))
+        for bad in ('https://mirror.example/gkvm', 'http://x', 'ipfs://Qm', 's3://', 'gs:///p',
+                    'file://', ''):
+            with self.assertRaises(gk_publish.GkPublishError, msg=bad):
+                parse(bad)
+        # the https refusal points at the s3 + endpoint spelling
+        with self.assertRaisesRegex(gk_publish.GkPublishError, r'READ over https.*--endpoint'):
+            parse(self.QS + '/bucket')
+
+    def test_mirror_base(self):
+        base = gk_publish.mirror_base
+        self.assertEqual(base('s3://b/p'), 'https://b.s3.amazonaws.com/p')
+        self.assertEqual(base('s3://b'), 'https://b.s3.amazonaws.com')
+        self.assertEqual(base('s3://b/p/q', self.QS + '/'), self.QS + '/b/p/q')
+        self.assertEqual(base('s3://b', self.QS), self.QS + '/b')
+        self.assertEqual(base('gs://b/p'), 'https://storage.googleapis.com/b/p')
+        self.assertEqual(base('gs://b', self.QS), 'https://storage.googleapis.com/b')  # endpoint: s3 only
+        self.assertEqual(base('/srv/mirror'), '/srv/mirror')
+
+    def test_upload_command(self):
+        cmd = gk_publish.upload_command
+        self.assertEqual(cmd('s3://b/p', '/x/guest.elf', self.name),
+                         ['aws', 's3', 'cp', '/x/guest.elf', 's3://b/p/' + self.name])
+        self.assertEqual(cmd('s3://b', '/x/guest.elf', self.name, public=True, endpoint=self.QS),
+                         ['aws', 's3', 'cp', '/x/guest.elf', 's3://b/' + self.name,
+                          '--endpoint-url', self.QS, '--acl', 'public-read'])
+        self.assertEqual(cmd('gs://b/p', '/x/guest.elf', self.name),
+                         ['gcloud', 'storage', 'cp', '/x/guest.elf', 'gs://b/p/' + self.name])
+        self.assertEqual(cmd('gs://b', '/x/guest.elf', self.name, public=True, endpoint=self.QS),
+                         ['gcloud', 'storage', 'cp', '/x/guest.elf', 'gs://b/' + self.name,
+                          '--predefined-acl=publicRead'])
+        self.assertIsNone(cmd('/srv/mirror', '/x/guest.elf', self.name, public=True))
+
+    def test_bucket_targets_run_the_injected_command(self):
+        seen = []
+        facts = gk_publish.publish(self.elf, ['s3://b/p', 'gs://g'], public=True, endpoint=self.QS,
+                                   log=quiet, run=self.ok(seen))
+        self.assertEqual(seen, [
+            ['aws', 's3', 'cp', self.elf, 's3://b/p/' + self.name,
+             '--endpoint-url', self.QS, '--acl', 'public-read'],
+            ['gcloud', 'storage', 'cp', self.elf, 'gs://g/' + self.name,
+             '--predefined-acl=publicRead']])
+        self.assertEqual(facts['PUBLISHED'], ['s3://b/p/' + self.name, 'gs://g/' + self.name])
+        self.assertEqual(facts['MIRROR_BASE'], [self.QS + '/b/p', 'https://storage.googleapis.com/g'])
+        self.assertEqual(facts['COMMANDS'], seen)
+        # the endpoint from the environment, and the flag over it
+        seen = []
+        os.environ[gk_publish.ENDPOINT_ENV] = 'https://env.example'
+        try:
+            gk_publish.publish(self.elf, ['s3://b'], log=quiet, run=self.ok(seen))
+            gk_publish.publish(self.elf, ['s3://b'], endpoint=self.QS, log=quiet, run=self.ok(seen))
+        finally:
+            del os.environ[gk_publish.ENDPOINT_ENV]
+        self.assertEqual(seen[0][-2:], ['--endpoint-url', 'https://env.example'])
+        self.assertEqual(seen[1][-2:], ['--endpoint-url', self.QS])
+        # no endpoint: AWS's own host, no --endpoint-url
+        seen = []
+        facts = gk_publish.publish(self.elf, ['s3://b/p'], log=quiet, run=self.ok(seen))
+        self.assertEqual(seen, [['aws', 's3', 'cp', self.elf, 's3://b/p/' + self.name]])
+        self.assertEqual(facts['MIRROR_BASE'], ['https://b.s3.amazonaws.com/p'])
+
+    def test_a_failed_or_missing_tool_is_loud(self):
+        def fail(argv):
+            return subprocess.CompletedProcess(argv, 1)
+        with self.assertRaisesRegex(gk_publish.GkPublishError, r'`aws s3 cp .*` exited 1'):
+            gk_publish.publish(self.elf, ['s3://b'], log=quiet, run=fail)
+
+        def missing(argv):
+            raise FileNotFoundError(2, 'No such file or directory', argv[0])
+        with self.assertRaisesRegex(gk_publish.GkPublishError, 'aws not found on PATH'):
+            gk_publish.publish(self.elf, ['s3://b'], log=quiet, run=missing)
+        with self.assertRaisesRegex(gk_publish.GkPublishError, 'gcloud not found on PATH'):
+            gk_publish.publish(self.elf, ['gs://b'], log=quiet, run=missing)
+
+    def test_dry_run_creates_nothing_and_calls_no_runner(self):
+        mirror = os.path.join(self.tmp, 'mirror')
+
+        def boom(argv):
+            self.fail('dry run invoked %r' % (argv,))
+        lines = []
+        facts = gk_publish.publish(self.elf, [mirror, 's3://b/p'], dry_run=True,
+                                   log=lines.append, run=boom)
+        self.assertFalse(os.path.exists(mirror))
+        self.assertTrue(facts['DRY_RUN'])
+        self.assertEqual(lines[0], 'PROGRAM_HASH=' + self.hash)
+        self.assertIn('would copy %s -> %s' % (self.elf, os.path.join(mirror, self.name)), lines)
+        self.assertIn('would run: aws s3 cp %s s3://b/p/%s' % (self.elf, self.name), lines)
+        self.assertIn('WOULD_PUBLISH=s3://b/p/' + self.name, lines)
+        self.assertIn('MIRROR_BASE=https://b.s3.amazonaws.com/p', lines)
+        self.assertFalse([line for line in lines if line.startswith('PUBLISHED=')])
+        self.assertTrue(lines[-1].startswith('dry run: nothing written'), lines[-1])
+
+    def test_refusals_write_nothing(self):
+        mirror = os.path.join(self.tmp, 'mirror')
+        with self.assertRaisesRegex(gk_publish.GkPublishError, 'at least one --to'):
+            gk_publish.publish(self.elf, [], log=quiet)
+        # a bad second target refuses before the first is written
+        with self.assertRaisesRegex(gk_publish.GkPublishError, 'not a publish target'):
+            gk_publish.publish(self.elf, [mirror, 'https://mirror.example/gkvm'], log=quiet)
+        self.assertFalse(os.path.exists(mirror))
+
+    def test_cli(self):
+        mirror = os.path.join(self.tmp, 'mirror')
+        gk = [sys.executable, '-B', HERE, 'publish']
+        proc = subprocess.run(gk + [self.elf, '--to', mirror],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out = proc.stdout.decode()
+        self.assertIn('PROGRAM_HASH=%s\n' % self.hash, out)
+        self.assertIn('PUBLISHED=%s\n' % os.path.join(mirror, self.name), out)
+        self.assertIn('MIRROR_BASE=%s\n' % mirror, out)
+        self.assertTrue(os.path.isfile(os.path.join(mirror, self.name)))
+        # no --to: a gk refusal (exit 1, `gk:` on stderr), not an argparse usage error
+        proc = subprocess.run(gk + [self.elf], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stdout, b'')
+        self.assertIn(b'gk: publish wants at least one --to', proc.stderr)
+        # --dry-run through the CLI: the exact aws command, nothing run
+        proc = subprocess.run(gk + [self.elf, '--to', 's3://b', '--dry-run', '--public'],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(b'would run: aws s3 cp ', proc.stdout)
+        self.assertIn(b'--acl public-read', proc.stdout)
 
 
 @unittest.skipUnless(GK_RUN, 'GK_RUN not set')
@@ -1435,15 +1648,15 @@ class InitEndToEnd(unittest.TestCase):
 
         base = {k: v for k, v in os.environ.items()
                 if k not in ('GK_RUN', 'FOUNDRY_PROFILE', 'GK_GUEST_CRT')}
-        # default profile, no GK_RUN: ffi-free and green — shim tests skip, the
-        # GkVmUnavailable test runs
+        # default profile, no GK_RUN: ffi-free and green — shim tests skip, the two always-on
+        # tests (GkVmUnavailable, the IGkVmConsumer getters) run
         plain = forge_test(base)
         self.assertEqual(plain.returncode, 0, plain.stdout.decode())
-        self.assertIn(b'1 passed; 0 failed; 2 skipped', plain.stdout)
+        self.assertIn(b'2 passed; 0 failed; 2 skipped', plain.stdout)
         if GK_RUN:
             ffi = forge_test(dict(base, GK_RUN=GK_RUN, FOUNDRY_PROFILE='gkvm-ffi'))
             self.assertEqual(ffi.returncode, 0, ffi.stdout.decode())
-            self.assertIn(b'3 passed; 0 failed; 0 skipped', ffi.stdout)
+            self.assertIn(b'4 passed; 0 failed; 0 skipped', ffi.stdout)
             print('  ' + ffi.stdout.decode().strip().replace('\n', '\n  '), file=sys.stderr)
 
 

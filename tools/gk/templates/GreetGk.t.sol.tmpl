@@ -59,4 +59,11 @@ contract GreetGkTest is Test {
         vm.expectRevert(GkVmUnavailable.selector);
         production.preview("world", 1);
     }
+
+    /// @dev No gk-run needed: the IGkVmConsumer getters operators resolve the guest program through
+    function testExposesTheProgramOperatorsInstall() public {
+        GreetGk production = new GreetGk(GKVM_ADDRESS);
+        assertEq(production.programHash(), GkGreet.PROGRAM_HASH);
+        assertEq(production.artifactRoot(), bytes32(0));
+    }
 }

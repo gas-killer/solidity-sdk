@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.4;
 
+import {IGkVmConsumer} from "{{SDK_REMAP}}gkvm/IGkVmConsumer.sol";
 import {GkHello} from "{{BINDING_IMPORT}}";
 
 /// @title HelloGk
@@ -10,7 +11,12 @@ import {GkHello} from "{{BINDING_IMPORT}}";
 ///      forge tests. On a chain without the precompile — every real chain today — `preview` and
 ///      `greet` revert `GkVmUnavailable`: the guest only ever runs inside the operators'
 ///      simulation environment.
-contract HelloGk {
+///      `programHash()` / `artifactRoot()` (IGkVmConsumer) are how operators discover the guest:
+///      they read them off the deployed consumer and fetch the ELF by that hash from a mirror
+///      (`gk publish`), so deploying this contract is the whole on-chain publication step.
+contract HelloGk is IGkVmConsumer {
+    /// @notice keccak256 of guest/hello.c's ELF — what operators install to serve this consumer
+    bytes32 public constant PROGRAM_HASH = GkHello.PROGRAM_HASH;
     address public immutable gkvm;
     bytes public lastGreeting;
 
@@ -21,6 +27,7 @@ contract HelloGk {
     }
 
     /// @notice The guest's answer for `payload`: "GKVM-HELLO-V1\n" followed by the payload reversed
+    /// @dev No artifact bundle: the zero root passed here is what `artifactRoot()` reports
     function preview(bytes memory payload) public view returns (bytes memory) {
         return GkHello.call(gkvm, bytes32(0), payload);
     }
@@ -29,5 +36,15 @@ contract HelloGk {
         bytes memory greeting = preview(payload);
         lastGreeting = greeting;
         emit Greeted(greeting);
+    }
+
+    /// @inheritdoc IGkVmConsumer
+    function programHash() external pure returns (bytes32) {
+        return PROGRAM_HASH;
+    }
+
+    /// @inheritdoc IGkVmConsumer
+    function artifactRoot() external pure returns (bytes32) {
+        return bytes32(0);
     }
 }

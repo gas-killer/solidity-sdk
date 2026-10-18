@@ -11,7 +11,7 @@ contract runs through the gkvm precompile with `GkVm.exec`; its identity on-chai
 | `guest/{{EXAMPLE_GUEST}}` | {{EXAMPLE_DESC}} | yes |
 {{CRT_ROW}}
 | `{{SRC}}/gen/{{BINDING_NAME}}.sol` | generated binding (`PROGRAM_HASH` + `call`) | no — `gk build` rewrites it |
-| `{{SRC}}/{{CONSUMER}}` | sample consumer | yes |
+| `{{SRC}}/{{CONSUMER}}` | sample consumer; implements `IGkVmConsumer`, how operators read which guest it runs | yes |
 | `{{TEST}}/{{CONSUMER_TEST}}` | test wired to `GkVmFfiShim` | yes |
 | `foundry.toml` | `[profile.gkvm-ffi]` appended (`ffi = true` lives there and nowhere else) | — |
 | `remappings.txt` | `{{SDK_REMAP}}={{SDK_PATH}}/src/` | — |
@@ -32,7 +32,21 @@ Re-running `gk init` is safe: existing files are never overwritten.
    → `cache/gkvm/build/<name>/guest.elf` + `{{SRC}}/gen/{{BINDING_NAME}}.sol`. The build is
    reproducible: same source + crt + toolchain → same `programHash`.
 
-2. **Get `gk-run`**, the sidecar that executes guests (the same binary the operator path wraps).
+2. **Publish the guest** where operators can fetch it (again after any rebuild that changes
+   `programHash` — a different ELF is a different program):
+
+       python3 {{SDK_PATH}}/tools/gk publish cache/gkvm/build/<name>/guest.elf --to <target>
+
+   `<target>` is a directory, `s3://bucket[/prefix]` (`--endpoint <url>` for an S3-compatible
+   store such as Quilibrium QStorage) or `gs://bucket[/prefix]`; `--public` makes the object
+   world-readable. The ELF lands as `<mirror base>/<programHash hex>.elf` and the command prints
+   that `MIRROR_BASE`. Operators never configure *your* program: the consumer exposes its hash
+   through `IGkVmConsumer` (`programHash()` / `artifactRoot()`, which `{{SRC}}/{{CONSUMER}}`
+   implements), and an operator serving a task fetches `<mirror base>/<programHash hex>.elf` by
+   that hash, verifies the keccak and installs it — so once a mirror the fleet knows serves the
+   file, no operator config change is needed.
+
+3. **Get `gk-run`**, the sidecar that executes guests (the same binary the operator path wraps).
    One line (prebuilt, sha256-verified; also installs a `gk` command on `~/.gk/bin`):
 
        curl -fsSL https://gaskiller.xyz/bash | sh
@@ -53,7 +67,7 @@ Re-running `gk init` is safe: existing files are never overwritten.
 
        cargo install --locked --git https://github.com/gas-killer/gas-analyzer gas-analyzer-gkvm --bin gk-run
 
-3. **Run the tests** with the guest really executing:
+4. **Run the tests** with the guest really executing:
 
        forge test --match-contract {{TEST_CONTRACT}}
 
@@ -76,7 +90,7 @@ Re-running `gk init` is safe: existing files are never overwritten.
    you pin, sign or ship must come from the real path (drop `GK_FAST`, or
    `gk run --fast-check` to diff the two).
 
-4. **Run it on a local node** — `gk anvil` starts anvil with the gkvm precompile and every guest
+5. **Run it on a local node** — `gk anvil` starts anvil with the gkvm precompile and every guest
    built here installed; deploy the consumer with `GKVM_ADDRESS` (`0x3559…3c59`) as its `gkvm` and
    `cast call` it. The precompile exists on that node and on no real chain (see below).
 
@@ -134,7 +148,10 @@ none of it has shipped:
    on draft PRs; a released gas-analyzer does not know the gkvm address.
    Tracking: [gas-killer/gas-analyzer#197](https://github.com/gas-killer/gas-analyzer/issues/197).
 2. **The service rolls it out.** Operators must run the `local` executor with your guest ELF
-   (and any artifacts) installed, addressed by `programHash`. Not started.
+   (and any artifacts) installed, addressed by `programHash`. The consumer-side half is in this
+   sdk — `IGkVmConsumer` names the program on-chain, `gk publish` puts the ELF on a
+   hash-addressed mirror — but the operator-side resolver that reads the one and fetches from
+   the other has not shipped.
    Tracking: [gas-killer/service#451](https://github.com/gas-killer/service/issues/451).
 3. **Your consumer is registered with `requiresGuestVm`.** Without that gate, an operator that
    lacks the program does not fail — it deterministically simulates the `GkVmUnavailable`

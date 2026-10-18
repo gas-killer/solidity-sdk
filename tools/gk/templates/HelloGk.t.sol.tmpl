@@ -54,4 +54,11 @@ contract HelloGkTest is Test {
         vm.expectRevert(GkVmUnavailable.selector);
         production.preview(hex"11223344");
     }
+
+    /// @dev No gk-run needed: the IGkVmConsumer getters operators resolve the guest program through
+    function testExposesTheProgramOperatorsInstall() public {
+        HelloGk production = new HelloGk(GKVM_ADDRESS);
+        assertEq(production.programHash(), GkHello.PROGRAM_HASH);
+        assertEq(production.artifactRoot(), bytes32(0));
+    }
 }

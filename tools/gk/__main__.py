@@ -20,6 +20,11 @@ Run from the solidity-sdk root:
 
     python3 tools/gk hash guest.elf
 
+    python3 tools/gk publish cache/gkvm/build/hello/guest.elf --to s3://my-mirror/gkvm
+        PROGRAM_HASH=0x…
+        PUBLISHED=s3://my-mirror/gkvm/<hex64>.elf
+        MIRROR_BASE=https://my-mirror.s3.amazonaws.com/gkvm   (operators fetch <base>/<hex64>.elf)
+
 From a forge project that installed the sdk (outputs then hang off the project):
 
     python3 lib/solidity-sdk/tools/gk init
@@ -30,7 +35,8 @@ From a forge project that installed the sdk (outputs then hang off the project):
 `build` needs gk-guest-crt (--crt, GK_GUEST_CRT, the project's vendored guest/, else the
 copy bundled in tools/gk/guest-crt) and riscv64-unknown-elf-gcc or docker; a Python guest
 also needs MicroPython at the pinned commit (--mpy-src, GK_MPY_SRC, else cloned). `vectors` needs
-the gk-run sidecar (--gk-run or GK_RUN). Python standard library only.
+the gk-run sidecar (--gk-run or GK_RUN); `publish` needs `aws` / `gcloud` for bucket targets only.
+Python standard library only.
 
 See src/examples/onchain-llm/UNBOUNDED_V3_NATIVE.md (§ Writing programs).
 """
@@ -45,6 +51,7 @@ import gk_explain  # noqa: E402
 import gk_fast  # noqa: E402
 import gk_forge  # noqa: E402
 import gk_init  # noqa: E402
+import gk_publish  # noqa: E402
 import gk_test  # noqa: E402
 import gk_toolchain  # noqa: E402
 import gk_anvil  # noqa: E402
@@ -94,6 +101,24 @@ def main(argv=None):
 
     h = sub.add_parser('hash', help='print programHash = keccak256(ELF)')
     h.add_argument('elf')
+
+    p = sub.add_parser('publish', help='put a built guest.elf where operators fetch it by hash '
+                                       '(<mirror>/<programHash hex>.elf): a directory, '
+                                       's3://bucket[/prefix] or gs://bucket[/prefix]')
+    p.add_argument('elf', help='guest.elf, or the `gk build` dir holding one')
+    p.add_argument('--to', action='append', default=[], metavar='TARGET',
+                   help='a directory, s3://bucket[/prefix] or gs://bucket[/prefix]; repeat to '
+                        'publish to several mirrors')
+    p.add_argument('--program-hash', metavar='0xHEX',
+                   help="the binding's PROGRAM_HASH; refused unless the ELF hashes to it")
+    p.add_argument('--public', action='store_true',
+                   help='world-readable object (s3: --acl public-read; gs: '
+                        '--predefined-acl=publicRead)')
+    p.add_argument('--endpoint', metavar='URL',
+                   help='S3-compatible endpoint for s3:// targets, e.g. '
+                        'https://qstorage.quilibrium.com (default $GK_PUBLISH_S3_ENDPOINT)')
+    p.add_argument('--dry-run', action='store_true',
+                   help='print the copies / commands that would run; run nothing')
 
     e = sub.add_parser('explain', help='decode a gkvm failure: an ABI revert blob, the '
                                        'forge-printed GkGuestTrap(…) line, gk-run\'s hex '
@@ -236,6 +261,9 @@ def main(argv=None):
             else:
                 project = gk_build.find_project(os.getcwd(), args.sdk_root)
                 return gk_toolchain.cli_list(project or os.getcwd())
+        elif args.cmd == 'publish':
+            gk_publish.publish(args.elf, args.to, program_hash=args.program_hash,
+                               public=args.public, endpoint=args.endpoint, dry_run=args.dry_run)
         elif args.cmd == 'explain':
             print(gk_explain.explain(' '.join(args.blob)))
         elif args.cmd == 'vectors':
@@ -253,7 +281,7 @@ def main(argv=None):
             with open(args.elf, 'rb') as f:
                 print(hex32(keccak256(f.read())))
     except (gk_build.GkBuildError, gk_init.GkInitError, gk_vectors.GkVectorsError,
-            gk_explain.GkExplainError, gk_fast.GkFastError,
+            gk_explain.GkExplainError, gk_fast.GkFastError, gk_publish.GkPublishError,
             gk_toolchain.GkToolchainError, OSError) as e:
         print('gk: %s' % e, file=sys.stderr)
         return 1
