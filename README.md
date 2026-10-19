@@ -131,10 +131,18 @@ This is what makes inbound value safe. A tracked function that credits `msg.valu
 mint for ETH, a payable purchase) replays as plain `STORE` updates, so without the binding anyone
 could settle it while sending nothing, and the contract would record ETH it never received.
 
-Outbound value works as before. A `CALL`, `CREATE` or `CREATE2` update moves an amount fixed inside
-the signed `storageUpdates`, paid out of the contract's balance, which includes `msg.value`. A
-shortfall reverts the whole transition: `RevertingContext` with empty revert data for a `CALL` (the
-EVM fails the call before the target runs), `DeploymentFailed` for a `CREATE`/`CREATE2`.
+A `CALL`, `CREATE` or `CREATE2` update moves an amount fixed inside the signed `storageUpdates`,
+paid out of the contract's balance, which includes `msg.value`. A shortfall reverts the whole
+transition: `RevertingContext` with empty revert data for a `CALL` (the EVM fails the call before the
+target runs), `DeploymentFailed` for a `CREATE`/`CREATE2`.
+
+The settler can't top that balance up. Any ETH the task wasn't analyzed with fails the digest, so a
+transition analyzed with no value rejects all ETH. A pass-through call, such as a deposit that
+forwards its `msg.value`, still works, because the value it forwards is the value it was analyzed
+with. A contract whose updates pay out of its own balance has to be funded some other way.
+`GasKillerSDK` has no `receive()`, so add one or a payable funding function. If the balance has
+dropped since the task was analyzed, the transition fails until the contract is funded and the task
+is resubmitted.
 
 For `verifyAndUpdateBatch`, each `TaskSubmission` carries the `value` its transition was analyzed
 with, and its digest binds that value. `msg.value` must cover the sum over the submissions actually
