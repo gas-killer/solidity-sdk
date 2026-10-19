@@ -495,8 +495,8 @@ interface ISchnorrApprovalRegistry is ISchnorrStakeRegistry {
 ///      node can never be presented as a leaf.
 ///
 ///      Three leaf types:
-///        - root leaf:   today's single-transition digest, unchanged, so a consumer settled
-///                       without nesting signs exactly what it signed before;
+///        - root leaf:   the single-transition digest, value included, so a consumer settled
+///                       without nesting signs exactly what it signs for `verifyAndUpdate`;
 ///        - nested leaf: a callee frame, binding chain, contract, caller, value and index;
 ///        - expiry leaf: the block after which neither the root nor any frame may settle.
 ///      The nested and expiry tags are keccak-derived words in the first slot of their
@@ -524,12 +524,18 @@ library NestedFrames {
         bytes[] children;
     }
 
-    function rootLeaf(uint256 transitionIndex, address target, bytes4 targetFunction, bytes memory storageUpdates)
-        internal
-        pure
-        returns (bytes32)
-    {
-        return sha256(abi.encode(transitionIndex, target, targetFunction, storageUpdates));
+    /// @dev Must stay byte-identical to `GasKillerSDK`'s digest, zero-value encoding included.
+    function rootLeaf(
+        uint256 transitionIndex,
+        address target,
+        bytes4 targetFunction,
+        bytes memory storageUpdates,
+        uint256 value
+    ) internal pure returns (bytes32) {
+        if (value == 0) {
+            return sha256(abi.encode(transitionIndex, target, targetFunction, storageUpdates));
+        }
+        return sha256(abi.encode(transitionIndex, target, targetFunction, storageUpdates, value));
     }
 
     function nestedLeaf(

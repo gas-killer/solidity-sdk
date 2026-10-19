@@ -51,7 +51,7 @@ contract NestedDepositTest is Test {
         vm.revertToState(snapshot);
 
         vm.recordLogs();
-        gateway.verifyAndUpdateTree{value: DEPOSIT}(_submission(DEPOSIT, DEPOSIT));
+        gateway.verifyAndUpdateTree{value: DEPOSIT}(_submission(DEPOSIT, DEPOSIT, DEPOSIT));
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
         assertEq(gateway.deposits(), 1);
@@ -70,15 +70,16 @@ contract NestedDepositTest is Test {
         }
     }
 
+    /// The root leaf binds the deposit, so settling without it fails before any frame runs.
     function test_settlingWithoutTheDepositReverts() public {
-        TreeSubmission memory sub = _submission(DEPOSIT, DEPOSIT);
-        vm.expectPartialRevert(StateChangeHandlerLib.RevertingContext.selector);
+        TreeSubmission memory sub = _submission(DEPOSIT, DEPOSIT, DEPOSIT);
+        vm.expectPartialRevert(IGasKillerNested.NotTreeMember.selector);
         gateway.verifyAndUpdateTree(sub);
         assertEq(vault.balances(account), 0);
     }
 
     function test_vaultFrameSignedForMoreThanTheNestedOpForwardsFailsItsLeaf() public {
-        TreeSubmission memory sub = _submission(DEPOSIT / 2, DEPOSIT);
+        TreeSubmission memory sub = _submission(DEPOSIT, DEPOSIT / 2, DEPOSIT);
         try gateway.verifyAndUpdateTree{value: DEPOSIT}(sub) {
             fail("tree settled");
         } catch (bytes memory err) {
@@ -89,14 +90,14 @@ contract NestedDepositTest is Test {
         }
     }
 
-    /// Pins what remains open until gas-killer/solidity-sdk#104 binds the root's value: ETH
-    /// forced into the gateway can fund a zero-value settlement. It credits only ETH that
-    /// reaches the vault, so the vault stays fully backed.
-    function test_strayGatewayEthCanFundAZeroValueSettlementButTheVaultStaysBacked() public {
+    /// ETH forced into the gateway cannot stand in for the deposit: the root leaf binds the
+    /// settlement's own `msg.value` (gas-killer/solidity-sdk#104).
+    function test_strayGatewayEthCannotFundAnUnderPaidSettlement() public {
         vm.deal(address(gateway), DEPOSIT);
-        gateway.verifyAndUpdateTree(_submission(DEPOSIT, DEPOSIT));
-        assertEq(vault.balances(account), DEPOSIT);
-        assertEq(address(vault).balance, vault.balances(account));
+        TreeSubmission memory sub = _submission(DEPOSIT, DEPOSIT, DEPOSIT);
+        vm.expectPartialRevert(IGasKillerNested.NotTreeMember.selector);
+        gateway.verifyAndUpdateTree(sub);
+        assertEq(vault.balances(account), 0);
     }
 
     function test_onlyTheGatewayDeposits() public {
@@ -105,7 +106,7 @@ contract NestedDepositTest is Test {
     }
 
     function test_withdrawPaysOutTheCreditedDeposit() public {
-        gateway.verifyAndUpdateTree{value: DEPOSIT}(_submission(DEPOSIT, DEPOSIT));
+        gateway.verifyAndUpdateTree{value: DEPOSIT}(_submission(DEPOSIT, DEPOSIT, DEPOSIT));
         vm.prank(account);
         vault.withdraw(DEPOSIT);
         assertEq(account.balance, DEPOSIT);
@@ -116,12 +117,13 @@ contract NestedDepositTest is Test {
         vault.withdraw(1);
     }
 
-    /// Frame 0 is the gateway's `deposit` (tracker, counter, NESTED forwarding `forwarded`);
-    /// frame 1 is the vault's, signed as receiving `credited`, with the receipt it chains.
-    function _submission(uint256 forwarded, uint256 credited) private returns (TreeSubmission memory) {
+    /// Frame 0 is the gateway's `deposit`, signed as sent `sent` (tracker, counter, NESTED
+    /// forwarding `forwarded`); frame 1 is the vault's, signed as receiving `credited`, with the
+    /// receipt it chains.
+    function _submission(uint256 sent, uint256 forwarded, uint256 credited) private returns (TreeSubmission memory) {
         NestedTreeBuilder.Frame[] memory frames = new NestedTreeBuilder.Frame[](2);
 
-        frames[0] = _frame(address(gateway), address(0), 0, DepositGateway.deposit.selector, "", 3);
+        frames[0] = _frame(address(gateway), address(0), sent, DepositGateway.deposit.selector, "", 3);
         _op(frames[0], 0, StateUpdateType.STORE, abi.encode(TRACKER_SLOT, bytes32(uint256(1))));
         _op(frames[0], 1, StateUpdateType.STORE, abi.encode(bytes32(0), bytes32(uint256(1))));
         _op(frames[0], 2, StateUpdateType.NESTED, abi.encode(address(vault), forwarded, uint256(1)));

@@ -13,6 +13,7 @@ import {GasKillerNestedSDK} from "../src/GasKillerNestedSDK.sol";
 import {IGasKillerSDK} from "../src/interface/IGasKillerSDK.sol";
 import {IGasKillerNested} from "../src/interface/IGasKillerNested.sol";
 import {IGasKillerSDKBatch} from "../src/interface/IGasKillerSDKBatch.sol";
+import {IGasKillerValueBound} from "../src/interface/IGasKillerValueBound.sol";
 
 /// A target that inherits the SDK and an OpenZeppelin module, resolving the clash the way
 /// every OpenZeppelin module documents: one override that defers entirely to `super`.
@@ -60,6 +61,7 @@ contract ERC165CompositionTest is Test {
 
         assertTrue(target.supportsInterface(type(IGasKillerSDK).interfaceId), "gas killer id");
         assertTrue(target.supportsInterface(type(IGasKillerSDKBatch).interfaceId), "batch id");
+        assertTrue(target.supportsInterface(type(IGasKillerValueBound).interfaceId), "value-bound id");
         assertFalse(target.supportsInterface(type(IGasKillerNested).interfaceId), "nested is opt-in");
         assertTrue(target.supportsInterface(type(IERC721).interfaceId), "erc721 id");
         assertTrue(target.supportsInterface(type(IERC721Metadata).interfaceId), "erc721 metadata id");
@@ -72,6 +74,7 @@ contract ERC165CompositionTest is Test {
 
         assertTrue(target.supportsInterface(type(IGasKillerSDK).interfaceId), "gas killer id");
         assertTrue(target.supportsInterface(type(IGasKillerSDKBatch).interfaceId), "batch id");
+        assertTrue(target.supportsInterface(type(IGasKillerValueBound).interfaceId), "value-bound id");
         assertFalse(target.supportsInterface(type(IGasKillerNested).interfaceId), "nested is opt-in");
         assertTrue(target.supportsInterface(type(IERC721).interfaceId), "erc721 id");
         assertTrue(target.supportsInterface(type(IERC721Metadata).interfaceId), "erc721 metadata id");
@@ -84,6 +87,7 @@ contract ERC165CompositionTest is Test {
 
         assertTrue(target.supportsInterface(type(IGasKillerSDK).interfaceId), "gas killer id");
         assertTrue(target.supportsInterface(type(IGasKillerSDKBatch).interfaceId), "batch id");
+        assertTrue(target.supportsInterface(type(IGasKillerValueBound).interfaceId), "value-bound id");
         assertTrue(target.supportsInterface(type(IGasKillerNested).interfaceId), "nested id");
         assertTrue(target.supportsInterface(type(IERC721).interfaceId), "erc721 id");
         assertTrue(target.supportsInterface(type(IERC165).interfaceId), "erc165 id");

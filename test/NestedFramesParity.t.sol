@@ -15,8 +15,16 @@ contract NestedFramesParityTest is Test {
 
     function test_rootLeafVector() public pure {
         assertEq(
-            NestedFrames.rootLeaf(7, address(0xA11CE), 0x12345678, hex"c0ffee"),
+            NestedFrames.rootLeaf(7, address(0xA11CE), 0x12345678, hex"c0ffee", 0),
             0x18fece75dabcbe169342c5e311d4af162b89a28a80cb659d125f7fe70e191b2b
+        );
+    }
+
+    /// A root settled with ETH appends the value; zero-value roots keep the vector above.
+    function test_valuedRootLeafVector() public pure {
+        assertEq(
+            NestedFrames.rootLeaf(7, address(0xA11CE), 0x12345678, hex"c0ffee", 5),
+            0x9e2758ecd6d0b8e5563e02127be8e49b5cb8bcbe907e0d44d24968d955d0d6eb
         );
     }
 

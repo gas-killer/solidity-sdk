@@ -2,10 +2,10 @@
 pragma solidity ^0.8.27;
 
 /// @notice One independently quorum-signed state transition, as submitted to
-///         `verifyAndUpdateBatch`. Field-for-field identical to the arguments of
-///         `IGasKillerSDK.verifyAndUpdate` — the signed digest is unchanged, so
-///         batching is purely a submission-side optimization and the off-chain signing
-///         path does not know or care whether a transition settles alone or in a batch.
+///         `verifyAndUpdateBatch`. The arguments of `IGasKillerSDK.verifyAndUpdate` plus the
+///         `value` it would have been sent with, so the signed digest is the same either way
+///         and the off-chain signing path does not know or care whether a transition settles
+///         alone or in a batch.
 struct TaskSubmission {
     bytes32 msgHash;
     uint32 referenceBlockNumber;
@@ -15,6 +15,7 @@ struct TaskSubmission {
     uint256 s;
     address Raddr;
     address[] nonSigners;
+    uint256 value;
 }
 
 /// @title IGasKillerSDKBatch
@@ -46,13 +47,11 @@ interface IGasKillerSDKBatch {
     ///      any failing applied sub-transition reverts the whole batch. The in-transition
     ///      latch is held across the entire batch.
     ///
-    ///      Payable, on the same terms as `IGasKillerSDK.verifyAndUpdate`, with one
-    ///      batch-specific wrinkle: `msg.value` tops up the contract's balance **once for the
-    ///      whole batch** and is pooled across every applied sub-transition rather than
-    ///      partitioned per submission. Batch assemblers must therefore send the *sum* of
-    ///      what the applied submissions spend; the batch is atomic, so a shortfall anywhere
-    ///      reverts all of it. A skipped (already-settled) submission spends nothing, so a
-    ///      front-run leaves its share unspent — and unspent value is not refunded.
+    ///      Payable. Each submission's digest binds its own `value`, and `msg.value` must cover
+    ///      the sum over the submissions actually applied. A skipped (already-settled)
+    ///      submission adds nothing to that sum. The surplus, such as a front-run item's
+    ///      share, is refunded to `msg.sender`; a sender that can't accept ETH leaves it in
+    ///      the contract instead of reverting the batch.
     /// @param submissions The transitions to apply, in order.
     function verifyAndUpdateBatch(TaskSubmission[] calldata submissions) external payable;
 

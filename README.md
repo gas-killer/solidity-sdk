@@ -112,32 +112,50 @@ Consequences for integrators:
   mutation timing and each consumer's staleness bound, so keeping the two consistent is
   deployment discipline rather than a contract guarantee.
 
-## Funding value-bearing state updates
+## Settling with value
 
-A `CALL`, `CREATE` or `CREATE2` state update can move ETH, and it is paid out of the settling
-contract's own balance. Both settlement entrypoints, `verifyAndUpdate` and `verifyAndUpdateBatch`, are therefore
-`payable`, so a pass-through caller (deposit-then-forward, intent settler, swap router) can fund
-the transition from `msg.value` instead of having to pre-fund the contract.
+Both settlement entrypoints, `verifyAndUpdate` and `verifyAndUpdateBatch`, are `payable`, and the
+value is part of what the quorum signs. A transition settles only with exactly the `msg.value` the
+task was analyzed with:
 
-`msg.value` cannot redirect value: how much each update moves, and to whom, is fixed inside the
-quorum-signed `storageUpdates`. All `msg.value` does is top the balance up, which leaves exactly two
-ways to get it wrong:
+| Settled with | Signed digest |
+|---|---|
+| no ETH | `sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates))` |
+| `value` wei | `sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates, value))` |
 
-- **Under-funding** reverts the whole transition — `RevertingContext` with empty revert data for a
-  `CALL` (the EVM fails the call before the target runs), `DeploymentFailed` for a `CREATE`/`CREATE2`.
-- **Over-funding is not refunded.** Whatever the updates do not consume stays in the contract.
-  Recovery is the inheriting contract's job: a withdrawal function, or a refund executed as a signed
-  `CALL` update in a later transition.
+Zero-value transitions keep the original encoding, so their signatures and off-chain parity are
+unchanged. The two encodings cannot collide, because their heads differ in length.
+`getMessageHash` returns the zero-value digest and `getMessageHashWithValue` either one.
 
-There is deliberately no balance-delta invariant on the entrypoint. The signed updates already fix
-how much value every operation moves, so a check could only re-assert what the signature already
-guarantees.
+The `IGasKillerSDK` interface ID (`0x82b35a01`) is unchanged, so it can't tell a consumer that binds
+the value from one built on an older SDK, which accepts a value-bearing signature with any
+`msg.value`. Consumers that bind it also report `IGasKillerValueBound` (`0x0fd29ece`, the
+`getMessageHashWithValue` selector) through ERC-165. Check for it before sending a task with value.
 
-For `verifyAndUpdateBatch`, `msg.value` tops the balance up **once for the whole batch** and is
-pooled across every applied sub-transition rather than partitioned per submission. Assemblers must
-send the sum of what the applied submissions spend; the batch is atomic, so a shortfall on any one
-of them unwinds all of them. A submission skipped as already-settled — the front-run tolerance
-described above — spends nothing, so its share simply lands in the retained-surplus case.
+This is what makes inbound value safe. A tracked function that credits `msg.value` (a deposit, a
+mint for ETH, a payable purchase) replays as plain `STORE` updates, so without the binding anyone
+could settle it while sending nothing, and the contract would record ETH it never received.
+
+A `CALL`, `CREATE` or `CREATE2` update moves an amount fixed inside the signed `storageUpdates`,
+paid out of the contract's balance, which includes `msg.value`. A shortfall reverts the whole
+transition: `RevertingContext` with empty revert data for a `CALL` (the EVM fails the call before the
+target runs), `DeploymentFailed` for a `CREATE`/`CREATE2`.
+
+The settler can't top that balance up. Any ETH the task wasn't analyzed with fails the digest, so a
+transition analyzed with no value rejects all ETH. A pass-through call, such as a deposit that
+forwards its `msg.value`, still works, because the value it forwards is the value it was analyzed
+with. A contract whose updates pay out of its own balance has to be funded some other way.
+`GasKillerSDK` has no `receive()`, so add one or a payable funding function. If the balance has
+dropped since the task was analyzed, the transition fails until the contract is funded and the task
+is resubmitted.
+
+For `verifyAndUpdateBatch`, each `TaskSubmission` carries the `value` its transition was analyzed
+with, and its digest binds that value. `msg.value` must cover the sum over the submissions actually
+applied, or the batch reverts with `InsufficientBatchValue`. The check is "covers" rather than
+"equals" because a submission skipped as already settled (the front-run tolerance described above)
+must not revert the batch. The surplus, such as that item's share, is refunded to `msg.sender` after
+the batch applies. If the sender can't accept ETH, the surplus stays in the contract and the batch
+still succeeds.
 
 ## Nested settlement
 
@@ -168,7 +186,8 @@ root that does not report it settles flat.
 - **Cycles work.** `A → B → A` applies two `A` frames in one tree. The transition guard holds the
   active root, so a frame of the same root may re-enter, and every other re-entry still reverts.
 - **The single-transition digest is unchanged.** A root frame's leaf is exactly the
-  `verifyAndUpdate` digest, so consumers that never nest sign and settle as before.
+  `verifyAndUpdate` digest, value included, so consumers that never nest sign and settle as
+  before.
 
 Rules for a contract that may be nested:
 
@@ -186,9 +205,8 @@ Rules for a contract that may be nested:
 See `src/examples/nested-chain` (`NestedRouter` → `NestedVault` → `NestedLedger`),
 `src/examples/nested-cycle` (`CycleRoot` → `CycleRelay` → `CycleRoot`) and
 `src/examples/nested-deposit` (`DepositGateway` → `DepositVault`, a `NESTED` op that forwards
-ETH). Until the root leaf binds `msg.value` (#104), credit inbound ETH in a nested frame, whose
-leaf binds the value it receives, and keep the root from holding ETH at rest, as the deposit
-example does.
+ETH). The root leaf binds the `msg.value` the tree settles with, just as the `verifyAndUpdate`
+digest does, and each nested leaf binds the value its parent forwards.
 
 ## Repository Structure
 
@@ -272,7 +290,7 @@ of the following, applied in order:
 | `CREATE2` | Deploy via `CREATE2` | `(bytes32 salt, uint256 value, bytes initcode)` |
 | `NESTED` | Apply an SDK callee's own frame of a nested tree (tree settlement only) | `(address target, uint256 value, bytes32 childLeaf)` |
 
-See [Funding value-bearing state updates](#funding-value-bearing-state-updates) for how `CALL`,
+See [Settling with value](#settling-with-value) for how `CALL`,
 `CREATE`, `CREATE2` and `NESTED` are paid for. A `NESTED` op forwards its value out of the parent's
 balance, exactly as the native call would have.
 

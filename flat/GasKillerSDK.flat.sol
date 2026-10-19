@@ -29,10 +29,10 @@ interface IERC165 {
 // src/interface/IGasKillerSDKBatch.sol
 
 /// @notice One independently quorum-signed state transition, as submitted to
-///         `verifyAndUpdateBatch`. Field-for-field identical to the arguments of
-///         `IGasKillerSDK.verifyAndUpdate` — the signed digest is unchanged, so
-///         batching is purely a submission-side optimization and the off-chain signing
-///         path does not know or care whether a transition settles alone or in a batch.
+///         `verifyAndUpdateBatch`. The arguments of `IGasKillerSDK.verifyAndUpdate` plus the
+///         `value` it would have been sent with, so the signed digest is the same either way
+///         and the off-chain signing path does not know or care whether a transition settles
+///         alone or in a batch.
 struct TaskSubmission {
     bytes32 msgHash;
     uint32 referenceBlockNumber;
@@ -42,6 +42,7 @@ struct TaskSubmission {
     uint256 s;
     address Raddr;
     address[] nonSigners;
+    uint256 value;
 }
 
 /// @title IGasKillerSDKBatch
@@ -73,19 +74,35 @@ interface IGasKillerSDKBatch {
     ///      any failing applied sub-transition reverts the whole batch. The in-transition
     ///      latch is held across the entire batch.
     ///
-    ///      Payable, on the same terms as `IGasKillerSDK.verifyAndUpdate`, with one
-    ///      batch-specific wrinkle: `msg.value` tops up the contract's balance **once for the
-    ///      whole batch** and is pooled across every applied sub-transition rather than
-    ///      partitioned per submission. Batch assemblers must therefore send the *sum* of
-    ///      what the applied submissions spend; the batch is atomic, so a shortfall anywhere
-    ///      reverts all of it. A skipped (already-settled) submission spends nothing, so a
-    ///      front-run leaves its share unspent — and unspent value is not refunded.
+    ///      Payable. Each submission's digest binds its own `value`, and `msg.value` must cover
+    ///      the sum over the submissions actually applied. A skipped (already-settled)
+    ///      submission adds nothing to that sum. The surplus, such as a front-run item's
+    ///      share, is refunded to `msg.sender`; a sender that can't accept ETH leaves it in
+    ///      the contract instead of reverting the batch.
     /// @param submissions The transitions to apply, in order.
     function verifyAndUpdateBatch(TaskSubmission[] calldata submissions) external payable;
 
     /// @notice True while a state transition (or batch) is being applied — external
     ///         readers should treat mid-transition state as unsigned and fail closed.
     function inTransition() external view returns (bool);
+}
+
+// src/interface/IGasKillerValueBound.sol
+
+/// @title IGasKillerValueBound
+/// @notice Reported by consumers whose settlement digest binds `msg.value`.
+/// @dev `type(IGasKillerSDK).interfaceId` didn't move when the digest started binding the value,
+///      so this ID is what tells such a consumer apart from one built on an older SDK, which
+///      accepts a value-bearing signature with any `msg.value`. Single-function, so the ID is the
+///      `getMessageHashWithValue` selector.
+interface IGasKillerValueBound {
+    /// @notice The digest the quorum signs for a transition settled with `value` wei.
+    function getMessageHashWithValue(
+        uint256 transitionIndex,
+        bytes4 targetFunction,
+        bytes calldata storageUpdates,
+        uint256 value
+    ) external view returns (bytes32);
 }
 
 // src/interface/ISchnorrStakeRegistry.sol
@@ -275,14 +292,10 @@ abstract contract ERC165 is IERC165 {
 interface IGasKillerSDK is IERC165 {
     /// @notice Verify the operators' aggregate Schnorr quorum signature and apply the
     ///         encoded state updates
-    /// @dev Payable so a caller can fund value-bearing `CALL`/`CREATE`/`CREATE2` state updates
-    ///      out of `msg.value`. The value each update moves is fixed inside the quorum-signed
-    ///      `storageUpdates`, so `msg.value` only tops up the contract's balance — it cannot
-    ///      redirect value anywhere the quorum did not sign. Under-funding reverts the whole
-    ///      transition. Over-funding is NOT refunded: whatever the updates do not consume stays
-    ///      in the contract, and recovering it is the responsibility of the inheriting contract
-    ///      (e.g. a withdrawal function, or a refund executed as a signed CALL update in a
-    ///      later transition).
+    /// @dev Payable, and `msg.value` is part of the signed digest: the transition settles only
+    ///      with exactly the value the task was analyzed with, so a function that credits
+    ///      `msg.value` cannot be settled without its ETH. Value moved by state updates is fixed
+    ///      inside the signed `storageUpdates`; a shortfall reverts the whole transition.
     ///
     ///      `payable` does not change the function selector, so
     ///      `type(IGasKillerSDK).interfaceId` — which the router's ERC-165 preflight
@@ -708,8 +721,16 @@ library StateChangeHandlerLib {
 ///         (constant gas, non-signer subtraction) and applies the signed state updates.
 ///
 /// @dev The signed message is `sha256(abi.encode(transitionIndex, address(this),
-///      targetFunction, storageUpdates))`, independent of the signature scheme, so the
-///      off-chain digest and the slashing/fraud-proof machinery do not depend on it.
+///      targetFunction, storageUpdates))` for a transition settled with no ETH, and
+///      `sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates,
+///      value))` for one settled with `value` wei. It is independent of the signature scheme,
+///      so the off-chain digest and the slashing/fraud-proof machinery do not depend on it.
+///
+///      Binding the value is what makes inbound ETH safe: a tracked function that credits
+///      `msg.value` replays as plain `STORE` updates, so without it anyone could settle a
+///      deposit while sending nothing. A zero-value transition keeps the original four-field
+///      encoding, so every zero-value signature is unchanged; the two encodings cannot collide
+///      because their heads differ in length.
 ///
 ///      Both entrypoints are `guardTransition`-protected (see `TransitionGuard`): a `CALL`
 ///      state update runs arbitrary external code mid-transition, so re-entering
@@ -717,12 +738,19 @@ library StateChangeHandlerLib {
 ///      interleave two signed transitions. The same transient flag is queryable as
 ///      `inTransition()` so external readers can reject mid-transition state.
 ///
-///      Both entrypoints are also `payable`, so a caller can fund value-bearing state
-///      updates out of `msg.value` — see the per-function docs for the funding rules.
+///      Both entrypoints are also `payable`. The value is part of what the quorum signs, so a
+///      transition settles only with the value it was analyzed with; see the per-function docs.
 ///
 ///      Nested settlement is opt-in through `GasKillerNestedSDK`, so a consumer that never
 ///      nests does not carry its bytecode; a `NESTED` op settled here reverts.
-abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKillerSDK, IGasKillerSDKBatch {
+abstract contract GasKillerSDK is
+    StateTracker,
+    TransitionGuard,
+    ERC165,
+    IGasKillerSDK,
+    IGasKillerSDKBatch,
+    IGasKillerValueBound
+{
     struct GasKillerSDKStorage {
         address avsAddress;
         ISchnorrStakeRegistry registry;
@@ -740,18 +768,16 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKil
     error InvalidSignature();
     error InvalidQuorumSignature();
     error EmptyBatch();
+    error InsufficientBatchValue(uint256 sent, uint256 required);
     error BlockStaleMeasureOverflow();
 
     /// @notice Verify an aggregate Schnorr quorum signature and apply the state updates.
-    /// @dev Payable so a caller can fund value-bearing `CALL`/`CREATE`/`CREATE2` state updates
-    ///      out of `msg.value`. The value each update moves is fixed inside the quorum-signed
-    ///      `storageUpdates`, so `msg.value` only tops up this contract's balance — it cannot
-    ///      redirect value anywhere the quorum did not sign. Under-funding reverts the whole
-    ///      transition (`RevertingContext` for a CALL, `DeploymentFailed` for a CREATE/CREATE2).
-    ///      Over-funding is NOT refunded: whatever the updates do not consume simply stays in
-    ///      this contract. Inheriting contracts whose callers may over-send must provide their
-    ///      own recovery path (e.g. a withdrawal function, or a refund executed as a signed
-    ///      CALL update in a later transition).
+    /// @dev `msg.value` is bound into the digest, so the transition settles only with exactly
+    ///      the value the task was analyzed with: a deposit cannot be credited without its ETH,
+    ///      and no surplus can be sent. Value moved by `CALL`/`CREATE`/`CREATE2` updates is fixed
+    ///      inside the signed `storageUpdates` and paid out of this contract's balance, which
+    ///      includes `msg.value`; a shortfall reverts the whole transition (`RevertingContext` for
+    ///      a CALL, `DeploymentFailed` for a CREATE/CREATE2).
     /// @param msgHash             the task digest (recomputed and checked below).
     /// @param referenceBlockNumber block at which stake/keys are evaluated by the registry.
     /// @param storageUpdates      ABI-encoded `(StateUpdateType[], bytes[])`.
@@ -771,7 +797,15 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKil
         address[] calldata nonSigners
     ) external payable guardTransition {
         _verifyAndUpdateOne(
-            msgHash, referenceBlockNumber, storageUpdates, transitionIndex, targetFunction, s, Raddr, nonSigners
+            msgHash,
+            referenceBlockNumber,
+            storageUpdates,
+            transitionIndex,
+            targetFunction,
+            msg.value,
+            s,
+            Raddr,
+            nonSigners
         );
     }
 
@@ -799,31 +833,41 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKil
     ///      the whole (atomic) batch — no partial-state hazard, but it does nullify the
     ///      amortization this function exists for.
     ///
-    ///      Payable on the same terms as `verifyAndUpdate`, with one batch-specific wrinkle:
-    ///      `msg.value` tops up this contract's balance **once for the whole batch** and is
-    ///      pooled across every applied sub-transition rather than partitioned per submission.
-    ///      Assemblers must send the *sum* of what the applied submissions spend; since the
-    ///      batch is atomic, a shortfall anywhere reverts all of it. A skipped (already-settled)
-    ///      submission spends nothing, so a front-run leaves its share unspent — and, as with
-    ///      the standalone entrypoint, unspent value is not refunded.
+    ///      Each submission's digest binds its own `value`, and `msg.value` must cover the sum
+    ///      over the submissions actually applied (`InsufficientBatchValue` otherwise), so no
+    ///      applied transition is credited ETH the batch did not bring. The check is "covers"
+    ///      rather than "equals" because a skipped submission must not revert the batch. The
+    ///      surplus, such as a front-run item's share, is refunded to `msg.sender` once every
+    ///      update has applied. A sender that can't accept it leaves it in this contract
+    ///      rather than reverting the batch.
     /// @param submissions The transitions to apply, in order of ascending transition index.
     function verifyAndUpdateBatch(TaskSubmission[] calldata submissions) external payable guardTransition {
         uint256 len = submissions.length;
         require(len != 0, EmptyBatch());
+        uint256 required;
         for (uint256 i = 0; i < len; ++i) {
             TaskSubmission calldata sub = submissions[i];
             // Already settled (e.g. front-run or redelivered) → skip, don't poison the batch.
             if (sub.transitionIndex + 1 <= stateTransitionCount()) continue;
+            required += sub.value;
             _verifyAndUpdateOne(
                 sub.msgHash,
                 sub.referenceBlockNumber,
                 sub.storageUpdates,
                 sub.transitionIndex,
                 sub.targetFunction,
+                sub.value,
                 sub.s,
                 sub.Raddr,
                 sub.nonSigners
             );
+        }
+        require(msg.value >= required, InsufficientBatchValue(msg.value, required));
+        if (msg.value > required) {
+            // Under the latch, so the refund can't re-enter settlement. A sender that rejects ETH
+            // keeps the surplus here rather than reverting a batch the skip exists to protect.
+            (bool refunded,) = msg.sender.call{value: msg.value - required}("");
+            refunded;
         }
     }
 
@@ -835,6 +879,7 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKil
         bytes calldata storageUpdates,
         uint256 transitionIndex,
         bytes4 targetFunction,
+        uint256 value,
         uint256 s,
         address Raddr,
         address[] calldata nonSigners
@@ -843,8 +888,7 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKil
         require((uint256(referenceBlockNumber) + _getBlockStaleMeasure()) >= block.number, StaleBlockNumber());
 
         require(transitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
-        bytes32 expectedHash = sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
-        require(expectedHash == msgHash, InvalidSignature());
+        require(_digest(transitionIndex, targetFunction, storageUpdates, value) == msgHash, InvalidSignature());
 
         _verifyQuorum(msgHash, s, Raddr, nonSigners, referenceBlockNumber);
 
@@ -877,10 +921,10 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKil
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
     function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
         return interfaceId == type(IGasKillerSDK).interfaceId || interfaceId == type(IGasKillerSDKBatch).interfaceId
-            || super.supportsInterface(interfaceId);
+            || interfaceId == type(IGasKillerValueBound).interfaceId || super.supportsInterface(interfaceId);
     }
 
-    /// @notice Compute the expected message hash for a given transition, function, and storage updates
+    /// @notice Compute the expected message hash for a transition settled with no ETH
     /// @dev Exact mirror of the ECDSA `GasKillerSDK.getMessageHash` — the digest is
     ///      scheme-agnostic, so off-chain parity checks work unchanged.
     /// @param transitionIndex The transition index
@@ -892,7 +936,34 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKil
         view
         returns (bytes32)
     {
-        return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
+        return _digest(transitionIndex, targetFunction, storageUpdates, 0);
+    }
+
+    /// @notice Compute the expected message hash for a transition settled with `value` wei
+    /// @dev Named apart from `getMessageHash` because an overload would rename the generated
+    ///      off-chain binding of the existing function.
+    /// @param transitionIndex The transition index
+    /// @param targetFunction The target function selector
+    /// @param storageUpdates The ABI-encoded storage updates
+    /// @param value The `msg.value` the transition settles with
+    /// @return The expected SHA-256 hash
+    function getMessageHashWithValue(
+        uint256 transitionIndex,
+        bytes4 targetFunction,
+        bytes calldata storageUpdates,
+        uint256 value
+    ) external view returns (bytes32) {
+        return _digest(transitionIndex, targetFunction, storageUpdates, value);
+    }
+
+    /// @dev Mirrored by `NestedFrames.rootLeaf`, which must stay byte-identical.
+    function _digest(uint256 transitionIndex, bytes4 targetFunction, bytes calldata storageUpdates, uint256 value)
+        private
+        view
+        returns (bytes32)
+    {
+        if (value == 0) return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
+        return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates, value));
     }
 
     /// @inheritdoc TransitionGuard
