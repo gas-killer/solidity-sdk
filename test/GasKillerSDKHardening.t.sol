@@ -147,9 +147,43 @@ contract ValueSink {
     }
 }
 
+/// A batch assembler with no `receive()`, so a refund to it fails.
+contract EthRejectingAssembler {
+    function settle(TestSDK sdk, TaskSubmission[] calldata subs) external payable {
+        sdk.verifyAndUpdateBatch{value: msg.value}(subs);
+    }
+}
+
+/// A batch assembler whose refund tries to settle again.
+contract ReenteringAssembler {
+    TestSDK sdk;
+    TaskSubmission next;
+
+    function settle(TestSDK _sdk, TaskSubmission[] calldata subs, TaskSubmission calldata _next) external payable {
+        sdk = _sdk;
+        next = _next;
+        sdk.verifyAndUpdateBatch{value: msg.value}(subs);
+    }
+
+    receive() external payable {
+        sdk.verifyAndUpdate(
+            next.msgHash,
+            next.referenceBlockNumber,
+            next.storageUpdates,
+            next.transitionIndex,
+            next.targetFunction,
+            next.s,
+            next.Raddr,
+            next.nonSigners
+        );
+    }
+}
+
 contract GasKillerSDKHardeningTest is Test {
     MockSchnorrRegistry mock;
     TestSDK sdk;
+
+    receive() external payable {}
 
     function setUp() public {
         vm.roll(1000);
@@ -636,10 +670,9 @@ contract GasKillerSDKHardeningTest is Test {
         assertEq(address(sdk).balance, 0, "reverted batch retains nothing");
     }
 
-    /// A front-run turns one submission into a skip. Its share of the pooled `msg.value` is
-    /// neither spent nor refunded — it just stays in the contract, which is what the
-    /// "over-funding is retained" rule means in practice for a batch assembler.
-    function test_batch_skippedSubmissionLeavesValueRetained() public {
+    /// A front-run turns one submission into a skip. Its share of the pooled `msg.value` goes
+    /// back to the assembler instead of staying in the contract.
+    function test_batch_refundsASkippedSubmissionsShare() public {
         ValueSink sink = new ValueSink();
         uint256 a = 0.2 ether;
         uint256 b = 0.05 ether;
@@ -650,23 +683,63 @@ contract GasKillerSDKHardeningTest is Test {
         subs[1] = _submission(1, _callUpdate(address(sink), b, abi.encodeCall(ValueSink.take, ())), b);
 
         // Front-runner lifts subs[0] and settles it standalone, funding it themselves.
-        sdk.verifyAndUpdate{value: a}(
-            subs[0].msgHash,
-            subs[0].referenceBlockNumber,
-            subs[0].storageUpdates,
-            subs[0].transitionIndex,
-            subs[0].targetFunction,
-            subs[0].s,
-            subs[0].Raddr,
-            subs[0].nonSigners
-        );
+        _settle(subs[0], a);
 
         // The victim's batch still sends the full sum; subs[0] is skipped.
         sdk.verifyAndUpdateBatch{value: a + b}(subs);
 
         assertEq(sink.received(), a + b, "only the two applied transitions moved value");
         assertEq(sdk.stateTransitionCount(), 2);
-        assertEq(address(sdk).balance, a, "the skipped submission's share is retained, not refunded");
+        assertEq(address(sdk).balance, 0, "nothing is stranded in the contract");
+        assertEq(address(this).balance, a, "the skipped submission's share is refunded");
+    }
+
+    /// Value beyond what the applied items need is refunded too, after their updates apply.
+    function test_batch_refundsOverpayment() public {
+        uint256 a = 0.2 ether;
+        uint256 extra = 0.01 ether;
+        vm.deal(address(this), a + extra);
+        TaskSubmission[] memory subs = new TaskSubmission[](1);
+        subs[0] = _submission(0, _storeUpdate(bytes32(0), bytes32(a)), a);
+
+        sdk.verifyAndUpdateBatch{value: a + extra}(subs);
+
+        assertEq(sdk.value(), a);
+        assertEq(address(sdk).balance, a, "the contract keeps exactly what it credited");
+        assertEq(address(this).balance, extra);
+    }
+
+    /// A sender that can't accept the refund doesn't revert the batch; the surplus stays.
+    function test_batch_keepsTheSurplusWhenTheSenderRejectsEth() public {
+        uint256 a = 0.2 ether;
+        uint256 b = 0.05 ether;
+        EthRejectingAssembler assembler = new EthRejectingAssembler();
+        vm.deal(address(this), 2 * a + b);
+        TaskSubmission[] memory subs = new TaskSubmission[](2);
+        subs[0] = _submission(0, _storeUpdate(bytes32(0), bytes32(a)), a);
+        subs[1] = _submission(1, _storeUpdate(bytes32(0), bytes32(a + b)), b);
+
+        _settle(subs[0], a);
+        assembler.settle{value: a + b}(sdk, subs);
+
+        assertEq(sdk.stateTransitionCount(), 2, "the batch still applied");
+        assertEq(address(sdk).balance, 2 * a + b, "the unrefundable share stays in the contract");
+    }
+
+    /// The refund runs under the latch, so a sender can't use it to settle another transition.
+    function test_batch_refundCannotReenterSettlement() public {
+        uint256 a = 0.2 ether;
+        ReenteringAssembler assembler = new ReenteringAssembler();
+        vm.deal(address(this), 1 ether);
+        TaskSubmission[] memory subs = new TaskSubmission[](1);
+        subs[0] = _submission(0, _storeUpdate(bytes32(0), bytes32(a)), a);
+        TaskSubmission memory next = _submission(1, _storeUpdate(bytes32(0), bytes32(uint256(7))));
+
+        assembler.settle{value: 1 ether}(sdk, subs, next);
+
+        assertEq(sdk.stateTransitionCount(), 1, "the re-entrant settlement did not apply");
+        assertEq(sdk.value(), a);
+        assertEq(address(sdk).balance, 1 ether, "the failed refund left the surplus in place");
     }
 
     // ---- inbound value -------------------------------------------------------------

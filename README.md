@@ -148,7 +148,9 @@ For `verifyAndUpdateBatch`, each `TaskSubmission` carries the `value` its transi
 with, and its digest binds that value. `msg.value` must cover the sum over the submissions actually
 applied, or the batch reverts with `InsufficientBatchValue`. The check is "covers" rather than
 "equals" because a submission skipped as already settled (the front-run tolerance described above)
-must not revert the batch. Its share stays in the contract as surplus, and surplus is not refunded.
+must not revert the batch. The surplus, such as that item's share, is refunded to `msg.sender` after
+the batch applies. If the sender can't accept ETH, the surplus stays in the contract and the batch
+still succeeds.
 
 ## Nested settlement
 
