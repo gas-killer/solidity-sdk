@@ -6,6 +6,7 @@ import {GasKillerSDK} from "../src/GasKillerSDK.sol";
 import {TransitionGuard} from "../src/TransitionGuard.sol";
 import {IGasKillerSDK} from "../src/interface/IGasKillerSDK.sol";
 import {IGasKillerNested} from "../src/interface/IGasKillerNested.sol";
+import {IGasKillerValueBound} from "../src/interface/IGasKillerValueBound.sol";
 import {IGasKillerSDKBatch, TaskSubmission} from "../src/interface/IGasKillerSDKBatch.sol";
 import {ISchnorrStakeRegistry} from "../src/interface/ISchnorrStakeRegistry.sol";
 import {StateChangeHandlerLib, StateUpdateType} from "../src/StateChangeHandlerLib.sol";
@@ -852,6 +853,15 @@ contract GasKillerSDKHardeningTest is Test {
         assertEq(type(IGasKillerSDKBatch).interfaceId, bytes4(0xce8e6efc), "batch id must not drift");
         assertFalse(sdk.supportsInterface(type(IGasKillerNested).interfaceId), "nested is opt-in");
         assertEq(type(IGasKillerNested).interfaceId, bytes4(0x78481874), "nested id must not drift");
+        // Value binding has its own ID because the core one didn't move with it: this is how a
+        // caller tells a consumer that binds `msg.value` from one built on an older SDK.
+        assertTrue(sdk.supportsInterface(type(IGasKillerValueBound).interfaceId), "value-bound id");
+        assertEq(
+            type(IGasKillerValueBound).interfaceId,
+            IGasKillerValueBound.getMessageHashWithValue.selector,
+            "value-bound id is the getMessageHashWithValue selector"
+        );
+        assertEq(type(IGasKillerValueBound).interfaceId, bytes4(0x0fd29ece), "value-bound id must not drift");
     }
 
     /// A base consumer has no nested entrypoints, and a NESTED op in a flat program reverts.

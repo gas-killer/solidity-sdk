@@ -127,6 +127,11 @@ Zero-value transitions keep the original encoding, so their signatures and off-c
 unchanged. The two encodings cannot collide, because their heads differ in length.
 `getMessageHash` returns the zero-value digest and `getMessageHashWithValue` either one.
 
+The `IGasKillerSDK` interface ID (`0x82b35a01`) is unchanged, so it can't tell a consumer that binds
+the value from one built on an older SDK, which accepts a value-bearing signature with any
+`msg.value`. Consumers that bind it also report `IGasKillerValueBound` (`0x0fd29ece`, the
+`getMessageHashWithValue` selector) through ERC-165. Check for it before sending a task with value.
+
 This is what makes inbound value safe. A tracked function that credits `msg.value` (a deposit, a
 mint for ETH, a payable purchase) replays as plain `STORE` updates, so without the binding anyone
 could settle it while sending nothing, and the contract would record ETH it never received.
