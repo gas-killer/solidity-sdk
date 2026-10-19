@@ -51,8 +51,9 @@ interface IGasKillerSDKBatch {
     ///
     ///      Payable. Each submission's digest binds its own `value`, and `msg.value` must cover
     ///      the sum over the submissions actually applied. A skipped (already-settled)
-    ///      submission adds nothing to that sum, so a front-run leaves its share in the
-    ///      contract as surplus, and surplus is not refunded.
+    ///      submission adds nothing to that sum. The surplus, such as a front-run item's
+    ///      share, is refunded to `msg.sender`; a sender that can't accept ETH leaves it in
+    ///      the contract instead of reverting the batch.
     /// @param submissions The transitions to apply, in order.
     function verifyAndUpdateBatch(TaskSubmission[] calldata submissions) external payable;
 

@@ -76,8 +76,9 @@ interface IGasKillerSDKBatch {
     ///
     ///      Payable. Each submission's digest binds its own `value`, and `msg.value` must cover
     ///      the sum over the submissions actually applied. A skipped (already-settled)
-    ///      submission adds nothing to that sum, so a front-run leaves its share in the
-    ///      contract as surplus, and surplus is not refunded.
+    ///      submission adds nothing to that sum. The surplus, such as a front-run item's
+    ///      share, is refunded to `msg.sender`; a sender that can't accept ETH leaves it in
+    ///      the contract instead of reverting the batch.
     /// @param submissions The transitions to apply, in order.
     function verifyAndUpdateBatch(TaskSubmission[] calldata submissions) external payable;
 
@@ -810,8 +811,10 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKil
     ///      Each submission's digest binds its own `value`, and `msg.value` must cover the sum
     ///      over the submissions actually applied (`InsufficientBatchValue` otherwise), so no
     ///      applied transition is credited ETH the batch did not bring. The check is "covers"
-    ///      rather than "equals" because a skipped submission must not revert the batch: a
-    ///      front-run leaves its share in this contract as unrefunded surplus.
+    ///      rather than "equals" because a skipped submission must not revert the batch. The
+    ///      surplus, such as a front-run item's share, is refunded to `msg.sender` once every
+    ///      update has applied. A sender that can't accept it leaves it in this contract
+    ///      rather than reverting the batch.
     /// @param submissions The transitions to apply, in order of ascending transition index.
     function verifyAndUpdateBatch(TaskSubmission[] calldata submissions) external payable guardTransition {
         uint256 len = submissions.length;
@@ -835,6 +838,12 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKil
             );
         }
         require(msg.value >= required, InsufficientBatchValue(msg.value, required));
+        if (msg.value > required) {
+            // Under the latch, so the refund can't re-enter settlement. A sender that rejects ETH
+            // keeps the surplus here rather than reverting a batch the skip exists to protect.
+            (bool refunded,) = msg.sender.call{value: msg.value - required}("");
+            refunded;
+        }
     }
 
     /// @dev The single-transition settlement path shared by both entrypoints. Callers must
