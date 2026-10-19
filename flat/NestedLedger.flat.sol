@@ -109,6 +109,24 @@ interface IGasKillerSDKBatch {
     function inTransition() external view returns (bool);
 }
 
+// src/interface/IGasKillerValueBound.sol
+
+/// @title IGasKillerValueBound
+/// @notice Reported by consumers whose settlement digest binds `msg.value`.
+/// @dev `type(IGasKillerSDK).interfaceId` didn't move when the digest started binding the value,
+///      so this ID is what tells such a consumer apart from one built on an older SDK, which
+///      accepts a value-bearing signature with any `msg.value`. Single-function, so the ID is the
+///      `getMessageHashWithValue` selector.
+interface IGasKillerValueBound {
+    /// @notice The digest the quorum signs for a transition settled with `value` wei.
+    function getMessageHashWithValue(
+        uint256 transitionIndex,
+        bytes4 targetFunction,
+        bytes calldata storageUpdates,
+        uint256 value
+    ) external view returns (bytes32);
+}
+
 // src/interface/ISchnorrStakeRegistry.sol
 
 /// @title ISchnorrStakeRegistry
@@ -1190,7 +1208,14 @@ library StateChangeHandlerLib {
 ///
 ///      Nested settlement is opt-in through `GasKillerNestedSDK`, so a consumer that never
 ///      nests does not carry its bytecode; a `NESTED` op settled here reverts.
-abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKillerSDK, IGasKillerSDKBatch {
+abstract contract GasKillerSDK is
+    StateTracker,
+    TransitionGuard,
+    ERC165,
+    IGasKillerSDK,
+    IGasKillerSDKBatch,
+    IGasKillerValueBound
+{
     struct GasKillerSDKStorage {
         address avsAddress;
         ISchnorrStakeRegistry registry;
@@ -1361,7 +1386,7 @@ abstract contract GasKillerSDK is StateTracker, TransitionGuard, ERC165, IGasKil
     /// @return `true` if the contract implements `interfaceId` and `false` otherwise
     function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
         return interfaceId == type(IGasKillerSDK).interfaceId || interfaceId == type(IGasKillerSDKBatch).interfaceId
-            || super.supportsInterface(interfaceId);
+            || interfaceId == type(IGasKillerValueBound).interfaceId || super.supportsInterface(interfaceId);
     }
 
     /// @notice Compute the expected message hash for a transition settled with no ETH
