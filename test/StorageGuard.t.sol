@@ -166,6 +166,35 @@ contract StorageGuardTest is Test {
         h.validate(rs);
     }
 
+    /// @dev The original high-level `validateRanges`, kept as the reference for the assembly one.
+    function _validReference(StorageGuard.ProtectedRange[] memory rs) internal pure returns (bool) {
+        for (uint256 i = 0; i < rs.length; ++i) {
+            StorageGuard.ProtectedRange memory r = rs[i];
+            if (r.start > r.end || r.mask == bytes32(0)) return false;
+            if (r.mask != FULL && r.start != r.end) return false;
+            if (i != 0 && r.start <= rs[i - 1].end) return false;
+        }
+        return true;
+    }
+
+    /// forge-config: default.fuzz.runs = 2048
+    function testFuzz_validateMatchesReference(uint256 seed, uint8 k) public view {
+        StorageGuard.ProtectedRange[] memory rs = new StorageGuard.ProtectedRange[](uint256(k) % 5);
+        for (uint256 i = 0; i < rs.length; ++i) {
+            uint256 r = uint256(keccak256(abi.encode(seed, i)));
+            // Small bounds so equal, adjacent, overlapping and inverted ranges are all common;
+            // masks cycle through zero, FULL and a partial mask.
+            uint256 start = r % 6;
+            uint256 end = (r >> 8) % 6;
+            if ((r >> 16) % 16 == 0) end = type(uint256).max;
+            uint256 m = (r >> 24) % 3;
+            bytes32 mask = m == 0 ? bytes32(0) : m == 1 ? FULL : bytes32(uint256(0xff));
+            rs[i] = StorageGuard.ProtectedRange(start, end, mask);
+        }
+        (bool ok,) = address(h).staticcall(abi.encodeCall(h.validate, (rs)));
+        assertEq(ok, _validReference(rs));
+    }
+
     // ---------------------------------------------------------------- boundaries
 
     function test_boundsAreInclusive() public view {
@@ -370,6 +399,39 @@ contract StorageGuardTest is Test {
         h.program(p, rs);
         vm.expectRevert(abi.encodeWithSelector(StorageGuard.ProtectedSlotWrite.selector, 3, bytes32(0)));
         h.programEach(p, rs);
+    }
+
+    /// @dev The reported case: SDK storage then slot 0, in descending order. Every checker
+    ///      would stop at the first range (its end is above 0), see its start above 0, and
+    ///      accept a write to slot 0.
+    function _descendingRanges() internal pure returns (StorageGuard.ProtectedRange[] memory rs) {
+        uint256 sdk = 0x1d6f9f139320a34a32f3b29eb8638270178e831962a74100c9e8b433f21e1200;
+        rs = new StorageGuard.ProtectedRange[](2);
+        rs[0] = _r(sdk, sdk + 1);
+        rs[1] = _r(0, 0);
+    }
+
+    function test_program_rejectsUnvalidatedRanges() public {
+        StateUpdateType[] memory t = new StateUpdateType[](1);
+        bytes[] memory a = new bytes[](1);
+        a[0] = _store(0); // the owner slot the descending list fails to protect
+        bytes memory p = abi.encode(t, a);
+        vm.expectRevert(StorageGuard.InvalidRanges.selector);
+        h.program(p, _descendingRanges());
+        vm.expectRevert(StorageGuard.InvalidRanges.selector);
+        h.programEach(p, _descendingRanges());
+
+        // A misconfiguration surfaces even when the program has no STOREs to check.
+        vm.expectRevert(StorageGuard.InvalidRanges.selector);
+        h.program(abi.encode(new StateUpdateType[](0), new bytes[](0)), _descendingRanges());
+    }
+
+    /// @dev Pins the documented precondition: the per-write checkers trust their caller, so the
+    ///      same list fails open there. If this ever starts reverting, update the docs.
+    function test_perWriteCheckersTrustTheCallerToValidate() public view {
+        (bytes32[] memory s, bytes32[] memory v) = _w(0);
+        (bool rejected,) = _all(_descendingRanges(), s, v);
+        assertFalse(rejected);
     }
 
     function test_program_rejectsMalformedInput() public {

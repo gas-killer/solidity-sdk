@@ -224,7 +224,14 @@ keccak preimage, so a hit means the program is malicious, and the whole program 
 (`ProtectedSlotWrite`).
 
 **Ranges.** Each `ProtectedRange` is an inclusive `[start, end]` interval with a `mask`. The list must
-be strictly ascending and non-overlapping (`validateRanges`).
+be strictly ascending and non-overlapping. An unsorted or overlapping list fails open, silently
+letting writes to protected slots through, so validate it:
+
+- `checkProgram` validates the list itself, once per program. That costs about 3.4k gas for 16
+  ranges, and reverts with `InvalidRanges` on a malformed list.
+- The per-write checkers (`checkEach`, `advance`) don't validate. Validating on every write would
+  cost more than the check. Call `validateRanges` once yourself: in the constructor for a constant
+  list, or before the loop for a list built at run time.
 
 - With `mask = FULL`, every write to the range is rejected, even one that stores the current value.
 - A narrower mask applies to a single slot only, and protects part of a packed slot, such as an owner

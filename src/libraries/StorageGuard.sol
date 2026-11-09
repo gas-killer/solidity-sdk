@@ -13,8 +13,13 @@ import {StateChangeHandlerLib, StateUpdateType} from "../StateChangeHandlerLib.s
 ///      protected slot from an honest write would take a keccak preimage, so a hit means the
 ///      program is malicious and the whole program is rejected.
 ///
-///      Ranges are inclusive `[start, end]` intervals, strictly ascending and non-overlapping
-///      (`validateRanges`). `mask` is `FULL` to deny every write to the range, even one that
+///      Ranges are inclusive `[start, end]` intervals, strictly ascending and non-overlapping.
+///      **The per-write checkers (`checkEach`, `checkEachLinear`, `advance`) assume this and do not
+///      check it**: an unsorted or overlapping list fails open, silently letting writes to
+///      protected slots through. Their caller must run `validateRanges` once on the list, in a
+///      constructor, or before the loop when the list is built at run time. Validating on every
+///      write would cost O(k) per write, more than the check itself. `checkProgram` and
+///      `checkProgramEach` validate the list themselves, once per program. `mask` is `FULL` to deny every write to the range, even one that
 ///      stores the value already there, which saves the SLOAD. A narrower mask protects
 ///      only some bits of one packed slot: a write passes when it leaves those bits as they are
 ///      in storage, which costs one SLOAD on a hit and nothing otherwise.
@@ -84,14 +89,29 @@ library StorageGuard {
     error InvalidRanges();
 
     /// @notice Reverts with `InvalidRanges` unless `ranges` is a well-formed denylist.
+    /// @dev Per range: `start <= end`, a nonzero mask, a partial mask only on a single slot, and a
+    ///      start above the previous range's end. The first range has no predecessor, so it is
+    ///      checked with `first` set rather than against a sentinel end.
     function validateRanges(ProtectedRange[] memory ranges) internal pure {
-        uint256 len = ranges.length;
-        for (uint256 i = 0; i < len; ++i) {
-            ProtectedRange memory r = ranges[i];
-            if (r.start > r.end || r.mask == bytes32(0)) revert InvalidRanges();
-            if (r.mask != FULL && r.start != r.end) revert InvalidRanges();
-            if (i != 0 && r.start <= ranges[i - 1].end) revert InvalidRanges();
+        bool bad;
+        assembly ("memory-safe") {
+            let it := add(ranges, 0x20)
+            let last := add(it, shl(5, mload(ranges)))
+            let prevEnd := 0
+            for { let first := 1 } lt(it, last) { it := add(it, 0x20) } {
+                let r := mload(it)
+                let start := mload(r)
+                let end := mload(add(r, 0x20))
+                let mask := mload(add(r, 0x40))
+                bad := or(bad, gt(start, end))
+                bad := or(bad, iszero(mask))
+                bad := or(bad, and(iszero(eq(mask, not(0))), iszero(eq(start, end))))
+                bad := or(bad, and(iszero(first), iszero(gt(start, prevEnd))))
+                prevEnd := end
+                first := 0
+            }
         }
+        if (bad) revert InvalidRanges();
     }
 
     // The hot paths below walk `ranges` in assembly. A `ProtectedRange[] memory` is a length
@@ -101,12 +121,14 @@ library StorageGuard {
     // which reads the mask and decides.
 
     /// @notice Stateless check of one write: one binary search.
+    /// @dev `ranges` must have passed `validateRanges`; an unvalidated list can fail open.
     function checkEach(ProtectedRange[] memory ranges, uint256 index, bytes32 slot, bytes32 value) internal view {
         uint256 hit = _covering(ranges, uint256(slot));
         if (hit != 0) _reject(hit, index, slot, value, false);
     }
 
     /// @notice Stateless check of one write by linear scan; for comparison with `checkEach`.
+    /// @dev `ranges` must have passed `validateRanges`; an unvalidated list can fail open.
     function checkEachLinear(ProtectedRange[] memory ranges, uint256 index, bytes32 slot, bytes32 value) internal view {
         uint256 s = uint256(slot);
         uint256 hit;
@@ -124,6 +146,7 @@ library StorageGuard {
     }
 
     /// @notice Checks one write and moves `c` past it. Start from a zeroed `Cursor`.
+    /// @dev `ranges` must have passed `validateRanges`; an unvalidated list can fail open.
     function advance(Cursor memory c, ProtectedRange[] memory ranges, uint256 index, bytes32 slot, bytes32 value)
         internal
         view
@@ -153,12 +176,14 @@ library StorageGuard {
     ///      and rejects the same malformed input (`InvalidArguments`, a short STORE payload).
     ///      After the first op that runs code, a write to a masked range reverts with
     ///      `MaskedWriteAfterExternalCode`, since its protected bits can no longer be predicted.
+    ///      Validates `ranges` first (`InvalidRanges`), even for a program with no STOREs.
     function checkProgram(StateUpdateType[] memory types, bytes[] memory args, ProtectedRange[] memory ranges)
         internal
         view
     {
         uint256 len = types.length;
         require(len == args.length, StateChangeHandlerLib.InvalidArguments());
+        validateRanges(ranges);
         if (ranges.length == 0) return;
         Cursor memory c;
         for (uint256 i = 0; i < len; i = _inc(i)) {
@@ -172,13 +197,15 @@ library StorageGuard {
         }
     }
 
-    /// @notice `checkProgram` with a stateless check per write; for comparison.
+    /// @notice `checkProgram` with a stateless check per write; for comparison. Validates `ranges`
+    ///         first, as `checkProgram` does.
     function checkProgramEach(StateUpdateType[] memory types, bytes[] memory args, ProtectedRange[] memory ranges)
         internal
         view
     {
         uint256 len = types.length;
         require(len == args.length, StateChangeHandlerLib.InvalidArguments());
+        validateRanges(ranges);
         if (ranges.length == 0) return;
         bool ranCode;
         for (uint256 i = 0; i < len; i = _inc(i)) {
