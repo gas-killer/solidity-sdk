@@ -42,8 +42,10 @@ import {StateUpdateType} from "../src/StateChangeHandlerLib.sol";
 ///         (slots 1..n), scattered (mapping entries) and mixed, orders sorted, sliced (sorted
 ///         within chunks of 8, as between CALL/CREATE boundaries) and unsorted.
 ///
-///         Run with plain `forge test --match-contract StorageGuardGas -vv`. `--gas-report`
-///         measures something else.
+///         Run with `FOUNDRY_PROFILE=gas forge test -vv`. The ceilings are absolute, so a Foundry
+///         or solc upgrade, or `forge coverage`'s unoptimized build, can trip them with no change
+///         in behaviour; that is why this lives in bench/, outside the default run and CI.
+///         `--gas-report` measures something else.
 contract StorageGuardGasTest is Test {
     uint256 constant LOW = 0;
     uint256 constant SCATTERED = 1;

@@ -257,8 +257,8 @@ only the gas. Nobody has to sort:
 Sorting on-chain isn't an option, because reordering `STORE`s across a `CALL` changes what the call
 observes.
 
-**Cost.** These are per-write marginals from `test/StorageGuardGas.t.sol`, run with `forge test
---match-contract StorageGuardGas -vv`. Each is the gas the check adds to one `STORE` it sits next
+**Cost.** These are per-write marginals from `bench/StorageGuardGas.t.sol`, run with
+`FOUNDRY_PROFILE=gas forge test -vv`. Each is the gas the check adds to one `STORE` it sits next
 to. The figures are for 128 writes against k ranges shaped like a real protected set (slot 0 plus
 high keccak slots), taking the range over three layouts: low slots, mapping entries, and mixed.
 
@@ -314,6 +314,7 @@ ascending order is already enough to get most of the saving.
 - **`src/examples/`** — Demo apps: `ArraySummation`(`Factory`), `ReentrantCheckpoint`(`Factory`), and the nested-settlement `nested-chain`, `nested-cycle` and `nested-deposit` examples
 - **`script/`** — Deployment scripts
 - **`test/`** — Unit and integration tests
+- **`bench/`** — Gas benchmarks, run with `FOUNDRY_PROFILE=gas forge test -vv`
 
 ## Usage
 
@@ -402,6 +403,13 @@ forge build
 
 ```bash
 forge test
+```
+
+Gas benchmarks live in `bench/` and run under their own profile, outside the default run and CI,
+because their absolute ceilings move with the toolchain:
+
+```bash
+FOUNDRY_PROFILE=gas forge test -vv
 ```
 
 ### Deploy ArraySummation (demo)
