@@ -434,6 +434,26 @@ contract StorageGuardTest is Test {
         assertFalse(rejected);
     }
 
+    /// @dev The input checks must not depend on there being anything to protect: a consumer with
+    ///      no ranges yet still gets the same rejection `_runStateUpdates` would give.
+    function test_program_rejectsMalformedInputWithNoRanges() public {
+        StorageGuard.ProtectedRange[] memory none = new StorageGuard.ProtectedRange[](0);
+        StateUpdateType[] memory t = new StateUpdateType[](1);
+        bytes[] memory a = new bytes[](1);
+        a[0] = abi.encode(bytes32(uint256(5))); // STORE payload missing its value word
+        bytes memory p = abi.encode(t, a);
+        vm.expectRevert();
+        h.program(p, none);
+        vm.expectRevert();
+        h.programEach(p, none);
+
+        bytes memory mismatched = abi.encode(new StateUpdateType[](2), new bytes[](1));
+        vm.expectRevert(StateChangeHandlerLib.InvalidArguments.selector);
+        h.program(mismatched, none);
+        vm.expectRevert(StateChangeHandlerLib.InvalidArguments.selector);
+        h.programEach(mismatched, none);
+    }
+
     function test_program_rejectsMalformedInput() public {
         StorageGuard.ProtectedRange[] memory rs = _one(0, 0);
         StateUpdateType[] memory t = new StateUpdateType[](2);

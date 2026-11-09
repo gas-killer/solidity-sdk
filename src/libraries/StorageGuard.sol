@@ -172,8 +172,11 @@ library StorageGuard {
     }
 
     /// @notice Checks every `STORE` in a decoded program with one cursor, before it runs.
-    /// @dev Expects the same `(types, args)` pair `StateChangeHandlerLib._runStateUpdates` takes
-    ///      and rejects the same malformed input (`InvalidArguments`, a short STORE payload).
+    /// @dev Expects the same `(types, args)` pair `StateChangeHandlerLib._runStateUpdates` takes.
+    ///      Rejects the malformed input it inspects the same way `_runStateUpdates` would, whatever
+    ///      `ranges` holds, an empty list included: mismatched lengths (`InvalidArguments`) and a
+    ///      STORE payload too short to decode. It doesn't decode non-STORE payloads; those are
+    ///      checked when `_runStateUpdates` executes them.
     ///      After the first op that runs code, a write to a masked range reverts with
     ///      `MaskedWriteAfterExternalCode`, since its protected bits can no longer be predicted.
     ///      Validates `ranges` first (`InvalidRanges`), even for a program with no STOREs.
@@ -184,7 +187,6 @@ library StorageGuard {
         uint256 len = types.length;
         require(len == args.length, StateChangeHandlerLib.InvalidArguments());
         validateRanges(ranges);
-        if (ranges.length == 0) return;
         Cursor memory c;
         for (uint256 i = 0; i < len; i = _inc(i)) {
             StateUpdateType t = types[i];
@@ -206,7 +208,6 @@ library StorageGuard {
         uint256 len = types.length;
         require(len == args.length, StateChangeHandlerLib.InvalidArguments());
         validateRanges(ranges);
-        if (ranges.length == 0) return;
         bool ranCode;
         for (uint256 i = 0; i < len; i = _inc(i)) {
             StateUpdateType t = types[i];
