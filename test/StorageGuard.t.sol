@@ -5,6 +5,15 @@ import {Test} from "forge-std/Test.sol";
 import {StorageGuard} from "../src/libraries/StorageGuard.sol";
 import {StateChangeHandlerLib, StateUpdateType} from "../src/StateChangeHandlerLib.sol";
 import {StateTracker} from "../src/StateTracker.sol";
+import {ERC1967Upgrade} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Upgrade.sol";
+
+/// @notice Reads the EIP-1967 slots straight from the vendored OpenZeppelin source, so the test
+///         compares against the constants proxies actually use rather than a retyped copy.
+contract ERC1967Slots is ERC1967Upgrade {
+    function slots() external pure returns (bytes32 implementation, bytes32 admin, bytes32 beacon) {
+        return (_IMPLEMENTATION_SLOT, _ADMIN_SLOT, _BEACON_SLOT);
+    }
+}
 
 /// @notice Exposes the library externally. Masked ranges read this contract's storage, which
 ///         tests set through `poke`.
@@ -84,9 +93,11 @@ contract StorageGuardHarness is StateTracker {
     }
 
     /// @dev The shape a pre-pass integration would take: check the whole program, then run it.
-    function guardedRun(bytes memory storageUpdates, StorageGuard.ProtectedRange[] memory ranges, bool each) external {
+    function guardedRun(bytes memory storageUpdates, StorageGuard.ProtectedRange[] memory ranges, bool perWrite)
+        external
+    {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        if (each) StorageGuard.checkProgramEach(types, args, ranges);
+        if (perWrite) StorageGuard.checkProgramEach(types, args, ranges);
         else StorageGuard.checkProgram(types, args, ranges);
         StateChangeHandlerLib._runStateUpdates(types, args);
     }
@@ -381,7 +392,7 @@ contract StorageGuardTest is Test {
         h.validate(rs);
     }
 
-    function test_wellKnownSlotsMatchTheirConstants() public view {
+    function test_wellKnownSlotsMatchTheirConstants() public {
         assertEq(
             _erc7201("openzeppelin.storage.Ownable"), 0x9016d09d72d40fdae2fd8ceac6b6234c7706214fd39c1cd1e609a0528c199300
         );
@@ -389,10 +400,16 @@ contract StorageGuardTest is Test {
             _erc7201("openzeppelin.storage.Initializable"),
             0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00
         );
+        // EIP-1967: derivation, published constant, and the constant OpenZeppelin's proxies use.
+        (bytes32 impl, bytes32 admin, bytes32 beacon) = new ERC1967Slots().slots();
         assertEq(
             _eip1967("eip1967.proxy.implementation"), 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc
         );
+        assertEq(_eip1967("eip1967.proxy.implementation"), uint256(impl));
         assertEq(_eip1967("eip1967.proxy.admin"), 0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103);
+        assertEq(_eip1967("eip1967.proxy.admin"), uint256(admin));
+        assertEq(_eip1967("eip1967.proxy.beacon"), 0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50);
+        assertEq(_eip1967("eip1967.proxy.beacon"), uint256(beacon));
         // Must match GasKillerSDK.STORAGE_LOCATION (private there, so restated).
         assertEq(
             _erc7201("gaskiller.SchnorrGasKillerSDK.storage"),
@@ -691,6 +708,117 @@ contract StorageGuardTest is Test {
         (bool rejected, uint256 index) = _all(rs, s, v);
         assertEq(rejected, wantRejected, "verdict");
         if (wantRejected) assertEq(index, wantIndex, "index");
+    }
+
+    // ---------------------------------------------------------------- pre-pass fuzz
+
+    // Slots the generated programs touch: 3 is fully protected, 7 packs a protected owner with a
+    // counter, 1 and 8 are unprotected.
+    uint256[4] PP_SLOTS = [uint256(1), 3, 7, 8];
+    bytes32 constant OWNER_MASK = bytes32(uint256(type(uint160).max));
+
+    function _ppRanges() internal pure returns (StorageGuard.ProtectedRange[] memory rs) {
+        rs = new StorageGuard.ProtectedRange[](2);
+        rs[0] = _r(3, 3);
+        rs[1] = StorageGuard.ProtectedRange(7, 7, OWNER_MASK);
+    }
+
+    /// @dev Values drawn from small pools, so programs often restore an earlier owner (the
+    ///      attack a pre-pass must not miss) or keep the current one while bumping the counter.
+    function _ppValue(uint256 r) internal pure returns (bytes32) {
+        address[3] memory owners = [address(0xA11CE), address(0xB0B), address(0xCAFE)];
+        return _ownerSlot(owners[r % 3], (r >> 8) % 3);
+    }
+
+    struct PP {
+        StateUpdateType[] types;
+        bytes[] args;
+        bool ranCode;
+    }
+
+    /// @dev Up to 8 ops: STOREs (mostly to slot 7), CALLs that re-enter `poke` to change storage,
+    ///      and LOGs. Seeds the harness's storage first.
+    function _ppProgram(uint256 seed) internal returns (PP memory p) {
+        for (uint256 j = 0; j < 4; ++j) {
+            h.poke(bytes32(PP_SLOTS[j]), _ppValue(uint256(keccak256(abi.encode(seed, "init", j)))));
+        }
+        uint256 n = seed % 9;
+        p.types = new StateUpdateType[](n);
+        p.args = new bytes[](n);
+        for (uint256 i = 0; i < n; ++i) {
+            uint256 r = uint256(keccak256(abi.encode(seed, i)));
+            uint256 slot = (r >> 8) % 2 == 0 ? 7 : PP_SLOTS[(r >> 16) % 4];
+            bytes32 value = _ppValue(r >> 24);
+            uint256 kind = r % 8;
+            if (kind < 5) {
+                p.types[i] = StateUpdateType.STORE;
+                p.args[i] = abi.encode(bytes32(slot), value);
+            } else if (kind < 7) {
+                p.types[i] = StateUpdateType.CALL;
+                p.args[i] = abi.encode(address(h), uint256(0), abi.encodeCall(h.poke, (bytes32(slot), value)));
+                p.ranCode = true;
+            } else {
+                p.types[i] = StateUpdateType.LOG0;
+                p.args[i] = abi.encode(bytes("log"));
+            }
+        }
+    }
+
+    /// @dev Simulates the program op by op. Returns whether some STORE writes slot 3 or changes
+    ///      slot 7's owner bits as storage stands at that moment, and the final storage.
+    function _ppSimulate(PP memory p) internal view returns (bool violation, bytes32[4] memory store) {
+        for (uint256 j = 0; j < 4; ++j) {
+            store[j] = vm.load(address(h), bytes32(PP_SLOTS[j]));
+        }
+        for (uint256 i = 0; i < p.types.length; ++i) {
+            bytes32 slot;
+            bytes32 value;
+            if (p.types[i] == StateUpdateType.STORE) {
+                (slot, value) = abi.decode(p.args[i], (bytes32, bytes32));
+                uint256 j = _ppIndex(uint256(slot));
+                if (uint256(slot) == 3) violation = true;
+                if (uint256(slot) == 7 && (store[j] ^ value) & OWNER_MASK != 0) violation = true;
+                store[j] = value;
+            } else if (p.types[i] == StateUpdateType.CALL) {
+                (,, bytes memory callargs) = abi.decode(p.args[i], (address, uint256, bytes));
+                (slot, value) = abi.decode(_tail(callargs), (bytes32, bytes32));
+                store[_ppIndex(uint256(slot))] = value;
+            }
+        }
+    }
+
+    function _ppIndex(uint256 slot) internal view returns (uint256) {
+        for (uint256 j = 0; j < 4; ++j) {
+            if (PP_SLOTS[j] == slot) return j;
+        }
+        revert("slot outside the program's universe");
+    }
+
+    /// forge-config: default.fuzz.runs = 2048
+    function testFuzz_prePassIsSoundWhenStorageChangesBetweenWrites(uint256 seed) public {
+        PP memory p = _ppProgram(seed);
+        bytes memory encoded = abi.encode(p.types, p.args);
+        StorageGuard.ProtectedRange[] memory rs = _ppRanges();
+
+        (bool okMerge, bytes memory errMerge) = address(h).staticcall(abi.encodeCall(h.program, (encoded, rs)));
+        (bool okEach, bytes memory errEach) = address(h).staticcall(abi.encodeCall(h.programEach, (encoded, rs)));
+        assertEq(okMerge, okEach, "checkProgram and checkProgramEach disagree");
+        assertEq(errMerge, errEach, "checkProgram and checkProgramEach disagree on the error");
+
+        (bool violation, bytes32[4] memory expected) = _ppSimulate(p);
+        // Soundness: an accepted program never changes protected bits at run time.
+        if (okMerge) assertFalse(violation, "pre-pass accepted a program that changes protected bits");
+        // Exactness: with no code-running op, storage can't move between writes, so the
+        // pre-pass rejects exactly the violating programs.
+        if (!p.ranCode) assertEq(okMerge, !violation, "pre-pass verdict differs from the model");
+
+        // Tie the model to the real execution: run accepted programs and compare storage.
+        if (okMerge) {
+            h.guardedRun(encoded, rs, false);
+            for (uint256 j = 0; j < 4; ++j) {
+                assertEq(vm.load(address(h), bytes32(PP_SLOTS[j])), expected[j], "model and execution differ");
+            }
+        }
     }
 
     // ---------------------------------------------------------------- sorting (test-side only)
