@@ -208,6 +208,78 @@ See `src/examples/nested-chain` (`NestedRouter` → `NestedVault` → `NestedLed
 ETH). The root leaf binds the `msg.value` the tree settles with, just as the `verifyAndUpdate`
 digest does, and each nested leaf binds the value its parent forwards.
 
+## Protected storage ranges
+
+A signed program's `STORE` updates write any slot they name. A compromised quorum could use one to
+overwrite an `Ownable` owner, the `StateTracker` counter, the SDK's own configuration (which holds
+the registry address) or an EIP-1967 proxy slot, and take over the contract.
+`libraries/StorageGuard.sol` checks writes against a list of protected slot ranges. It isn't wired
+into settlement yet ([#107](https://github.com/gas-killer/solidity-sdk/issues/107)); this section
+specifies the check and records what it costs.
+
+**A denylist, not an allowlist.** Honest writes to mappings and dynamic arrays land on keccak-derived
+slots spread across the whole slot space, and an allowlist of ranges can't express those. Every slot
+worth protecting is known at compile time. An honest write can only reach a protected slot through a
+keccak preimage, so a hit means the program is malicious, and the whole program is rejected
+(`ProtectedSlotWrite`).
+
+**Ranges.** Each `ProtectedRange` is an inclusive `[start, end]` interval with a `mask`. The list must
+be strictly ascending and non-overlapping (`validateRanges`).
+
+- With `mask = FULL`, every write to the range is rejected, even one that stores the current value.
+- A narrower mask applies to a single slot only, and protects part of a packed slot, such as an owner
+  address that shares its slot with a counter. A write passes when every masked bit stays as it is in
+  storage. That check costs one SLOAD, paid only on a write that lands in the range.
+
+**Sorted input is optional.** The merge checker (`Cursor` + `advance`) keeps a position in the range
+list and moves it forward as the slots ascend. A write below its predecessor re-seats the position
+by binary search, so order changes the gas only, never the verdict. Nobody has to sort:
+
+- gas-analyzer's canonical extraction, ascending within each slice between `CALL`/`CREATE`
+  boundaries, pays one re-seat per slice.
+- Journal-order input is still checked correctly, just less cheaply.
+
+Sorting on-chain isn't an option, because reordering `STORE`s across a `CALL` changes what the call
+observes.
+
+**Cost.** These are per-write marginals from `test/StorageGuardGas.t.sol`, run with `forge test
+--match-contract StorageGuardGas -vv`. Each is the gas the check adds to one `STORE` it sits next
+to. The figures are for 128 writes against k ranges shaped like a real protected set (slot 0 plus
+high keccak slots), taking the range over three layouts: low slots, mapping entries, and mixed.
+
+| Write order | k | Binary search | Linear scan | Merge |
+|---|---|---|---|---|
+| sorted | 1 | 297 | 205 | 195 |
+| sorted | 4 | 547–611 | 281–350 | 261–290 |
+| sorted | 16 | 739–873 | 281–832 | 290–301 |
+| sorted within slices of 8 | 16 | 739–873 | 281–832 | 377–504 |
+| unsorted | 16 | 739–873 | 281–832 | 656–826 |
+
+- **Sorted input.** The merge's cost is flat in k, the effect the issue predicted. It beats the
+  binary search at every k above 1.
+- **Unsorted input.** The merge loses to the binary search, since each re-seat pays for a search and
+  then a walk.
+- **Linear scan.** It's close to the merge at k ≤ 4, and on writes below every high range.
+- **Against the write itself.** An SSTORE costs 2,900 (warm), 5,000 (cold) or 22,100 (zero to
+  nonzero), so the check adds roughly 7–30% to an ordinary write. It costs more than a write to a
+  slot already written in the same transaction, which is 100.
+- **Inline, not a pre-pass.** A separate pass over the program before it runs (`checkProgram`)
+  decodes every `STORE` a second time, which adds about 350 gas per write.
+
+**Recommendation.** Inline the merge checker in `StateChangeHandlerLib._run`'s `STORE` branch, with
+the cursor carried across the whole program and no sort requirement. gas-analyzer's per-slice
+ascending order is already enough to get most of the saving.
+
+**Not covered:**
+
+- A `CALL` update to `address(this)` can reach privileged functions directly, so a consumer relying
+  on this guard should also restrict self-calls.
+- Each `NESTED` frame is checked by its own contract.
+- A target function that is a general-purpose VM over all of its storage can't be restricted this
+  way.
+- Ranges are declared by the consumer. Deriving them by scanning a contract's functions is left for
+  later.
+
 ## Repository Structure
 
 - **`src/`** — Core SDK contracts
@@ -218,7 +290,7 @@ digest does, and each nested leaf binds the value its parent forwards.
   - `StateChangeHandlerLib.sol` — Executes batched `STORE`, `CALL`, `LOG`, `CREATE` and `NESTED` operations
   - `TransitionGuard.sol` — EIP-1153 reentrancy / in-transition latch, keyed by the active nested root
   - `interface/` — `IGasKillerSDK`, `IGasKillerSDKBatch`, `IGasKillerNested`, `ISchnorrStakeRegistry`, `ISchnorrApprovalRegistry`, and the Alloy-compatible `IStateUpdateTypes`
-  - `libraries/` — `Secp256k1` (affine point math), `SchnorrVerify` (constant-gas `ecrecover`-trick verify) and `NestedFrames` (nested-settlement leaves, tree membership and witnesses)
+  - `libraries/` — `Secp256k1` (affine point math), `SchnorrVerify` (constant-gas `ecrecover`-trick verify), `NestedFrames` (nested-settlement leaves, tree membership and witnesses) and `StorageGuard` (protected storage ranges for `STORE` updates)
 - **`src/examples/`** — Demo apps: `ArraySummation`(`Factory`), `ReentrantCheckpoint`(`Factory`), and the nested-settlement `nested-chain`, `nested-cycle` and `nested-deposit` examples
 - **`script/`** — Deployment scripts
 - **`test/`** — Unit and integration tests
