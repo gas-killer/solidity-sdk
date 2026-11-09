@@ -15,7 +15,9 @@ env:
 jobs:
   flatten:
     name: Flatten Solidity Contracts
-    runs-on: ubuntu-latest
+    # Pinned: the "Install solc" step uses the ethereum PPA, which publishes solc for 24.04
+    # (noble) but not for 26.04 (resolute), which ubuntu-latest now resolves to.
+    runs-on: ubuntu-24.04
 
     permissions: # allow the default token to push back changes
       contents: write
