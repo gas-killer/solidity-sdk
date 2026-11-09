@@ -51,6 +51,33 @@ contract StorageGuardHarness is StateTracker {
         }
     }
 
+    /// @dev `merge` from an arbitrary starting position, as a cursor carried over from another
+    ///      list or never reset would arrive.
+    function mergeFrom(
+        StorageGuard.ProtectedRange[] memory ranges,
+        bytes32[] memory slots,
+        bytes32[] memory values,
+        uint256 startNext
+    ) external view {
+        StorageGuard.Cursor memory c;
+        c.next = startNext;
+        for (uint256 i = 0; i < slots.length; ++i) {
+            StorageGuard.advance(c, ranges, i, slots[i], values[i]);
+        }
+    }
+
+    /// @dev One cursor walked through `first`, then reused unchanged on `second`.
+    function mergeReused(
+        StorageGuard.ProtectedRange[] memory first,
+        bytes32 firstSlot,
+        StorageGuard.ProtectedRange[] memory second,
+        bytes32 secondSlot
+    ) external view {
+        StorageGuard.Cursor memory c;
+        StorageGuard.advance(c, first, 0, firstSlot, bytes32(0));
+        StorageGuard.advance(c, second, 1, secondSlot, bytes32(0));
+    }
+
     function program(bytes memory storageUpdates, StorageGuard.ProtectedRange[] memory ranges) external view {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
         StorageGuard.checkProgram(types, args, ranges);
@@ -240,6 +267,46 @@ contract StorageGuardTest is Test {
         (bool rejected, uint256 index) = _all(rs, s, new bytes32[](4));
         assertTrue(rejected);
         assertEq(index, 2);
+    }
+
+    // ---------------------------------------------------------------- cursor state
+
+    /// @dev The reported case: a cursor walked to the end of a long list, then reused on a short
+    ///      list whose first range covers the next write.
+    function test_cursorReusedOnAnotherListStillRejects() public {
+        StorageGuard.ProtectedRange[] memory longList = new StorageGuard.ProtectedRange[](4);
+        for (uint256 i = 0; i < 4; ++i) {
+            longList[i] = _r(10 * i, 10 * i);
+        }
+        vm.expectRevert(abi.encodeWithSelector(StorageGuard.ProtectedSlotWrite.selector, 1, bytes32(uint256(50))));
+        h.mergeReused(longList, bytes32(uint256(35)), _one(50, 50), bytes32(uint256(50)));
+    }
+
+    function test_cursorWithGarbagePositionStillRejects() public {
+        StorageGuard.ProtectedRange[] memory rs = new StorageGuard.ProtectedRange[](3);
+        rs[0] = _r(5, 5);
+        rs[1] = _r(20, 20);
+        rs[2] = _r(40, 40);
+        (bytes32[] memory s, bytes32[] memory v) = _w(20);
+        uint256[4] memory starts = [uint256(2), 3, 1000, type(uint256).max];
+        for (uint256 i = 0; i < starts.length; ++i) {
+            vm.expectRevert(abi.encodeWithSelector(StorageGuard.ProtectedSlotWrite.selector, 0, bytes32(uint256(20))));
+            h.mergeFrom(rs, s, v, starts[i]);
+        }
+    }
+
+    /// @notice The cursor's contents affect gas only: from any starting position, the merge
+    ///         reaches the same verdict as the naive model.
+    /// forge-config: default.fuzz.runs = 1024
+    function testFuzz_cursorStateNeverChangesTheVerdict(uint256 seed, uint8 n, uint256 startNext) public {
+        StorageGuard.ProtectedRange[] memory rs = _fuzzRanges(seed);
+        (bytes32[] memory s, bytes32[] memory v) = _fuzzWrites(seed, uint256(n) % 40, seed % 3);
+        // Mostly small positions (in and just past the list), sometimes anything at all.
+        if (startNext % 4 != 0) startNext %= 20;
+        (bool wantRejected, uint256 wantIndex) = _oracle(rs, s, v);
+        (bool rejected, uint256 index) = _outcome(abi.encodeCall(h.mergeFrom, (rs, s, v, startNext)));
+        assertEq(rejected, wantRejected, "verdict");
+        if (wantRejected) assertEq(index, wantIndex, "index");
     }
 
     // ---------------------------------------------------------------- masked (packed) slots

@@ -244,11 +244,14 @@ letting writes to protected slots through, so validate it:
   after such an op (`MaskedWriteAfterExternalCode`). Fully protected ranges are unaffected.
 
 **Sorted input is optional.** The merge checker (`Cursor` + `advance`) keeps a position in the range
-list and moves it forward as the slots ascend. A write below its predecessor re-seats the position
-by binary search, so order changes the gas only, never the verdict. Nobody has to sort:
+list and moves it forward as the slots ascend. Before each write, it checks that its position is
+still valid for the slot, meaning no earlier range reaches the slot. If not, it re-seats by binary
+search. That covers a write below the previous range, and also a cursor carried over from another
+list or never reset. Neither the order of the writes nor the cursor's state can change the verdict,
+only the gas. Nobody has to sort:
 
 - gas-analyzer's canonical extraction, ascending within each slice between `CALL`/`CREATE`
-  boundaries, pays one re-seat per slice.
+  boundaries, pays at most one re-seat per slice.
 - Journal-order input is still checked correctly, just less cheaply.
 
 Sorting on-chain isn't an option, because reordering `STORE`s across a `CALL` changes what the call
@@ -261,17 +264,21 @@ high keccak slots), taking the range over three layouts: low slots, mapping entr
 
 | Write order | k | Binary search | Linear scan | Merge |
 |---|---|---|---|---|
-| sorted | 1 | 294 | 205 | 195 |
-| sorted | 4 | 540–602 | 281–350 | 261–290 |
-| sorted | 16 | 730–864 | 281–832 | 290–301 |
-| sorted within slices of 8 | 16 | 730–864 | 281–832 | 377–504 |
-| unsorted | 16 | 730–864 | 281–832 | 656–826 |
+| sorted | 1 | 294 | 205 | 263 |
+| sorted | 4 | 540–602 | 281–350 | 328–358 |
+| sorted | 16 | 730–864 | 281–832 | 358–368 |
+| sorted within slices of 8 | 16 | 730–864 | 281–832 | 358–555 |
+| unsorted | 16 | 730–864 | 281–832 | 358–775 |
 
 - **Sorted input.** The merge's cost is flat in k, the effect the issue predicted. It beats the
-  binary search at every k above 1.
-- **Unsorted input.** The merge loses to the binary search, since each re-seat pays for a search and
-  then a walk.
-- **Linear scan.** It's close to the merge at k ≤ 4, and on writes below every high range.
+  binary search at every k.
+- **Unsorted input.** The merge stays roughly even with the binary search: ahead at k = 4, and at
+  k = 16 ahead on low and mixed slots, slightly behind (775 against 730) on mapping entries. A write
+  only re-seats when it falls below the previous range, not merely below the previous write.
+- **Linear scan.** It's cheapest at k = 1, at least as cheap at k = 4, and cheapest on writes below
+  every high range. The merge pulls ahead at k = 16 on mapping entries (366–368 against 568–832).
+- **Cursor safety.** About 65 gas of the merge's cost per write goes to re-checking the cursor's
+  position against the list, so a stale or foreign cursor can't let a write through.
 - **Against the write itself.** An SSTORE costs 2,900 (warm), 5,000 (cold) or 22,100 (zero to
   nonzero), so the check adds roughly 7–30% to an ordinary write. It costs more than a write to a
   slot already written in the same transaction, which is 100.

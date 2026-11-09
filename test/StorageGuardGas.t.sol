@@ -23,17 +23,19 @@ import {StateUpdateType} from "../src/StateChangeHandlerLib.sol";
 ///         Reference measurements (n = 128, forge 1.5.1, solc 0.8.33, cancun), gas per write:
 ///
 ///           order     k  | binary  linear  merge
-///           sorted    1  |   294     205    195
-///           sorted    4  |   540-602 281-350 261-290
-///           sorted   16  |   730-864 281-832 290-301
-///           sliced   16  |   730-864 281-832 377-504
-///           unsorted 16  |   730-864 281-832 656-826
+///           sorted    1  |   294     205    263
+///           sorted    4  |   540-602 281-350 328-358
+///           sorted   16  |   730-864 281-832 358-368
+///           sliced   16  |   730-864 281-832 358-555
+///           unsorted 16  |   730-864 281-832 358-775
 ///
-///         The merge is flat in k on sorted input and beats the binary search at every k > 1.
-///         The linear scan is close behind at k <= 4, and on writes below every high range at any
-///         k. On unsorted input the merge loses to the binary search, since each re-seat pays for a
-///         search and then a walk. A pre-pass (`test_prepass`) adds about 350 gas per write to decode
-///         the STORE a second time, so the check belongs inline in `_run`.
+///         The merge is flat in k on sorted input and beats the binary search at every k. On
+///         unsorted input it stays roughly even with the binary search, since a write re-seats
+///         only when it falls below the previous range. The linear scan is cheapest at k = 1 and
+///         on writes below every high range, and at least as cheap at k = 4. About 65 gas of
+///         the merge goes to re-checking the cursor's position, so a stale or foreign cursor
+///         can't let a write through. A pre-pass (`test_prepass`) adds about 350 gas per write
+///         to decode the STORE a second time, so the check belongs inline in `_run`.
 ///
 ///         Matrix: writes n ∈ {1, 8, 32, 128}, ranges k ∈ {1, 4, 16} (slot 0 plus k-1
 ///         keccak-derived high slots, the shape of real protected sets), layouts low
@@ -57,7 +59,7 @@ contract StorageGuardGasTest is Test {
     uint256 constant CEIL_MERGE = 1100;
     uint256 constant CEIL_LINEAR = 1000;
     uint256 constant CEIL_PREPASS = 1500;
-    /// @dev Most the merge may grow from k = 1 to k = 16 on sorted input (measured: about 105).
+    /// @dev Most the merge may grow from k = 1 to k = 16 on sorted input (measured: about 105, 263 to 368).
     uint256 constant MERGE_K_GROWTH = 150;
 
     /// @dev No fixture XORs to this, so the comparison that keeps baseline loops live never fires.
