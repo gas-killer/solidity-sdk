@@ -56,6 +56,14 @@ contract StorageGuardHarness is StateTracker {
         StorageGuard.checkProgram(types, args, ranges);
     }
 
+    /// @dev The shape a pre-pass integration would take: check the whole program, then run it.
+    function guardedRun(bytes memory storageUpdates, StorageGuard.ProtectedRange[] memory ranges, bool each) external {
+        (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
+        if (each) StorageGuard.checkProgramEach(types, args, ranges);
+        else StorageGuard.checkProgram(types, args, ranges);
+        StateChangeHandlerLib._runStateUpdates(types, args);
+    }
+
     function programEach(bytes memory storageUpdates, StorageGuard.ProtectedRange[] memory ranges) external view {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
         StorageGuard.checkProgramEach(types, args, ranges);
@@ -375,6 +383,95 @@ contract StorageGuardTest is Test {
         a[0] = abi.encode(bytes32(uint256(5))); // STORE payload missing its value word
         vm.expectRevert();
         h.program(abi.encode(t, a), rs);
+    }
+
+    /// @dev Slot 7 packs `owner` (low 160 bits, protected) with a `uint96` counter above it.
+    function _ownerSlot(address owner, uint256 counter) internal pure returns (bytes32) {
+        return bytes32((counter << 160) | uint160(owner));
+    }
+
+    /// @dev [CALL that re-enters and legitimately moves the owner to B, STORE counter|A].
+    ///      Against pre-program storage the STORE leaves the owner unchanged; at run time it
+    ///      moves the owner from B back to A.
+    function _ownerRestoringProgram() internal view returns (bytes memory) {
+        StateUpdateType[] memory t = new StateUpdateType[](2);
+        bytes[] memory a = new bytes[](2);
+        t[0] = StateUpdateType.CALL;
+        a[0] = abi.encode(
+            address(h), uint256(0), abi.encodeCall(h.poke, (bytes32(uint256(7)), _ownerSlot(address(0xB0B), 41)))
+        );
+        t[1] = StateUpdateType.STORE;
+        a[1] = abi.encode(bytes32(uint256(7)), _ownerSlot(address(0xA11CE), 42));
+        return abi.encode(t, a);
+    }
+
+    function _maskedOwnerRange() internal pure returns (StorageGuard.ProtectedRange[] memory rs) {
+        rs = new StorageGuard.ProtectedRange[](1);
+        rs[0] = StorageGuard.ProtectedRange(7, 7, bytes32(uint256(type(uint160).max)));
+    }
+
+    function test_program_maskedStoreAfterCallCannotRestoreOldBits() public {
+        bytes memory p = _ownerRestoringProgram();
+        for (uint256 each = 0; each < 2; ++each) {
+            h.poke(bytes32(uint256(7)), _ownerSlot(address(0xA11CE), 41));
+            vm.expectRevert(
+                abi.encodeWithSelector(StorageGuard.MaskedWriteAfterExternalCode.selector, 1, bytes32(uint256(7)))
+            );
+            h.guardedRun(p, _maskedOwnerRange(), each == 1);
+        }
+    }
+
+    /// @dev [op, STORE slot 7 keeping the owner, STORE slot 9]; slot 7 holds owner A.
+    function _afterOp(StateUpdateType op) internal returns (bytes memory) {
+        h.poke(bytes32(uint256(7)), _ownerSlot(address(0xA11CE), 41));
+        StateUpdateType[] memory t = new StateUpdateType[](3);
+        bytes[] memory a = new bytes[](3);
+        t[0] = op;
+        a[0] = ""; // never decoded by the pre-pass
+        t[1] = StateUpdateType.STORE;
+        a[1] = abi.encode(bytes32(uint256(7)), _ownerSlot(address(0xA11CE), 42));
+        t[2] = StateUpdateType.STORE;
+        a[2] = abi.encode(bytes32(uint256(9)), bytes32(uint256(1)));
+        return abi.encode(t, a);
+    }
+
+    function test_program_everyCodeRunningOpBlindsMaskedRanges() public {
+        StateUpdateType[4] memory ops =
+            [StateUpdateType.CALL, StateUpdateType.CREATE, StateUpdateType.CREATE2, StateUpdateType.NESTED];
+        for (uint256 i = 0; i < ops.length; ++i) {
+            bytes memory p = _afterOp(ops[i]);
+            bytes memory err =
+                abi.encodeWithSelector(StorageGuard.MaskedWriteAfterExternalCode.selector, 1, bytes32(uint256(7)));
+            vm.expectRevert(err);
+            h.program(p, _maskedOwnerRange());
+            vm.expectRevert(err);
+            h.programEach(p, _maskedOwnerRange());
+        }
+    }
+
+    function test_program_logsDoNotBlindMaskedRanges() public {
+        // A LOG runs no code, so the counter bump after it is still judged on its bits and passes.
+        bytes memory p = _afterOp(StateUpdateType.LOG0);
+        h.program(p, _maskedOwnerRange());
+        h.programEach(p, _maskedOwnerRange());
+    }
+
+    function test_program_maskedStoreBeforeAnyCallIsJudgedOnItsBits() public {
+        h.poke(bytes32(uint256(7)), _ownerSlot(address(0xA11CE), 41));
+        StateUpdateType[] memory t = new StateUpdateType[](3);
+        bytes[] memory a = new bytes[](3);
+        t[0] = StateUpdateType.STORE;
+        a[0] = abi.encode(bytes32(uint256(7)), _ownerSlot(address(0xA11CE), 42)); // counter bump: fine
+        t[1] = StateUpdateType.CALL;
+        a[1] = abi.encode(address(1), uint256(0), bytes(""));
+        t[2] = StateUpdateType.STORE;
+        a[2] = abi.encode(bytes32(uint256(9)), bytes32(uint256(1))); // unprotected: fine after a CALL
+        h.program(abi.encode(t, a), _maskedOwnerRange());
+        h.programEach(abi.encode(t, a), _maskedOwnerRange());
+
+        a[0] = abi.encode(bytes32(uint256(7)), _ownerSlot(address(0xBAD), 41)); // owner swap: rejected
+        vm.expectRevert(abi.encodeWithSelector(StorageGuard.ProtectedSlotWrite.selector, 0, bytes32(uint256(7))));
+        h.program(abi.encode(t, a), _maskedOwnerRange());
     }
 
     // ---------------------------------------------------------------- equivalence fuzz

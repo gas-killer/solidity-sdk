@@ -23,11 +23,11 @@ import {StateUpdateType} from "../src/StateChangeHandlerLib.sol";
 ///         Reference measurements (n = 128, forge 1.5.1, solc 0.8.33, cancun), gas per write:
 ///
 ///           order     k  | binary  linear  merge
-///           sorted    1  |   297     205    195
-///           sorted    4  |   547-611 281-350 261-290
-///           sorted   16  |   739-873 281-832 290-301
-///           sliced   16  |   739-873 281-832 377-504
-///           unsorted 16  |   739-873 281-832 656-826
+///           sorted    1  |   294     205    195
+///           sorted    4  |   540-602 281-350 261-290
+///           sorted   16  |   730-864 281-832 290-301
+///           sliced   16  |   730-864 281-832 377-504
+///           unsorted 16  |   730-864 281-832 656-826
 ///
 ///         The merge is flat in k on sorted input and beats the binary search at every k > 1.
 ///         The linear scan is close behind at k <= 4, and on writes below every high range at any

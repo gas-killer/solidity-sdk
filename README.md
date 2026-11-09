@@ -230,6 +230,11 @@ be strictly ascending and non-overlapping (`validateRanges`).
 - A narrower mask applies to a single slot only, and protects part of a packed slot, such as an owner
   address that shares its slot with a counter. A write passes when every masked bit stays as it is in
   storage. That check costs one SLOAD, paid only on a write that lands in the range.
+- A masked check compares with storage as it is when the check runs, so it is exact only inline,
+  right before the write. A pre-pass sees storage from before the program. Once a `CALL`, `CREATE`,
+  `CREATE2` or `NESTED` op has run code, that code may have legitimately changed the protected bits,
+  and a later `STORE` could quietly put the old bits back. So a pre-pass rejects every masked write
+  after such an op (`MaskedWriteAfterExternalCode`). Fully protected ranges are unaffected.
 
 **Sorted input is optional.** The merge checker (`Cursor` + `advance`) keeps a position in the range
 list and moves it forward as the slots ascend. A write below its predecessor re-seats the position
@@ -249,11 +254,11 @@ high keccak slots), taking the range over three layouts: low slots, mapping entr
 
 | Write order | k | Binary search | Linear scan | Merge |
 |---|---|---|---|---|
-| sorted | 1 | 297 | 205 | 195 |
-| sorted | 4 | 547–611 | 281–350 | 261–290 |
-| sorted | 16 | 739–873 | 281–832 | 290–301 |
-| sorted within slices of 8 | 16 | 739–873 | 281–832 | 377–504 |
-| unsorted | 16 | 739–873 | 281–832 | 656–826 |
+| sorted | 1 | 294 | 205 | 195 |
+| sorted | 4 | 540–602 | 281–350 | 261–290 |
+| sorted | 16 | 730–864 | 281–832 | 290–301 |
+| sorted within slices of 8 | 16 | 730–864 | 281–832 | 377–504 |
+| unsorted | 16 | 730–864 | 281–832 | 656–826 |
 
 - **Sorted input.** The merge's cost is flat in k, the effect the issue predicted. It beats the
   binary search at every k above 1.
@@ -264,7 +269,8 @@ high keccak slots), taking the range over three layouts: low slots, mapping entr
   nonzero), so the check adds roughly 7–30% to an ordinary write. It costs more than a write to a
   slot already written in the same transaction, which is 100.
 - **Inline, not a pre-pass.** A separate pass over the program before it runs (`checkProgram`)
-  decodes every `STORE` a second time, which adds about 350 gas per write.
+  decodes every `STORE` a second time, which adds about 350 gas per write. It also has to reject
+  masked writes that come after code-running ops, which an inline check can judge exactly.
 
 **Recommendation.** Inline the merge checker in `StateChangeHandlerLib._run`'s `STORE` branch, with
 the cursor carried across the whole program and no sort requirement. gas-analyzer's per-slice

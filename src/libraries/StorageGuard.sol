@@ -29,10 +29,15 @@ import {StateChangeHandlerLib, StateUpdateType} from "../StateChangeHandlerLib.s
 ///          never the verdict. Input sorted within each CALL/CREATE-bounded slice, as
 ///          gas-analyzer's canonical extraction emits it, pays one re-seat per slice.
 ///
-///      Masked ranges are checked against storage as it stands when the check runs. A pre-pass
-///      (`checkProgram`) therefore compares every write with the pre-program value, which is
-///      what an inline check sees too as long as no earlier write in the program changed the
-///      protected bits, since such a write would already have been rejected.
+///      Masked ranges are checked against storage as it stands when the check runs, so the
+///      per-write checkers are sound only when called right before each write executes, inline
+///      in `_run`. A pre-pass (`checkProgram`) sees storage as it was before the program. A STORE
+///      can't make the two differ on protected bits: any STORE that changed them would itself
+///      have been rejected. But a CALL, CREATE, CREATE2 or NESTED op runs code that can
+///      legitimately change them, for example by re-entering an owner-gated setter, and a later
+///      STORE could then quietly put the old bits back. So once a pre-pass has passed such an
+///      op, it rejects every later write to a masked range (`MaskedWriteAfterExternalCode`).
+///      Fully protected ranges don't depend on storage and are unaffected.
 ///
 ///      Not covered: a `CALL` update to `address(this)` can reach privileged functions directly,
 ///      so a consumer relying on this guard should also restrict self-calls. `NESTED` frames
@@ -52,9 +57,13 @@ library StorageGuard {
     /// @notice Merge state carried across consecutive writes.
     /// @param next Index of the first range whose end is at or above the previous write's slot.
     /// @param prev The previous write's slot.
+    /// @param blind Set by a pre-pass once it has passed an op that runs code. Storage may then
+    ///        differ from what the write will see, so a masked hit is rejected. Leave it false
+    ///        when checking inline, right before each write.
     struct Cursor {
         uint256 next;
         uint256 prev;
+        bool blind;
     }
 
     bytes32 internal constant FULL = bytes32(type(uint256).max);
@@ -63,6 +72,13 @@ library StorageGuard {
     /// @param index Position of the offending op in its program (or in the caller's own sequence).
     /// @param slot The protected slot it writes.
     error ProtectedSlotWrite(uint256 index, bytes32 slot);
+
+    /// @notice A pre-pass found a write to a masked range after an op that runs code. The pre-pass
+    ///      can only compare with storage as it was before the program, and that code may have
+    ///      changed the protected bits since.
+    /// @param index Position of the offending `STORE` in its program.
+    /// @param slot The masked slot it writes.
+    error MaskedWriteAfterExternalCode(uint256 index, bytes32 slot);
 
     /// @notice The range list is unsorted, overlapping, empty-masked or masks more than one slot.
     error InvalidRanges();
@@ -86,16 +102,8 @@ library StorageGuard {
 
     /// @notice Stateless check of one write: one binary search.
     function checkEach(ProtectedRange[] memory ranges, uint256 index, bytes32 slot, bytes32 value) internal view {
-        uint256 s = uint256(slot);
-        uint256 i = _lowerBound(ranges, s);
-        uint256 hit;
-        assembly ("memory-safe") {
-            if lt(i, mload(ranges)) {
-                let r := mload(add(add(ranges, 0x20), shl(5, i)))
-                if iszero(gt(mload(r), s)) { hit := r }
-            }
-        }
-        if (hit != 0) _reject(hit, index, slot, value);
+        uint256 hit = _covering(ranges, uint256(slot));
+        if (hit != 0) _reject(hit, index, slot, value, false);
     }
 
     /// @notice Stateless check of one write by linear scan; for comparison with `checkEach`.
@@ -112,7 +120,7 @@ library StorageGuard {
                 }
             }
         }
-        if (hit != 0) _reject(hit, index, slot, value);
+        if (hit != 0) _reject(hit, index, slot, value, false);
     }
 
     /// @notice Checks one write and moves `c` past it. Start from a zeroed `Cursor`.
@@ -137,12 +145,14 @@ library StorageGuard {
                 if iszero(gt(mload(r), s)) { hit := r }
             }
         }
-        if (hit != 0) _reject(hit, index, slot, value);
+        if (hit != 0) _reject(hit, index, slot, value, c.blind);
     }
 
     /// @notice Checks every `STORE` in a decoded program with one cursor, before it runs.
     /// @dev Expects the same `(types, args)` pair `StateChangeHandlerLib._runStateUpdates` takes
     ///      and rejects the same malformed input (`InvalidArguments`, a short STORE payload).
+    ///      After the first op that runs code, a write to a masked range reverts with
+    ///      `MaskedWriteAfterExternalCode`, since its protected bits can no longer be predicted.
     function checkProgram(StateUpdateType[] memory types, bytes[] memory args, ProtectedRange[] memory ranges)
         internal
         view
@@ -152,7 +162,11 @@ library StorageGuard {
         if (ranges.length == 0) return;
         Cursor memory c;
         for (uint256 i = 0; i < len; i = _inc(i)) {
-            if (types[i] != StateUpdateType.STORE) continue;
+            StateUpdateType t = types[i];
+            if (t != StateUpdateType.STORE) {
+                if (!c.blind) c.blind = _runsCode(t);
+                continue;
+            }
             (bytes32 slot, bytes32 value) = abi.decode(args[i], (bytes32, bytes32));
             advance(c, ranges, i, slot, value);
         }
@@ -166,10 +180,16 @@ library StorageGuard {
         uint256 len = types.length;
         require(len == args.length, StateChangeHandlerLib.InvalidArguments());
         if (ranges.length == 0) return;
+        bool ranCode;
         for (uint256 i = 0; i < len; i = _inc(i)) {
-            if (types[i] != StateUpdateType.STORE) continue;
+            StateUpdateType t = types[i];
+            if (t != StateUpdateType.STORE) {
+                if (!ranCode) ranCode = _runsCode(t);
+                continue;
+            }
             (bytes32 slot, bytes32 value) = abi.decode(args[i], (bytes32, bytes32));
-            checkEach(ranges, i, slot, value);
+            uint256 hit = _covering(ranges, uint256(slot));
+            if (hit != 0) _reject(hit, i, slot, value, ranCode);
         }
     }
 
@@ -187,6 +207,31 @@ library StorageGuard {
         }
     }
 
+    /// @dev Pointer to the range covering `s`, or zero: `_lowerBound` plus the start check.
+    function _covering(ProtectedRange[] memory ranges, uint256 s) private pure returns (uint256 hit) {
+        assembly ("memory-safe") {
+            let len := mload(ranges)
+            let base := add(ranges, 0x20)
+            let lo := 0
+            for { let hi := len } lt(lo, hi) {} {
+                let mid := shr(1, add(lo, hi))
+                switch lt(mload(add(mload(add(base, shl(5, mid))), 0x20)), s)
+                case 1 { lo := add(mid, 1) }
+                default { hi := mid }
+            }
+            if lt(lo, len) {
+                let r := mload(add(base, shl(5, lo)))
+                if iszero(gt(mload(r), s)) { hit := r }
+            }
+        }
+    }
+
+    /// @dev Ops that execute code which can write this contract's storage. LOGs don't.
+    function _runsCode(StateUpdateType t) private pure returns (bool) {
+        return t == StateUpdateType.CALL || t == StateUpdateType.CREATE || t == StateUpdateType.CREATE2
+            || t == StateUpdateType.NESTED;
+    }
+
     /// @dev Increment for an index bounded by an array length, which cannot overflow.
     function _inc(uint256 i) private pure returns (uint256) {
         unchecked {
@@ -195,13 +240,16 @@ library StorageGuard {
     }
 
     /// @dev `range` points at a range covering `slot`. Reverts unless the range is masked and the
-    ///      write leaves every masked bit as it is in storage.
-    function _reject(uint256 range, uint256 index, bytes32 slot, bytes32 value) private view {
+    ///      write leaves every masked bit as it is in storage. `blind` means storage may not be
+    ///      what it will be when the write runs (a pre-pass past code-running ops), so a masked
+    ///      hit can't be judged and is rejected.
+    function _reject(uint256 range, uint256 index, bytes32 slot, bytes32 value, bool blind) private view {
         bytes32 mask;
         assembly ("memory-safe") {
             mask := mload(add(range, 0x40))
         }
         if (mask != FULL) {
+            if (blind) revert MaskedWriteAfterExternalCode(index, slot);
             bytes32 current;
             assembly ("memory-safe") {
                 current := sload(slot)
