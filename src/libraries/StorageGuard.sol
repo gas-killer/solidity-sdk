@@ -14,19 +14,21 @@ import {StateChangeHandlerLib, StateUpdateType} from "../StateChangeHandlerLib.s
 ///      program is malicious and the whole program is rejected.
 ///
 ///      Ranges are inclusive `[start, end]` intervals, strictly ascending and non-overlapping.
-///      **The per-write checkers (`checkEach`, `checkEachLinear`, `advance`) assume this and do not
-///      check it**: an unsorted or overlapping list fails open, silently letting writes to
-///      protected slots through. Their caller must run `validateRanges` once on the list, in a
-///      constructor, or before the loop when the list is built at run time. Validating on every
-///      write would cost O(k) per write, more than the check itself. `checkProgram` and
-///      `checkProgramEach` validate the list themselves, once per program. `mask` is `FULL` to deny every write to the range, even one that
-///      stores the value already there, which saves the SLOAD. A narrower mask protects
-///      only some bits of one packed slot: a write passes when it leaves those bits as they are
-///      in storage, which costs one SLOAD on a hit and nothing otherwise.
+///      **The per-write checkers (`checkEach`, `advance`) assume this and do not check it**: an
+///      unsorted or overlapping list fails open, silently letting writes to protected slots
+///      through. Their caller must run `validateRanges` once on the list, in a constructor, or
+///      before the loop when the list is built at run time. Validating on every write would cost
+///      O(k) per write, more than the check itself. `checkProgram` validates the list itself,
+///      once per program.
 ///
-///      Three checkers, which agree on every input (the test suite fuzzes this):
+///      `mask` is `FULL` to deny every write to the range, even one that stores the value
+///      already there, which saves the SLOAD. A narrower mask protects only some bits of one
+///      packed slot: a write passes when it leaves those bits as they are in storage, which
+///      costs one SLOAD on a hit and nothing otherwise.
+///
+///      Two per-write checkers, which agree on every input (the test suite fuzzes them against a
+///      naive model and against benchmark-only variants in `test/utils/StorageGuardVariants.sol`):
 ///        - `checkEach`: stateless, one binary search per write.
-///        - `checkEachLinear`: stateless, a scan from the first range; kept for comparison.
 ///        - `Cursor` + `advance`: one forward pass. Writes in ascending slot order walk the
 ///          ranges together, and once a write is past the last range every later ascending
 ///          write costs one comparison. Before walking, `advance` checks that the cursor's
@@ -131,24 +133,6 @@ library StorageGuard {
         if (hit != 0) _reject(hit, index, slot, value, false);
     }
 
-    /// @notice Stateless check of one write by linear scan; for comparison with `checkEach`.
-    /// @dev `ranges` must have passed `validateRanges`; an unvalidated list can fail open.
-    function checkEachLinear(ProtectedRange[] memory ranges, uint256 index, bytes32 slot, bytes32 value) internal view {
-        uint256 s = uint256(slot);
-        uint256 hit;
-        assembly ("memory-safe") {
-            let it := add(ranges, 0x20)
-            for { let last := add(it, shl(5, mload(ranges))) } lt(it, last) { it := add(it, 0x20) } {
-                let r := mload(it)
-                if iszero(lt(mload(add(r, 0x20)), s)) {
-                    if iszero(gt(mload(r), s)) { hit := r }
-                    break
-                }
-            }
-        }
-        if (hit != 0) _reject(hit, index, slot, value, false);
-    }
-
     /// @notice Checks one write and moves `c` past it. Start from a zeroed `Cursor`.
     /// @dev `ranges` must have passed `validateRanges`; an unvalidated list can fail open.
     function advance(Cursor memory c, ProtectedRange[] memory ranges, uint256 index, bytes32 slot, bytes32 value)
@@ -215,28 +199,6 @@ library StorageGuard {
             }
             (bytes32 slot, bytes32 value) = abi.decode(args[i], (bytes32, bytes32));
             advance(c, ranges, i, slot, value);
-        }
-    }
-
-    /// @notice `checkProgram` with a stateless check per write; for comparison. Validates `ranges`
-    ///         first, as `checkProgram` does.
-    function checkProgramEach(StateUpdateType[] memory types, bytes[] memory args, ProtectedRange[] memory ranges)
-        internal
-        view
-    {
-        uint256 len = types.length;
-        require(len == args.length, StateChangeHandlerLib.InvalidArguments());
-        validateRanges(ranges);
-        bool ranCode;
-        for (uint256 i = 0; i < len; i = _inc(i)) {
-            StateUpdateType t = types[i];
-            if (t != StateUpdateType.STORE) {
-                if (!ranCode) ranCode = _runsCode(t);
-                continue;
-            }
-            (bytes32 slot, bytes32 value) = abi.decode(args[i], (bytes32, bytes32));
-            uint256 hit = _covering(ranges, uint256(slot));
-            if (hit != 0) _reject(hit, i, slot, value, ranCode);
         }
     }
 

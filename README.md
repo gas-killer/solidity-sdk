@@ -261,6 +261,8 @@ observes.
 `FOUNDRY_PROFILE=gas forge test -vv`. Each is the gas the check adds to one `STORE` it sits next
 to. The figures are for 128 writes against k ranges shaped like a real protected set (slot 0 plus
 high keccak slots), taking the range over three layouts: low slots, mapping entries, and mixed.
+Binary search is `checkEach` and merge is `advance`. The linear scan is a comparison variant that
+lives in `test/utils/StorageGuardVariants.sol`, not in the library.
 
 | Write order | k | Binary search | Linear scan | Merge |
 |---|---|---|---|---|

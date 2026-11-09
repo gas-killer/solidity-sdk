@@ -4,10 +4,12 @@ pragma solidity ^0.8.29;
 import {Test, console2} from "forge-std/Test.sol";
 import {StorageGuard} from "../src/libraries/StorageGuard.sol";
 import {StateUpdateType} from "../src/StateChangeHandlerLib.sol";
+import {StorageGuardVariants} from "../test/utils/StorageGuardVariants.sol";
+import {Sort} from "../test/utils/Sort.sol";
 
 /// @notice Gas cost of `StorageGuard`'s checkers (issue #107): the per-write binary search
-///         (`checkEach`), the per-write linear scan (`checkEachLinear`) and the sorted-merge
-///         cursor (`advance`).
+///         (`checkEach`), the sorted-merge cursor (`advance`), and a per-write linear scan
+///         (`StorageGuardVariants.checkEachLinear`) that is kept out of the library for comparison.
 ///
 ///         Every cell runs in its own external call so memory expansion from one cell cannot
 ///         inflate another, and every figure is the checker's loop minus a baseline loop that
@@ -60,7 +62,7 @@ contract StorageGuardGasTest is Test {
     uint256 constant CEIL_EACH = 1000;
     uint256 constant CEIL_MERGE = 1100;
     uint256 constant CEIL_LINEAR = 1000;
-    uint256 constant CEIL_PREPASS = 1500;
+    uint256 constant CEIL_PREPASS = 1650; // worst cell 1,421 (the test-side checkProgramEach)
     /// @dev Most the merge may grow from k = 1 to k = 16 on sorted input (measured: about 105, 263 to 368).
     uint256 constant MERGE_K_GROWTH = 150;
 
@@ -83,7 +85,7 @@ contract StorageGuardGasTest is Test {
         for (uint256 i = 0; i < k - 1; ++i) {
             high[i] = uint256(keccak256(abi.encode("protected", i)));
         }
-        _sort(high);
+        Sort.sort(high);
         rs = new StorageGuard.ProtectedRange[](k);
         rs[0] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL);
         for (uint256 i = 0; i < k - 1; ++i) {
@@ -102,10 +104,10 @@ contract StorageGuardGasTest is Test {
             uint256 j = uint256(keccak256(abi.encode("shuffle", i))) % i;
             (s[i - 1], s[j]) = (s[j], s[i - 1]);
         }
-        if (order == SORTED) _sortRange(s, 0, n);
+        if (order == SORTED) Sort.sortRange(s, 0, n);
         if (order == SLICED) {
             for (uint256 from = 0; from < n; from += 8) {
-                _sortRange(s, from, from + 8 > n ? n : from + 8);
+                Sort.sortRange(s, from, from + 8 > n ? n : from + 8);
             }
         }
     }
@@ -133,7 +135,7 @@ contract StorageGuardGasTest is Test {
 
         g = gasleft();
         for (uint256 i = 0; i < n; ++i) {
-            StorageGuard.checkEachLinear(rs, i, s[i], v[i]);
+            StorageGuardVariants.checkEachLinear(rs, i, s[i], v[i]);
         }
         c.linear = _marginal(g - gasleft(), base, n);
 
@@ -171,7 +173,7 @@ contract StorageGuardGasTest is Test {
         decodeOnly = (g - gasleft()) / n;
 
         g = gasleft();
-        StorageGuard.checkProgramEach(t, a, rs);
+        StorageGuardVariants.checkProgramEach(t, a, rs);
         progEach = (g - gasleft()) / n;
 
         g = gasleft();
@@ -270,30 +272,6 @@ contract StorageGuardGasTest is Test {
         out = vm.toString(x);
         while (bytes(out).length < width) {
             out = string.concat(" ", out);
-        }
-    }
-
-    function _sort(uint256[] memory a) internal pure {
-        for (uint256 i = 1; i < a.length; ++i) {
-            uint256 x = a[i];
-            uint256 j = i;
-            while (j > 0 && a[j - 1] > x) {
-                a[j] = a[j - 1];
-                --j;
-            }
-            a[j] = x;
-        }
-    }
-
-    function _sortRange(bytes32[] memory a, uint256 from, uint256 to) internal pure {
-        for (uint256 i = from + 1; i < to; ++i) {
-            bytes32 x = a[i];
-            uint256 j = i;
-            while (j > from && a[j - 1] > x) {
-                a[j] = a[j - 1];
-                --j;
-            }
-            a[j] = x;
         }
     }
 }

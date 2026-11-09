@@ -6,6 +6,8 @@ import {StorageGuard} from "../src/libraries/StorageGuard.sol";
 import {StateChangeHandlerLib, StateUpdateType} from "../src/StateChangeHandlerLib.sol";
 import {StateTracker} from "../src/StateTracker.sol";
 import {ERC1967Upgrade} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Upgrade.sol";
+import {StorageGuardVariants} from "./utils/StorageGuardVariants.sol";
+import {Sort} from "./utils/Sort.sol";
 
 /// @notice Reads the EIP-1967 slots straight from the vendored OpenZeppelin source, so the test
 ///         compares against the constants proxies actually use rather than a retyped copy.
@@ -46,7 +48,7 @@ contract StorageGuardHarness is StateTracker {
         view
     {
         for (uint256 i = 0; i < slots.length; ++i) {
-            StorageGuard.checkEachLinear(ranges, i, slots[i], values[i]);
+            StorageGuardVariants.checkEachLinear(ranges, i, slots[i], values[i]);
         }
     }
 
@@ -97,14 +99,14 @@ contract StorageGuardHarness is StateTracker {
         external
     {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        if (perWrite) StorageGuard.checkProgramEach(types, args, ranges);
+        if (perWrite) StorageGuardVariants.checkProgramEach(types, args, ranges);
         else StorageGuard.checkProgram(types, args, ranges);
         StateChangeHandlerLib._runStateUpdates(types, args);
     }
 
     function programEach(bytes memory storageUpdates, StorageGuard.ProtectedRange[] memory ranges) external view {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        StorageGuard.checkProgramEach(types, args, ranges);
+        StorageGuardVariants.checkProgramEach(types, args, ranges);
     }
 }
 
@@ -376,7 +378,7 @@ contract StorageGuardTest is Test {
         for (uint256 i = 0; i < slots.length; ++i) {
             sorted[i] = slots[i];
         }
-        _sort(sorted);
+        Sort.sort(sorted);
 
         rs = new StorageGuard.ProtectedRange[](sorted.length + 1);
         uint256 j;
@@ -674,10 +676,10 @@ contract StorageGuardTest is Test {
             bytes32 stored = vm.load(address(h), s[i]);
             v[i] = (r >> 128) % 2 == 0 ? stored : bytes32(r >> 64);
         }
-        if (order == 1) _sortPairs(s, v, 0, n);
+        if (order == 1) Sort.sortPairs(s, v, 0, n);
         if (order == 2) {
             for (uint256 from = 0; from < n; from += 5) {
-                _sortPairs(s, v, from, from + 5 > n ? n : from + 5);
+                Sort.sortPairs(s, v, from, from + 5 > n ? n : from + 5);
             }
         }
     }
@@ -818,32 +820,6 @@ contract StorageGuardTest is Test {
             for (uint256 j = 0; j < 4; ++j) {
                 assertEq(vm.load(address(h), bytes32(PP_SLOTS[j])), expected[j], "model and execution differ");
             }
-        }
-    }
-
-    // ---------------------------------------------------------------- sorting (test-side only)
-
-    function _sort(uint256[] memory a) internal pure {
-        for (uint256 i = 1; i < a.length; ++i) {
-            uint256 x = a[i];
-            uint256 j = i;
-            while (j > 0 && a[j - 1] > x) {
-                a[j] = a[j - 1];
-                --j;
-            }
-            a[j] = x;
-        }
-    }
-
-    function _sortPairs(bytes32[] memory s, bytes32[] memory v, uint256 from, uint256 to) internal pure {
-        for (uint256 i = from + 1; i < to; ++i) {
-            (bytes32 xs, bytes32 xv) = (s[i], v[i]);
-            uint256 j = i;
-            while (j > from && s[j - 1] > xs) {
-                (s[j], v[j]) = (s[j - 1], v[j - 1]);
-                --j;
-            }
-            (s[j], v[j]) = (xs, xv);
         }
     }
 }
