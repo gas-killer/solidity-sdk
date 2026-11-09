@@ -443,10 +443,14 @@ library StateChangeHandlerLib {
 ///        - `checkEachLinear`: stateless, a scan from the first range; kept for comparison.
 ///        - `Cursor` + `advance`: one forward pass. Writes in ascending slot order walk the
 ///          ranges together, and once a write is past the last range every later ascending
-///          write costs one comparison. A write below its predecessor re-seats the cursor by
-///          binary search instead of reverting, so the order of the writes affects only gas,
-///          never the verdict. Input sorted within each CALL/CREATE-bounded slice, as
-///          gas-analyzer's canonical extraction emits it, pays one re-seat per slice.
+///          write costs one comparison. Before walking, `advance` checks that the cursor's
+///          position is valid for the slot, which holds exactly when no range before it reaches
+///          the slot. If it isn't, it re-seats by binary search instead of reverting. That
+///          happens on a write below the previous range, and also on a cursor carried over from
+///          another list, never reset, or holding garbage. So neither the order of the writes nor
+///          the cursor's contents can change the verdict, only the gas. Input sorted within each
+///          CALL/CREATE-bounded slice, as gas-analyzer's canonical extraction emits it, pays at
+///          most one re-seat per slice.
 ///
 ///      Masked ranges are checked against storage as it stands when the check runs, so the
 ///      per-write checkers are sound only when called right before each write executes, inline
@@ -473,15 +477,15 @@ library StorageGuard {
         bytes32 mask;
     }
 
-    /// @notice Merge state carried across consecutive writes.
-    /// @param next Index of the first range whose end is at or above the previous write's slot.
-    /// @param prev The previous write's slot.
+    /// @notice Merge state carried across consecutive writes. Start from a zeroed one. Its contents
+    ///         only steer the search: `advance` re-checks `next` on every write, so a stale or
+    ///         foreign cursor costs gas but cannot let a write through.
+    /// @param next Where the last write's search ended: a hint for the next write's search.
     /// @param blind Set by a pre-pass once it has passed an op that runs code. Storage may then
     ///        differ from what the write will see, so a masked hit is rejected. Leave it false
-    ///        when checking inline, right before each write.
+    ///        when checking inline, right before each write. A stale `true` only over-rejects.
     struct Cursor {
         uint256 next;
-        uint256 prev;
         bool blind;
     }
 
@@ -566,17 +570,32 @@ library StorageGuard {
         view
     {
         uint256 s = uint256(slot);
-        uint256 i = c.next;
-        if (s < c.prev) i = _lowerBound(ranges, s);
         uint256 hit;
         assembly ("memory-safe") {
             let len := mload(ranges)
             let base := add(ranges, 0x20)
+            let i := mload(c)
+            // The forward walk from `i` is right only if no range before `i` reaches `s`. Ends
+            // ascend strictly in a validated list, so that holds exactly when `i <= len` and
+            // (`i == 0` or `ranges[i-1].end < s`). Otherwise re-seat by binary search. `i` is
+            // compared with `len` before `ranges[i-1]` is read.
+            let reseat := gt(i, len)
+            if and(iszero(reseat), gt(i, 0)) {
+                reseat := iszero(lt(mload(add(mload(add(base, shl(5, sub(i, 1)))), 0x20)), s))
+            }
+            if reseat {
+                i := 0
+                for { let hi := len } lt(i, hi) {} {
+                    let mid := shr(1, add(i, hi))
+                    switch lt(mload(add(mload(add(base, shl(5, mid))), 0x20)), s)
+                    case 1 { i := add(mid, 1) }
+                    default { hi := mid }
+                }
+            }
             for {} lt(i, len) { i := add(i, 1) } {
                 if iszero(lt(mload(add(mload(add(base, shl(5, i))), 0x20)), s)) { break }
             }
             mstore(c, i)
-            mstore(add(c, 0x20), s)
             if lt(i, len) {
                 let r := mload(add(base, shl(5, i)))
                 if iszero(gt(mload(r), s)) { hit := r }
@@ -635,21 +654,9 @@ library StorageGuard {
         }
     }
 
-    /// @dev Index of the first range whose end is at or above `s`, or `ranges.length` when there
-    ///      is none. `lo < hi <= length` keeps `mid` in bounds and every sum below 2^256.
-    function _lowerBound(ProtectedRange[] memory ranges, uint256 s) private pure returns (uint256 lo) {
-        assembly ("memory-safe") {
-            let base := add(ranges, 0x20)
-            for { let hi := mload(ranges) } lt(lo, hi) {} {
-                let mid := shr(1, add(lo, hi))
-                switch lt(mload(add(mload(add(base, shl(5, mid))), 0x20)), s)
-                case 1 { lo := add(mid, 1) }
-                default { hi := mid }
-            }
-        }
-    }
-
-    /// @dev Pointer to the range covering `s`, or zero: `_lowerBound` plus the start check.
+    /// @dev Pointer to the range covering `s`, or zero. Binary-searches for the first range whose
+    ///      end is at or above `s`, then checks its start. `lo < hi <= length` keeps `mid` in
+    ///      bounds and every sum below 2^256; `advance` inlines the same search to re-seat.
     function _covering(ProtectedRange[] memory ranges, uint256 s) private pure returns (uint256 hit) {
         assembly ("memory-safe") {
             let len := mload(ranges)
