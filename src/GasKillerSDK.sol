@@ -42,7 +42,7 @@ import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
 ///      nests does not carry its bytecode; a `NESTED` op settled here reverts.
 ///
 ///      Protected storage: every `STORE` a signed program carries is checked, right before it
-///      executes, against `protectedRanges()`. A write that would change a protected bit reverts
+///      executes, against `gasKillerProtectedRanges()`. A write that would change a protected bit reverts
 ///      the transition (`StorageGuard.ProtectedSlotWrite`). The SDK always protects its own
 ///      storage: the transition counter and the whole ERC-7201 namespace of the configuration
 ///      struct (AVS address, registry, stale-block window). Consumers add theirs, such as an `Ownable` owner slot, by
@@ -245,14 +245,15 @@ abstract contract GasKillerSDK is
     /// @notice The storage ranges a signed program may not change: the SDK's own slots merged
     ///         with the consumer's `_protectedRanges()`, in ascending order.
     /// @dev A compile-time constant of this contract's code, validated once by the constructor
-    ///      (see `constructor`), so it can't be malformed once deployed.
-    function protectedRanges() external pure returns (StorageGuard.ProtectedRange[] memory) {
+    ///      (see `constructor`), so it can't be malformed once deployed. Prefixed like no other
+    ///      SDK getter because a generic `protectedRanges` could already exist in a consumer.
+    function gasKillerProtectedRanges() external pure returns (StorageGuard.ProtectedRange[] memory) {
         return _settlementRanges();
     }
 
     /// @notice Storage the consumer wants protected from signed programs. Override to add slots.
     /// @dev Return inclusive `[start, end]` ranges in strictly ascending order, not overlapping
-    ///      each other or the SDK's own slots (see `protectedRanges`). Use `StorageGuard.FULL` to
+    ///      each other or the SDK's own slots (see `gasKillerProtectedRanges`). Use `StorageGuard.FULL` to
     ///      protect whole slots, or a narrower mask on a single slot to protect part of a packed
     ///      slot. The function is `pure`, so the list is a constant of the contract's code: it
     ///      can't read storage or immutables, and the constructor validates it once, so a
@@ -400,7 +401,7 @@ abstract contract GasKillerSDK is
 
     /// @notice Sets the AVS service manager this contract is scoped to.
     /// @dev **Do not call from a `trackState` function.** The config struct is protected storage
-    ///      (see `protectedRanges`), so a settled program may not change it. A tracked function
+    ///      (see `gasKillerProtectedRanges`), so a settled program may not change it. A tracked function
     ///      that changes this value carries that write in its program, and settlement rejects it
     ///      every time with `StorageGuard.ProtectedSlotWrite`: the transition can never settle.
     ///      Call it from the constructor, an initializer, or an admin function that is not
@@ -412,7 +413,7 @@ abstract contract GasKillerSDK is
 
     /// @notice Sets the registry that verifies quorum signatures for this contract.
     /// @dev **Do not call from a `trackState` function.** The config struct is protected storage
-    ///      (see `protectedRanges`), so a settled program may not change it. A tracked function
+    ///      (see `gasKillerProtectedRanges`), so a settled program may not change it. A tracked function
     ///      that changes this value carries that write in its program, and settlement rejects it
     ///      every time with `StorageGuard.ProtectedSlotWrite`: the transition can never settle.
     ///      Call it from the constructor, an initializer, or an admin function that is not
@@ -429,7 +430,7 @@ abstract contract GasKillerSDK is
     /// @notice Sets how many blocks old a settlement's reference block may be (0 means the
     ///         default of 300).
     /// @dev **Do not call from a `trackState` function.** The config struct is protected storage
-    ///      (see `protectedRanges`), so a settled program may not change it. A tracked function
+    ///      (see `gasKillerProtectedRanges`), so a settled program may not change it. A tracked function
     ///      that changes this value carries that write in its program, and settlement rejects it
     ///      every time with `StorageGuard.ProtectedSlotWrite`: the transition can never settle.
     ///      Call it from the constructor, an initializer, or an admin function that is not

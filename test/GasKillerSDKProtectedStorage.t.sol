@@ -261,7 +261,7 @@ contract GasKillerSDKProtectedStorageTest is Test {
         );
 
         LayoutProbe probe = new LayoutProbe(address(registry));
-        StorageGuard.ProtectedRange[] memory rs = probe.protectedRanges();
+        StorageGuard.ProtectedRange[] memory rs = probe.gasKillerProtectedRanges();
         (uint256 start, uint256 end) = (rs[0].start, rs[0].end);
         assertEq(start, uint256(SDK_STORAGE));
 
@@ -281,7 +281,7 @@ contract GasKillerSDKProtectedStorageTest is Test {
 
     function test_consumerWithNoRangesStillGetsSdkProtection() public {
         PlainConsumer plain = new PlainConsumer(address(registry));
-        StorageGuard.ProtectedRange[] memory rs = plain.protectedRanges();
+        StorageGuard.ProtectedRange[] memory rs = plain.gasKillerProtectedRanges();
         assertEq(rs.length, 2);
 
         Program memory p = _tracked(plain, 1);
@@ -347,7 +347,7 @@ contract GasKillerSDKProtectedStorageTest is Test {
     // ---------------------------------------------------------------- the list itself
 
     function test_protectedRangesIsTheMergedValidList() public view {
-        StorageGuard.ProtectedRange[] memory rs = vault.protectedRanges();
+        StorageGuard.ProtectedRange[] memory rs = vault.gasKillerProtectedRanges();
         assertEq(rs.length, 3);
         assertEq(rs[0].start, 0);
         assertEq(rs[0].end, 0);

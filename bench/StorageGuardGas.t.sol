@@ -7,16 +7,17 @@ import {StateUpdateType} from "../src/StateChangeHandlerLib.sol";
 import {StorageGuardVariants} from "../test/utils/StorageGuardVariants.sol";
 import {Sort} from "../test/utils/Sort.sol";
 
-/// @notice Gas cost of `StorageGuard`'s checkers (issue #107): the per-write binary search
-///         (`checkEach`), the sorted-merge cursor (`advance`), and a per-write linear scan
-///         (`StorageGuardVariants.checkEachLinear`) that is kept out of the library for comparison.
+/// @notice Gas cost of the StorageGuard checkers (issue #107): the library's sorted-merge cursor
+///         (`StorageGuard.advance`, what settlement uses) against two comparison variants kept in
+///         test utilities, a per-write binary search (`StorageGuardVariants.checkEach`) and a
+///         per-write linear scan (`StorageGuardVariants.checkEachLinear`).
 ///
 ///         Every cell runs in its own external call so memory expansion from one cell cannot
 ///         inflate another, and every figure is the checker's loop minus a baseline loop that
 ///         reads the same arrays without checking, divided by the write count. That is the
 ///         marginal cost per `STORE` of an inline check in `StateChangeHandlerLib._run`, which
 ///         already has each slot decoded. `test_prepass` adds the cost of a separate pre-pass
-///         that decodes every STORE a second time (`checkProgram`).
+///         that decodes every STORE a second time (`StorageGuardVariants.checkProgram`).
 ///
 ///         For scale: the SSTORE each check sits next to costs 2,900 (warm, existing value),
 ///         5,000 (cold, existing value) or 22,100 (cold, zero to nonzero), but only 100 when the
@@ -25,11 +26,11 @@ import {Sort} from "../test/utils/Sort.sol";
 ///         Reference measurements (n = 128, forge 1.5.1, solc 0.8.33, cancun), gas per write:
 ///
 ///           order     k  | binary  linear  merge
-///           sorted    1  |   294     205    263
-///           sorted    4  |   540-602 281-350 328-358
-///           sorted   16  |   730-864 281-832 358-368
-///           sliced   16  |   730-864 281-832 358-555
-///           unsorted 16  |   730-864 281-832 358-775
+///           sorted    1  |   294     205    255
+///           sorted    4  |   540-602 281-350 320-350
+///           sorted   16  |   730-864 281-832 350-361
+///           sliced   16  |   730-864 281-832 350-564
+///           unsorted 16  |   730-864 281-832 350-805
 ///
 ///         The merge is flat in k on sorted input and beats the binary search at every k. On
 ///         unsorted input it stays roughly even with the binary search, since a write re-seats
@@ -129,7 +130,7 @@ contract StorageGuardGasTest is Test {
 
         g = gasleft();
         for (uint256 i = 0; i < n; ++i) {
-            StorageGuard.checkEach(rs, i, s[i], v[i]);
+            StorageGuardVariants.checkEach(rs, i, s[i], v[i]);
         }
         c.each = _marginal(g - gasleft(), base, n);
 
@@ -177,7 +178,7 @@ contract StorageGuardGasTest is Test {
         progEach = (g - gasleft()) / n;
 
         g = gasleft();
-        StorageGuard.checkProgram(t, a, rs);
+        StorageGuardVariants.checkProgram(t, a, rs);
         progMerge = (g - gasleft()) / n;
 
         if (acc == SENTINEL) decodeOnly = type(uint256).max;

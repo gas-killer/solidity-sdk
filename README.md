@@ -242,7 +242,7 @@ function _protectedRanges() internal pure override returns (StorageGuard.Protect
   that is unsorted, overlapping, or collides with an SDK slot makes deployment revert
   (`InvalidRanges`), so it can't reach a live settlement. Because the list is `pure`, the one that was
   validated is the one every settlement uses, and settlement doesn't re-check it.
-  `protectedRanges()` returns the merged list.
+  `gasKillerProtectedRanges()` returns the merged list.
 - Nested settlement checks each frame against its own contract's list, and a batch reverts as a whole
   if any of its transitions writes protected storage.
 
@@ -266,14 +266,14 @@ for a consumer declaring k ranges.
 
 | n `STORE`s | Before | k = 0 | k = 1 | k = 4 |
 |---|---|---|---|---|
-| 1 | 53,513 | +2,100 (+3.9%) | +2,569 (+4.8%) | +4,102 (+7.7%) |
-| 8 | 215,998 | +4,496 (+2.1%) | +4,967 (+2.3%) | +6,506 (+3.0%) |
-| 32 | 773,283 | +12,713 (+1.6%) | +13,201 (+1.7%) | +14,773 (+1.9%) |
+| 1 | 53,513 | +2,011 (+3.8%) | +2,488 (+4.6%) | +4,044 (+7.6%) |
+| 8 | 215,998 | +4,393 (+2.0%) | +4,872 (+2.3%) | +6,435 (+3.0%) |
+| 32 | 773,283 | +12,560 (+1.6%) | +13,057 (+1.7%) | +14,653 (+1.9%) |
 
 That is about 340 gas per `STORE`, about 500 per declared range per settlement call (building and
-merging the list), and about 1,750 fixed. A `verifyAndUpdateBatch` builds the list once for all of
-its items: a 20-item batch of single-`STORE` transitions costs +33,762 (+5.2%) at k = 0 and +45,337
-(+6.9%) at k = 4, about 1,700–2,300 per item.
+merging the list), and about 1,670 fixed. A `verifyAndUpdateBatch` builds the list once for all of
+its items: a 20-item batch of single-`STORE` transitions costs +33,729 (+5.2%) at k = 0 and +45,942
+(+7.0%) at k = 4, about 1,700–2,300 per item.
 
 ### Design and measurements
 
@@ -294,31 +294,32 @@ boundaries, pays at most one re-seat per slice; journal-order input is still che
 less cheaply. Sorting on-chain isn't an option, because reordering `STORE`s across a `CALL` changes
 what the call observes.
 
-**Why inline.** The library also has `checkProgram`, a pre-pass over a whole program. Settlement
-doesn't use it: it decodes every `STORE` a second time (about 350 gas each), and since it sees storage
-from before the program, it has to reject any protected write that follows a code-running op
-(`ProtectedWriteAfterExternalCode`), which an inline check judges exactly.
+**Why inline.** A pre-pass over a whole program before it runs was measured too
+(`StorageGuardVariants.checkProgram`, in test utilities). It decodes every `STORE` a second time
+(about 350 gas each), and since it sees storage from before the program, it has to reject any
+protected write that follows a code-running op (`ProtectedWriteAfterExternalCode`), which an inline
+check judges exactly. The library therefore ships only `validateRanges` and `advance`.
 
 **Choosing the checker.** Per-write marginals from `bench/StorageGuardGas.t.sol` for 128 writes
 against k ranges shaped like a real protected set (slot 0 plus high keccak slots), over three layouts:
-low slots, mapping entries, and mixed. Binary search is `checkEach`, merge is `advance`, and the
-linear scan is a comparison variant in `test/utils/StorageGuardVariants.sol`.
+low slots, mapping entries, and mixed. Merge is the library's `advance`; binary search
+(`checkEach`) and the linear scan are comparison variants in `test/utils/StorageGuardVariants.sol`.
 
 | Write order | k | Binary search | Linear scan | Merge |
 |---|---|---|---|---|
-| sorted | 1 | 294 | 205 | 263 |
-| sorted | 4 | 540–602 | 281–350 | 328–358 |
-| sorted | 16 | 730–864 | 281–832 | 358–368 |
-| sorted within slices of 8 | 16 | 730–864 | 281–832 | 358–555 |
-| unsorted | 16 | 730–864 | 281–832 | 358–775 |
+| sorted | 1 | 294 | 205 | 255 |
+| sorted | 4 | 540–602 | 281–350 | 320–350 |
+| sorted | 16 | 730–864 | 281–832 | 350–361 |
+| sorted within slices of 8 | 16 | 730–864 | 281–832 | 350–564 |
+| unsorted | 16 | 730–864 | 281–832 | 350–805 |
 
 - **Sorted input.** The merge's cost is flat in k, the effect the issue predicted. It beats the
   binary search at every k.
 - **Unsorted input.** The merge stays roughly even with the binary search: ahead at k = 4, and at
-  k = 16 ahead on low and mixed slots, slightly behind (775 against 730) on mapping entries. A write
+  k = 16 ahead on low and mixed slots, behind (805 against 730) on mapping entries. A write
   only re-seats when it falls below the previous range, not merely below the previous write.
 - **Linear scan.** It's cheapest at k = 1, at least as cheap at k = 4, and cheapest on writes below
-  every high range. The merge pulls ahead at k = 16 on mapping entries (366–368 against 568–832).
+  every high range. The merge pulls ahead at k = 16 on mapping entries (359–361 against 568–832).
 - **Cursor safety.** About 65 gas of the merge's cost per write goes to re-checking the cursor's
   position against the list, so a stale or foreign cursor can't let a write through.
 

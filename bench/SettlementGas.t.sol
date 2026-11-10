@@ -53,14 +53,14 @@ contract RangedConsumer4 is RangedConsumer0 {
 ///         settlement on the tree before protected storage was wired in (49f5c5c):
 ///
 ///           n   | before  | k = 0           | k = 1           | k = 4
-///           1   |  53,513 | +2,100 (+3.9%)  | +2,569 (+4.8%)  | +4,102 (+7.7%)
-///           8   | 215,998 | +4,496 (+2.1%)  | +4,967 (+2.3%)  | +6,506 (+3.0%)
-///           32  | 773,283 | +12,713 (+1.6%) | +13,201 (+1.7%) | +14,773 (+1.9%)
+///           1   |  53,513 | +2,011 (+3.8%)  | +2,488 (+4.6%)  | +4,044 (+7.6%)
+///           8   | 215,998 | +4,393 (+2.0%)  | +4,872 (+2.3%)  | +6,435 (+3.0%)
+///           32  | 773,283 | +12,560 (+1.6%) | +13,057 (+1.7%) | +14,653 (+1.9%)
 ///
 ///         About 340 gas per STORE for the check, about 500 per declared range per call
 ///         (building and merging the list; it is validated at deployment, not here), and about
-///         1,750 fixed. `test_batch`: a 20-item batch builds the list once, +33,762 (+5.2%) at
-///         k = 0 and +45,337 (+6.9%) at k = 4 over 653,750 / 657,603.
+///         1,670 fixed. `test_batch`: a 20-item batch builds the list once, +33,729 (+5.2%) at
+///         k = 0 and +45,942 (+7.0%) at k = 4 over 653,750 / 657,603.
 ///
 ///         Run with `FOUNDRY_PROFILE=gas forge test -vv`.
 contract SettlementGasTest is Test {

@@ -39,7 +39,7 @@ contract StorageGuardHarness is StateTracker {
         view
     {
         for (uint256 i = 0; i < slots.length; ++i) {
-            StorageGuard.checkEach(ranges, i, slots[i], values[i]);
+            StorageGuardVariants.checkEach(ranges, i, slots[i], values[i]);
         }
     }
 
@@ -91,7 +91,7 @@ contract StorageGuardHarness is StateTracker {
 
     function program(bytes memory storageUpdates, StorageGuard.ProtectedRange[] memory ranges) external view {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        StorageGuard.checkProgram(types, args, ranges);
+        StorageGuardVariants.checkProgram(types, args, ranges);
     }
 
     /// @dev A pre-pass followed by the real, inline-guarded run over the same list.
@@ -100,7 +100,7 @@ contract StorageGuardHarness is StateTracker {
     {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
         if (perWrite) StorageGuardVariants.checkProgramEach(types, args, ranges);
-        else StorageGuard.checkProgram(types, args, ranges);
+        else StorageGuardVariants.checkProgram(types, args, ranges);
         // The real settlement run, guarded inline by the same list.
         StateChangeHandlerLib._runStateUpdates(types, args, ranges);
     }
@@ -506,7 +506,8 @@ contract StorageGuardTest is Test {
         a[3] = _store(0);
         bytes memory p = abi.encode(t, a);
         // The write follows a CALL, so a pre-pass can't judge it against storage and rejects it.
-        bytes memory err = abi.encodeWithSelector(StorageGuard.ProtectedWriteAfterExternalCode.selector, 3, bytes32(0));
+        bytes memory err =
+            abi.encodeWithSelector(StorageGuardVariants.ProtectedWriteAfterExternalCode.selector, 3, bytes32(0));
         vm.expectRevert(err);
         h.program(p, rs);
         vm.expectRevert(err);
@@ -609,7 +610,9 @@ contract StorageGuardTest is Test {
         for (uint256 each = 0; each < 2; ++each) {
             h.poke(bytes32(uint256(7)), _ownerSlot(address(0xA11CE), 41));
             vm.expectRevert(
-                abi.encodeWithSelector(StorageGuard.ProtectedWriteAfterExternalCode.selector, 1, bytes32(uint256(7)))
+                abi.encodeWithSelector(
+                    StorageGuardVariants.ProtectedWriteAfterExternalCode.selector, 1, bytes32(uint256(7))
+                )
             );
             h.guardedRun(p, _maskedOwnerRange(), each == 1);
         }
@@ -634,8 +637,9 @@ contract StorageGuardTest is Test {
             [StateUpdateType.CALL, StateUpdateType.CREATE, StateUpdateType.CREATE2, StateUpdateType.NESTED];
         for (uint256 i = 0; i < ops.length; ++i) {
             bytes memory p = _afterOp(ops[i]);
-            bytes memory err =
-                abi.encodeWithSelector(StorageGuard.ProtectedWriteAfterExternalCode.selector, 1, bytes32(uint256(7)));
+            bytes memory err = abi.encodeWithSelector(
+                StorageGuardVariants.ProtectedWriteAfterExternalCode.selector, 1, bytes32(uint256(7))
+            );
             vm.expectRevert(err);
             h.program(p, _maskedOwnerRange());
             vm.expectRevert(err);
