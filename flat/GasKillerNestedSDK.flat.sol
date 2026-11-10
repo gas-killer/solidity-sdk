@@ -921,14 +921,24 @@ library StateChangeHandlerLib {
 
     /// @dev Runs a program outside any tree, rejecting every NESTED op. Dispatching NESTED
     ///      through a function pointer keeps `_runNested` out of consumers that never nest.
-    function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args) internal {
+    ///      Every STORE is checked against `ranges` (see `_run`); pass an empty list for none.
+    function _runStateUpdates(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges
+    ) internal {
         NestedContext memory none;
-        _run(types, args, none, _rejectNested);
+        _run(types, args, ranges, none, _rejectNested);
     }
 
-    /// @dev Runs a program inside the tree in `ctx`.
-    function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args, NestedContext memory ctx) internal {
-        _run(types, args, ctx, _runNested);
+    /// @dev Runs a program inside the tree in `ctx`, checking every STORE against `ranges`.
+    function _runStateUpdates(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges,
+        NestedContext memory ctx
+    ) internal {
+        _run(types, args, ranges, ctx, _runNested);
     }
 
     /// @notice Decodes and executes a series of state updates
@@ -941,23 +951,31 @@ library StateChangeHandlerLib {
     ///      - NESTED: Hand a callee its own signed frame of the tree in `ctx`
     /// @param types Array of StateUpdateType enums indicating the type of each state update operation
     /// @param args Array of ABI-encoded arguments corresponding to each operation type
+    /// @param ranges Protected storage. Validated once (`StorageGuard.InvalidRanges`); then every
+    ///        STORE is checked right before it executes and reverts with
+    ///        `StorageGuard.ProtectedSlotWrite` if it would change a protected bit. Checking at
+    ///        that moment is exact even after a CALL has legitimately changed protected storage.
     /// @param ctx The tree this program runs inside; a zero root rejects every NESTED op
     /// @param nested The NESTED handler: `_runNested` inside a tree, `_rejectNested` outside one
     /// @dev types and args arrays must be equal length, with args[i] containing the encoded parameters for types[i]
     function _run(
         StateUpdateType[] memory types,
         bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges,
         NestedContext memory ctx,
         function(uint256, bytes memory, NestedContext memory) nested
     ) private {
         uint256 length = types.length;
         require(length == args.length, InvalidArguments());
+        StorageGuard.validateRanges(ranges);
+        StorageGuard.Cursor memory cursor;
         for (uint256 i = 0; i < length; ++i) {
             StateUpdateType stateUpdateType = types[i];
             bytes memory arg = args[i];
 
             if (stateUpdateType == StateUpdateType.STORE) {
                 (bytes32 slot, bytes32 value) = abi.decode(arg, (bytes32, bytes32));
+                StorageGuard.advance(cursor, ranges, i, slot, value);
                 assembly {
                     sstore(slot, value)
                 }
@@ -1156,6 +1174,261 @@ library StateChangeHandlerLib {
     error DeploymentFailed();
 }
 
+// src/libraries/StorageGuard.sol
+
+/// @title StorageGuard
+/// @notice Checks a signed program's `STORE` writes against a denylist of protected storage
+///         ranges, so a quorum-signed update cannot overwrite slots such as an `Ownable` owner,
+///         the `StateTracker` counter, the SDK's own configuration or EIP-1967 proxy slots.
+/// @dev The list denies rather than allows. Honest writes to mappings and dynamic arrays land on
+///      keccak-derived slots spread across the whole slot space, which an allowlist of ranges
+///      cannot express, while every slot worth protecting is known at compile time. Reaching a
+///      protected slot from an honest write would take a keccak preimage, so a hit means the
+///      program is malicious and the whole program is rejected.
+///
+///      Ranges are inclusive `[start, end]` intervals, strictly ascending and non-overlapping.
+///      **The per-write checkers (`checkEach`, `advance`) assume this and do not check it**: an
+///      unsorted or overlapping list fails open, silently letting writes to protected slots
+///      through. Their caller must run `validateRanges` once on the list, in a constructor, or
+///      before the loop when the list is built at run time. Validating on every write would cost
+///      O(k) per write, more than the check itself. `checkProgram` validates the list itself,
+///      once per program.
+///
+///      A write to a protected range is rejected when it would change a protected bit, and allowed
+///      when it leaves every protected bit as it is in storage. `mask` is `FULL` to protect the
+///      whole slot. A narrower mask protects only some bits of one packed slot. Allowing writes
+///      that change nothing is what lets the SDK protect its own transition counter: gas-analyzer
+///      copies the counter's new value into every program as a STORE, and `trackState` has already
+///      written that same value by the time the program runs. Deciding costs one SLOAD, paid only
+///      by a write that lands in a range.
+///
+///      Two per-write checkers, which agree on every input (the test suite fuzzes them against a
+///      naive model and against benchmark-only variants in `test/utils/StorageGuardVariants.sol`):
+///        - `checkEach`: stateless, one binary search per write.
+///        - `Cursor` + `advance`: one forward pass. Writes in ascending slot order walk the
+///          ranges together, and once a write is past the last range every later ascending
+///          write costs one comparison. Before walking, `advance` checks that the cursor's
+///          position is valid for the slot, which holds exactly when no range before it reaches
+///          the slot. If it isn't, it re-seats by binary search instead of reverting. That
+///          happens on a write below the previous range, and also on a cursor carried over from
+///          another list, never reset, or holding garbage. So neither the order of the writes nor
+///          the cursor's contents can change the verdict, only the gas. Input sorted within each
+///          CALL/CREATE-bounded slice, as gas-analyzer's canonical extraction emits it, pays at
+///          most one re-seat per slice.
+///
+///      Writes are judged against storage as it stands when the check runs, so the per-write
+///      checkers are exact only when called right before each write executes, which is how
+///      `StateChangeHandlerLib._run` uses them. A pre-pass (`checkProgram`) sees storage as it was
+///      before the program. A STORE can't make the two differ on protected bits: any STORE that
+///      changed them would itself have been rejected. But a CALL, CREATE, CREATE2 or NESTED op
+///      runs code that can legitimately change them, for example by re-entering an owner-gated
+///      setter, and a later STORE could then quietly put the old bits back. So once a pre-pass
+///      has passed such an op, it rejects every later write to a protected range
+///      (`ProtectedWriteAfterExternalCode`).
+///
+///      Not covered: a `CALL` update to `address(this)` can reach privileged functions directly,
+///      so a consumer relying on this guard should also restrict self-calls. `NESTED` frames
+///      are checked by each frame's own contract.
+library StorageGuard {
+    /// @notice One protected interval of storage slots.
+    /// @param start First protected slot (inclusive).
+    /// @param end Last protected slot (inclusive).
+    /// @param mask Protected bits within each slot: `FULL` for every bit, anything narrower only
+    ///        when `start == end`. A write is rejected when it would change a protected bit.
+    struct ProtectedRange {
+        uint256 start;
+        uint256 end;
+        bytes32 mask;
+    }
+
+    /// @notice Merge state carried across consecutive writes. Start from a zeroed one. Its contents
+    ///         only steer the search: `advance` re-checks `next` on every write, so a stale or
+    ///         foreign cursor costs gas but cannot let a write through.
+    /// @param next Where the last write's search ended: a hint for the next write's search.
+    /// @param blind Set by a pre-pass once it has passed an op that runs code. Storage may then
+    ///        differ from what the write will see, so any hit is rejected. Leave it false when
+    ///        checking inline, right before each write. A stale `true` only over-rejects.
+    struct Cursor {
+        uint256 next;
+        bool blind;
+    }
+
+    bytes32 internal constant FULL = bytes32(type(uint256).max);
+
+    /// @notice A write would change protected bits.
+    /// @param index Position of the offending op in its program (or in the caller's own sequence).
+    /// @param slot The protected slot it writes.
+    error ProtectedSlotWrite(uint256 index, bytes32 slot);
+
+    /// @notice A pre-pass found a write to a protected range after an op that runs code. The
+    ///      pre-pass can only compare with storage as it was before the program, and that code may
+    ///      have changed the protected bits since.
+    /// @param index Position of the offending `STORE` in its program.
+    /// @param slot The protected slot it writes.
+    error ProtectedWriteAfterExternalCode(uint256 index, bytes32 slot);
+
+    /// @notice The range list is unsorted, overlapping, empty-masked or masks more than one slot.
+    error InvalidRanges();
+
+    /// @notice Reverts with `InvalidRanges` unless `ranges` is a well-formed denylist.
+    /// @dev Per range: `start <= end`, a nonzero mask, a partial mask only on a single slot, and a
+    ///      start above the previous range's end. The first range has no predecessor, so it is
+    ///      checked with `first` set rather than against a sentinel end.
+    function validateRanges(ProtectedRange[] memory ranges) internal pure {
+        bool bad;
+        assembly ("memory-safe") {
+            let it := add(ranges, 0x20)
+            let last := add(it, shl(5, mload(ranges)))
+            let prevEnd := 0
+            for { let first := 1 } lt(it, last) { it := add(it, 0x20) } {
+                let r := mload(it)
+                let start := mload(r)
+                let end := mload(add(r, 0x20))
+                let mask := mload(add(r, 0x40))
+                bad := or(bad, gt(start, end))
+                bad := or(bad, iszero(mask))
+                bad := or(bad, and(iszero(eq(mask, not(0))), iszero(eq(start, end))))
+                bad := or(bad, and(iszero(first), iszero(gt(start, prevEnd))))
+                prevEnd := end
+                first := 0
+            }
+        }
+        if (bad) revert InvalidRanges();
+    }
+
+    // The hot paths below walk `ranges` in assembly. A `ProtectedRange[] memory` is a length
+    // word followed by one pointer per element, and each element is three words: start, end,
+    // mask. Every loop compares its index with the length before dereferencing it. A loop yields
+    // `hit`, the pointer of the range covering the slot or zero, and only then calls `_reject`,
+    // which reads the mask and decides.
+
+    /// @notice Stateless check of one write: one binary search.
+    /// @dev `ranges` must have passed `validateRanges`; an unvalidated list can fail open.
+    function checkEach(ProtectedRange[] memory ranges, uint256 index, bytes32 slot, bytes32 value) internal view {
+        uint256 hit = _covering(ranges, uint256(slot));
+        if (hit != 0) _reject(hit, index, slot, value, false);
+    }
+
+    /// @notice Checks one write and moves `c` past it. Start from a zeroed `Cursor`.
+    /// @dev `ranges` must have passed `validateRanges`; an unvalidated list can fail open.
+    function advance(Cursor memory c, ProtectedRange[] memory ranges, uint256 index, bytes32 slot, bytes32 value)
+        internal
+        view
+    {
+        uint256 s = uint256(slot);
+        uint256 hit;
+        assembly ("memory-safe") {
+            let len := mload(ranges)
+            let base := add(ranges, 0x20)
+            let i := mload(c)
+            // The forward walk from `i` is right only if no range before `i` reaches `s`. Ends
+            // ascend strictly in a validated list, so that holds exactly when `i <= len` and
+            // (`i == 0` or `ranges[i-1].end < s`). Otherwise re-seat by binary search. `i` is
+            // compared with `len` before `ranges[i-1]` is read.
+            let reseat := gt(i, len)
+            if and(iszero(reseat), gt(i, 0)) {
+                reseat := iszero(lt(mload(add(mload(add(base, shl(5, sub(i, 1)))), 0x20)), s))
+            }
+            if reseat {
+                i := 0
+                for { let hi := len } lt(i, hi) {} {
+                    let mid := shr(1, add(i, hi))
+                    switch lt(mload(add(mload(add(base, shl(5, mid))), 0x20)), s)
+                    case 1 { i := add(mid, 1) }
+                    default { hi := mid }
+                }
+            }
+            for {} lt(i, len) { i := add(i, 1) } {
+                if iszero(lt(mload(add(mload(add(base, shl(5, i))), 0x20)), s)) { break }
+            }
+            mstore(c, i)
+            if lt(i, len) {
+                let r := mload(add(base, shl(5, i)))
+                if iszero(gt(mload(r), s)) { hit := r }
+            }
+        }
+        if (hit != 0) _reject(hit, index, slot, value, c.blind);
+    }
+
+    /// @notice Checks every `STORE` in a decoded program with one cursor, before it runs.
+    /// @dev Expects the same `(types, args)` pair `StateChangeHandlerLib._runStateUpdates` takes.
+    ///      Rejects the malformed input it inspects the same way `_runStateUpdates` would, whatever
+    ///      `ranges` holds, an empty list included: mismatched lengths (`InvalidArguments`) and a
+    ///      STORE payload too short to decode. It doesn't decode non-STORE payloads; those are
+    ///      checked when `_runStateUpdates` executes them.
+    ///      After the first op that runs code, a write to a protected range reverts with
+    ///      `ProtectedWriteAfterExternalCode`, since its protected bits can no longer be predicted.
+    ///      Settlement doesn't use this: `StateChangeHandlerLib._run` checks inline, which is exact.
+    ///      Validates `ranges` first (`InvalidRanges`), even for a program with no STOREs.
+    function checkProgram(StateUpdateType[] memory types, bytes[] memory args, ProtectedRange[] memory ranges)
+        internal
+        view
+    {
+        uint256 len = types.length;
+        require(len == args.length, StateChangeHandlerLib.InvalidArguments());
+        validateRanges(ranges);
+        Cursor memory c;
+        for (uint256 i = 0; i < len; i = _inc(i)) {
+            StateUpdateType t = types[i];
+            if (t != StateUpdateType.STORE) {
+                if (!c.blind) c.blind = _runsCode(t);
+                continue;
+            }
+            (bytes32 slot, bytes32 value) = abi.decode(args[i], (bytes32, bytes32));
+            advance(c, ranges, i, slot, value);
+        }
+    }
+
+    /// @dev Pointer to the range covering `s`, or zero. Binary-searches for the first range whose
+    ///      end is at or above `s`, then checks its start. `lo < hi <= length` keeps `mid` in
+    ///      bounds and every sum below 2^256; `advance` inlines the same search to re-seat.
+    function _covering(ProtectedRange[] memory ranges, uint256 s) private pure returns (uint256 hit) {
+        assembly ("memory-safe") {
+            let len := mload(ranges)
+            let base := add(ranges, 0x20)
+            let lo := 0
+            for { let hi := len } lt(lo, hi) {} {
+                let mid := shr(1, add(lo, hi))
+                switch lt(mload(add(mload(add(base, shl(5, mid))), 0x20)), s)
+                case 1 { lo := add(mid, 1) }
+                default { hi := mid }
+            }
+            if lt(lo, len) {
+                let r := mload(add(base, shl(5, lo)))
+                if iszero(gt(mload(r), s)) { hit := r }
+            }
+        }
+    }
+
+    /// @dev Ops that execute code which can write this contract's storage. LOGs don't.
+    function _runsCode(StateUpdateType t) private pure returns (bool) {
+        return t == StateUpdateType.CALL || t == StateUpdateType.CREATE || t == StateUpdateType.CREATE2
+            || t == StateUpdateType.NESTED;
+    }
+
+    /// @dev Increment for an index bounded by an array length, which cannot overflow.
+    function _inc(uint256 i) private pure returns (uint256) {
+        unchecked {
+            return i + 1;
+        }
+    }
+
+    /// @dev `range` points at a range covering `slot`. Reverts unless the write leaves every
+    ///      protected bit as it is in storage. `blind` means storage may not be what it will be
+    ///      when the write runs (a pre-pass past code-running ops), so the hit can't be judged and
+    ///      is rejected.
+    function _reject(uint256 range, uint256 index, bytes32 slot, bytes32 value, bool blind) private view {
+        if (blind) revert ProtectedWriteAfterExternalCode(index, slot);
+        bytes32 mask;
+        bytes32 current;
+        assembly ("memory-safe") {
+            mask := mload(add(range, 0x40))
+            current := sload(slot)
+        }
+        if ((current ^ value) & mask != 0) revert ProtectedSlotWrite(index, slot);
+    }
+}
+
 // src/GasKillerSDK.sol
 
 /// @title GasKillerSDK
@@ -1186,6 +1459,14 @@ library StateChangeHandlerLib {
 ///
 ///      Nested settlement is opt-in through `GasKillerNestedSDK`, so a consumer that never
 ///      nests does not carry its bytecode; a `NESTED` op settled here reverts.
+///
+///      Protected storage: every `STORE` a signed program carries is checked, right before it
+///      executes, against `protectedRanges()`. A write that would change a protected bit reverts
+///      the transition (`StorageGuard.ProtectedSlotWrite`). The SDK always protects its own
+///      storage: the transition counter and the configuration struct (AVS address, registry,
+///      stale-block window). Consumers add theirs, such as an `Ownable` owner slot, by
+///      overriding `_protectedRanges()`. A write that leaves protected bits unchanged passes,
+///      which is what keeps the counter copy gas-analyzer puts in every program working.
 abstract contract GasKillerSDK is
     StateTracker,
     TransitionGuard,
@@ -1351,7 +1632,81 @@ abstract contract GasKillerSDK is
 
     function _stateChangeHandler(bytes calldata storageUpdates) internal {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        StateChangeHandlerLib._runStateUpdates(types, args);
+        StateChangeHandlerLib._runStateUpdates(types, args, _settlementRanges());
+    }
+
+    /// @notice The storage ranges a signed program may not change: the SDK's own slots merged
+    ///         with the consumer's `_protectedRanges()`, in ascending order.
+    /// @dev Settlement validates this list before running a program and reverts with
+    ///      `StorageGuard.InvalidRanges` if it is malformed, for example when a consumer range is
+    ///      unsorted or overlaps one of the SDK's slots. Call `StorageGuard.validateRanges` on it
+    ///      in your tests so that a bad list fails there rather than at the first settlement.
+    function protectedRanges() external view returns (StorageGuard.ProtectedRange[] memory) {
+        return _settlementRanges();
+    }
+
+    /// @notice Storage the consumer wants protected from signed programs. Override to add slots.
+    /// @dev Return inclusive `[start, end]` ranges in strictly ascending order, not overlapping
+    ///      each other or the SDK's own slots (see `protectedRanges`). Use `StorageGuard.FULL` to
+    ///      protect whole slots, or a narrower mask on a single slot to protect part of a packed
+    ///      slot. Built on every settlement, so return a constant list:
+    ///      ```
+    ///      function _protectedRanges() internal pure override returns (StorageGuard.ProtectedRange[] memory r) {
+    ///          r = new StorageGuard.ProtectedRange[](1);
+    ///          r[0] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL); // Ownable._owner
+    ///      }
+    ///      ```
+    function _protectedRanges() internal view virtual returns (StorageGuard.ProtectedRange[] memory) {
+        return new StorageGuard.ProtectedRange[](0);
+    }
+
+    /// @dev The list every program is checked against: the consumer's ranges with the SDK's two
+    ///      fixed ranges merged in by start. Not virtual, so a consumer cannot drop the SDK's own
+    ///      protection. The result is validated by the program runner, so a consumer list that is
+    ///      unsorted or collides with an SDK range reverts settlement instead of failing open.
+    ///
+    ///      The SDK ranges are constants and the config struct sits below the counter, so the
+    ///      merge is three copy passes split at their starts. Consumer entries keep their relative
+    ///      order, so a consumer list that descends or overlaps still does after the merge and
+    ///      still fails validation. Each pass compares its position with the end before reading.
+    function _settlementRanges() internal view returns (StorageGuard.ProtectedRange[] memory out) {
+        StorageGuard.ProtectedRange[] memory consumer = _protectedRanges();
+        StorageGuard.ProtectedRange memory config =
+            StorageGuard.ProtectedRange(uint256(STORAGE_LOCATION), uint256(STORAGE_LOCATION) + 1, StorageGuard.FULL);
+        StorageGuard.ProtectedRange memory counter = StorageGuard.ProtectedRange(
+            uint256(STATE_TRACKER_STORAGE_LOCATION), uint256(STATE_TRACKER_STORAGE_LOCATION), StorageGuard.FULL
+        );
+        out = new StorageGuard.ProtectedRange[](consumer.length + 2);
+        assembly ("memory-safe") {
+            let src := add(consumer, 0x20)
+            let end := add(src, shl(5, mload(consumer)))
+            let dst := add(out, 0x20)
+            // Consumer entries starting below the config struct, then the config struct.
+            for {} lt(src, end) {} {
+                let r := mload(src)
+                if iszero(lt(mload(r), mload(config))) { break }
+                mstore(dst, r)
+                src := add(src, 0x20)
+                dst := add(dst, 0x20)
+            }
+            mstore(dst, config)
+            dst := add(dst, 0x20)
+            // Entries starting below the counter, then the counter, then the rest.
+            for {} lt(src, end) {} {
+                let r := mload(src)
+                if iszero(lt(mload(r), mload(counter))) { break }
+                mstore(dst, r)
+                src := add(src, 0x20)
+                dst := add(dst, 0x20)
+            }
+            mstore(dst, counter)
+            dst := add(dst, 0x20)
+            for {} lt(src, end) {} {
+                mstore(dst, mload(src))
+                src := add(src, 0x20)
+                dst := add(dst, 0x20)
+            }
+        }
     }
 
     /// @notice Query if a contract implements an interface
@@ -1546,7 +1901,7 @@ abstract contract GasKillerNestedSDK is GasKillerSDK, IGasKillerNested {
 
     function _runProgram(bytes memory storageUpdates, NestedContext memory ctx) private {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        StateChangeHandlerLib._runStateUpdates(types, args, ctx);
+        StateChangeHandlerLib._runStateUpdates(types, args, _settlementRanges(), ctx);
     }
 
     /// @dev Nested settlement reverts against a registry without `ISchnorrApprovalRegistry`, and

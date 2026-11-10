@@ -180,14 +180,24 @@ library StateChangeHandlerLib {
 
     /// @dev Runs a program outside any tree, rejecting every NESTED op. Dispatching NESTED
     ///      through a function pointer keeps `_runNested` out of consumers that never nest.
-    function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args) internal {
+    ///      Every STORE is checked against `ranges` (see `_run`); pass an empty list for none.
+    function _runStateUpdates(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges
+    ) internal {
         NestedContext memory none;
-        _run(types, args, none, _rejectNested);
+        _run(types, args, ranges, none, _rejectNested);
     }
 
-    /// @dev Runs a program inside the tree in `ctx`.
-    function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args, NestedContext memory ctx) internal {
-        _run(types, args, ctx, _runNested);
+    /// @dev Runs a program inside the tree in `ctx`, checking every STORE against `ranges`.
+    function _runStateUpdates(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges,
+        NestedContext memory ctx
+    ) internal {
+        _run(types, args, ranges, ctx, _runNested);
     }
 
     /// @notice Decodes and executes a series of state updates
@@ -200,23 +210,31 @@ library StateChangeHandlerLib {
     ///      - NESTED: Hand a callee its own signed frame of the tree in `ctx`
     /// @param types Array of StateUpdateType enums indicating the type of each state update operation
     /// @param args Array of ABI-encoded arguments corresponding to each operation type
+    /// @param ranges Protected storage. Validated once (`StorageGuard.InvalidRanges`); then every
+    ///        STORE is checked right before it executes and reverts with
+    ///        `StorageGuard.ProtectedSlotWrite` if it would change a protected bit. Checking at
+    ///        that moment is exact even after a CALL has legitimately changed protected storage.
     /// @param ctx The tree this program runs inside; a zero root rejects every NESTED op
     /// @param nested The NESTED handler: `_runNested` inside a tree, `_rejectNested` outside one
     /// @dev types and args arrays must be equal length, with args[i] containing the encoded parameters for types[i]
     function _run(
         StateUpdateType[] memory types,
         bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges,
         NestedContext memory ctx,
         function(uint256, bytes memory, NestedContext memory) nested
     ) private {
         uint256 length = types.length;
         require(length == args.length, InvalidArguments());
+        StorageGuard.validateRanges(ranges);
+        StorageGuard.Cursor memory cursor;
         for (uint256 i = 0; i < length; ++i) {
             StateUpdateType stateUpdateType = types[i];
             bytes memory arg = args[i];
 
             if (stateUpdateType == StateUpdateType.STORE) {
                 (bytes32 slot, bytes32 value) = abi.decode(arg, (bytes32, bytes32));
+                StorageGuard.advance(cursor, ranges, i, slot, value);
                 assembly {
                     sstore(slot, value)
                 }
@@ -435,10 +453,13 @@ library StateChangeHandlerLib {
 ///      O(k) per write, more than the check itself. `checkProgram` validates the list itself,
 ///      once per program.
 ///
-///      `mask` is `FULL` to deny every write to the range, even one that stores the value
-///      already there, which saves the SLOAD. A narrower mask protects only some bits of one
-///      packed slot: a write passes when it leaves those bits as they are in storage, which
-///      costs one SLOAD on a hit and nothing otherwise.
+///      A write to a protected range is rejected when it would change a protected bit, and allowed
+///      when it leaves every protected bit as it is in storage. `mask` is `FULL` to protect the
+///      whole slot. A narrower mask protects only some bits of one packed slot. Allowing writes
+///      that change nothing is what lets the SDK protect its own transition counter: gas-analyzer
+///      copies the counter's new value into every program as a STORE, and `trackState` has already
+///      written that same value by the time the program runs. Deciding costs one SLOAD, paid only
+///      by a write that lands in a range.
 ///
 ///      Two per-write checkers, which agree on every input (the test suite fuzzes them against a
 ///      naive model and against benchmark-only variants in `test/utils/StorageGuardVariants.sol`):
@@ -454,15 +475,15 @@ library StateChangeHandlerLib {
 ///          CALL/CREATE-bounded slice, as gas-analyzer's canonical extraction emits it, pays at
 ///          most one re-seat per slice.
 ///
-///      Masked ranges are checked against storage as it stands when the check runs, so the
-///      per-write checkers are sound only when called right before each write executes, inline
-///      in `_run`. A pre-pass (`checkProgram`) sees storage as it was before the program. A STORE
-///      can't make the two differ on protected bits: any STORE that changed them would itself
-///      have been rejected. But a CALL, CREATE, CREATE2 or NESTED op runs code that can
-///      legitimately change them, for example by re-entering an owner-gated setter, and a later
-///      STORE could then quietly put the old bits back. So once a pre-pass has passed such an
-///      op, it rejects every later write to a masked range (`MaskedWriteAfterExternalCode`).
-///      Fully protected ranges don't depend on storage and are unaffected.
+///      Writes are judged against storage as it stands when the check runs, so the per-write
+///      checkers are exact only when called right before each write executes, which is how
+///      `StateChangeHandlerLib._run` uses them. A pre-pass (`checkProgram`) sees storage as it was
+///      before the program. A STORE can't make the two differ on protected bits: any STORE that
+///      changed them would itself have been rejected. But a CALL, CREATE, CREATE2 or NESTED op
+///      runs code that can legitimately change them, for example by re-entering an owner-gated
+///      setter, and a later STORE could then quietly put the old bits back. So once a pre-pass
+///      has passed such an op, it rejects every later write to a protected range
+///      (`ProtectedWriteAfterExternalCode`).
 ///
 ///      Not covered: a `CALL` update to `address(this)` can reach privileged functions directly,
 ///      so a consumer relying on this guard should also restrict self-calls. `NESTED` frames
@@ -471,8 +492,8 @@ library StorageGuard {
     /// @notice One protected interval of storage slots.
     /// @param start First protected slot (inclusive).
     /// @param end Last protected slot (inclusive).
-    /// @param mask Protected bits within the slot: `FULL` for every bit, anything narrower only
-    ///        when `start == end`.
+    /// @param mask Protected bits within each slot: `FULL` for every bit, anything narrower only
+    ///        when `start == end`. A write is rejected when it would change a protected bit.
     struct ProtectedRange {
         uint256 start;
         uint256 end;
@@ -484,8 +505,8 @@ library StorageGuard {
     ///         foreign cursor costs gas but cannot let a write through.
     /// @param next Where the last write's search ended: a hint for the next write's search.
     /// @param blind Set by a pre-pass once it has passed an op that runs code. Storage may then
-    ///        differ from what the write will see, so a masked hit is rejected. Leave it false
-    ///        when checking inline, right before each write. A stale `true` only over-rejects.
+    ///        differ from what the write will see, so any hit is rejected. Leave it false when
+    ///        checking inline, right before each write. A stale `true` only over-rejects.
     struct Cursor {
         uint256 next;
         bool blind;
@@ -498,12 +519,12 @@ library StorageGuard {
     /// @param slot The protected slot it writes.
     error ProtectedSlotWrite(uint256 index, bytes32 slot);
 
-    /// @notice A pre-pass found a write to a masked range after an op that runs code. The pre-pass
-    ///      can only compare with storage as it was before the program, and that code may have
-    ///      changed the protected bits since.
+    /// @notice A pre-pass found a write to a protected range after an op that runs code. The
+    ///      pre-pass can only compare with storage as it was before the program, and that code may
+    ///      have changed the protected bits since.
     /// @param index Position of the offending `STORE` in its program.
-    /// @param slot The masked slot it writes.
-    error MaskedWriteAfterExternalCode(uint256 index, bytes32 slot);
+    /// @param slot The protected slot it writes.
+    error ProtectedWriteAfterExternalCode(uint256 index, bytes32 slot);
 
     /// @notice The range list is unsorted, overlapping, empty-masked or masks more than one slot.
     error InvalidRanges();
@@ -594,8 +615,9 @@ library StorageGuard {
     ///      `ranges` holds, an empty list included: mismatched lengths (`InvalidArguments`) and a
     ///      STORE payload too short to decode. It doesn't decode non-STORE payloads; those are
     ///      checked when `_runStateUpdates` executes them.
-    ///      After the first op that runs code, a write to a masked range reverts with
-    ///      `MaskedWriteAfterExternalCode`, since its protected bits can no longer be predicted.
+    ///      After the first op that runs code, a write to a protected range reverts with
+    ///      `ProtectedWriteAfterExternalCode`, since its protected bits can no longer be predicted.
+    ///      Settlement doesn't use this: `StateChangeHandlerLib._run` checks inline, which is exact.
     ///      Validates `ranges` first (`InvalidRanges`), even for a program with no STOREs.
     function checkProgram(StateUpdateType[] memory types, bytes[] memory args, ProtectedRange[] memory ranges)
         internal
@@ -650,23 +672,18 @@ library StorageGuard {
         }
     }
 
-    /// @dev `range` points at a range covering `slot`. Reverts unless the range is masked and the
-    ///      write leaves every masked bit as it is in storage. `blind` means storage may not be
-    ///      what it will be when the write runs (a pre-pass past code-running ops), so a masked
-    ///      hit can't be judged and is rejected.
+    /// @dev `range` points at a range covering `slot`. Reverts unless the write leaves every
+    ///      protected bit as it is in storage. `blind` means storage may not be what it will be
+    ///      when the write runs (a pre-pass past code-running ops), so the hit can't be judged and
+    ///      is rejected.
     function _reject(uint256 range, uint256 index, bytes32 slot, bytes32 value, bool blind) private view {
+        if (blind) revert ProtectedWriteAfterExternalCode(index, slot);
         bytes32 mask;
+        bytes32 current;
         assembly ("memory-safe") {
             mask := mload(add(range, 0x40))
+            current := sload(slot)
         }
-        if (mask != FULL) {
-            if (blind) revert MaskedWriteAfterExternalCode(index, slot);
-            bytes32 current;
-            assembly ("memory-safe") {
-                current := sload(slot)
-            }
-            if ((current ^ value) & mask == 0) return;
-        }
-        revert ProtectedSlotWrite(index, slot);
+        if ((current ^ value) & mask != 0) revert ProtectedSlotWrite(index, slot);
     }
 }
