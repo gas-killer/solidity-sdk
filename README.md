@@ -208,61 +208,97 @@ See `src/examples/nested-chain` (`NestedRouter` → `NestedVault` → `NestedLed
 ETH). The root leaf binds the `msg.value` the tree settles with, just as the `verifyAndUpdate`
 digest does, and each nested leaf binds the value its parent forwards.
 
-## Protected storage ranges
+## Protected storage
 
-A signed program's `STORE` updates write any slot they name. A compromised quorum could use one to
-overwrite an `Ownable` owner, the `StateTracker` counter, the SDK's own configuration (which holds
-the registry address) or an EIP-1967 proxy slot, and take over the contract.
-`libraries/StorageGuard.sol` checks writes against a list of protected slot ranges. It isn't wired
-into settlement yet ([#107](https://github.com/gas-killer/solidity-sdk/issues/107)); this section
-specifies the check and records what it costs.
+A signed program's `STORE` updates write any slot they name. Without a check, a compromised quorum
+could sign one update that overwrites an `Ownable` owner, the SDK's registry address or the
+transition counter, and take over the contract. Settlement therefore checks every `STORE` against a
+list of protected storage ranges, right before the write executes, and reverts the whole transition
+(`StorageGuard.ProtectedSlotWrite`) if the write would change a protected bit.
+
+**On by default.** Every consumer protects the SDK's own storage with no code: the transition
+counter, and the configuration struct holding the AVS address, the registry and the stale-block
+window. A tracked function that natively changes any of those settings can't be settled through
+Gas Killer.
+
+**Adding your own slots.** Override `_protectedRanges()` and return a constant list of inclusive
+`[start, end]` ranges in ascending order, for example the owner slot of an `Ownable` that is your
+contract's first state variable:
+
+```solidity
+import {StorageGuard} from "gas-killer-sdk/libraries/StorageGuard.sol";
+
+function _protectedRanges() internal pure override returns (StorageGuard.ProtectedRange[] memory r) {
+    r = new StorageGuard.ProtectedRange[](1);
+    r[0] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL); // Ownable._owner
+}
+```
+
+- `StorageGuard.FULL` protects every bit of every slot in the range. A narrower mask, on a single
+  slot, protects part of a packed slot, such as an owner address that shares its slot with a counter.
+- The SDK merges your list with its own and validates the result on every settlement. A list that is
+  unsorted, overlapping, or collides with an SDK slot makes settlement revert (`InvalidRanges`) rather
+  than silently protect less. `protectedRanges()` returns the merged list: check it with
+  `StorageGuard.validateRanges` in your tests, so a bad list fails there and not at the first
+  settlement.
+- Nested settlement checks each frame against its own contract's list, and a batch reverts as a whole
+  if any of its transitions writes protected storage.
+
+**The rule: no protected bit may change.** A write that leaves every protected bit as it is in
+storage passes. That is what keeps honest programs working: gas-analyzer copies the counter's new
+value into every program, and `trackState` has already written that value when the program runs.
+Each `STORE` is judged against storage at the moment it executes. So if a `CALL` legitimately changes
+protected storage, for example by having the pending owner claim ownership, a later `STORE` that
+quietly restores the old value is rejected, and one that keeps the new value passes.
+
+**What it is not.** Protection applies to the signed `STORE` entries only. It does not watch the slot
+itself, so your own functions, called normally, are unaffected, and so is native code a signed
+`CALL` runs. A `CALL` acts with the contract's authority: it can't pass an `onlyOwner` check,
+because `msg.sender` is the contract, but it can reach functions that trust `msg.sender ==
+address(this)`, and it can spend what the contract holds elsewhere (tokens, approvals, ETH).
+Restricting calls is [#109](https://github.com/gas-killer/solidity-sdk/issues/109).
+
+**Cost at settlement.** Measured through `verifyAndUpdate` (`bench/SettlementGas.t.sol`), against the
+same settlement before protection was wired in: a program of the counter copy plus n fresh `STORE`s,
+for a consumer declaring k ranges.
+
+| n `STORE`s | Before | k = 0 | k = 1 | k = 4 |
+|---|---|---|---|---|
+| 1 | 53,513 | +3,107 (+5.8%) | +3,924 (+7.3%) | +6,469 (+12%) |
+| 8 | 215,998 | +5,505 (+2.5%) | +6,325 (+2.9%) | +8,879 (+4.1%) |
+| 32 | 773,283 | +13,727 (+1.8%) | +14,558 (+1.9%) | +17,143 (+2.2%) |
+
+That is about 340 gas per `STORE`, about 820 per declared range per settlement (building, merging and
+validating the list), and about 2,800 fixed.
+
+### Design and measurements
+
+The check lives in `libraries/StorageGuard.sol`, and was specified and measured in
+[#107](https://github.com/gas-killer/solidity-sdk/issues/107).
 
 **A denylist, not an allowlist.** Honest writes to mappings and dynamic arrays land on keccak-derived
 slots spread across the whole slot space, and an allowlist of ranges can't express those. Every slot
-worth protecting is known at compile time. An honest write can only reach a protected slot through a
-keccak preimage, so a hit means the program is malicious, and the whole program is rejected
-(`ProtectedSlotWrite`).
+worth protecting is known at compile time, and an honest write can only reach one through a keccak
+preimage, so a hit means the program is malicious.
 
-**Ranges.** Each `ProtectedRange` is an inclusive `[start, end]` interval with a `mask`. The list must
-be strictly ascending and non-overlapping. An unsorted or overlapping list fails open, silently
-letting writes to protected slots through, so validate it:
+**Sorted input is optional.** Settlement uses the merge checker (`Cursor` + `advance`): it keeps a
+position in the range list and moves it forward as the slots ascend. Before each write it checks that
+its position is still valid for the slot, meaning no earlier range reaches it, and re-seats by binary
+search if not. Neither the order of the writes nor the cursor's state can change the verdict, only the
+gas. gas-analyzer's canonical extraction, ascending within each slice between `CALL`/`CREATE`
+boundaries, pays at most one re-seat per slice; journal-order input is still checked correctly, just
+less cheaply. Sorting on-chain isn't an option, because reordering `STORE`s across a `CALL` changes
+what the call observes.
 
-- `checkProgram` validates the list itself, once per program. That costs about 3.4k gas for 16
-  ranges, and reverts with `InvalidRanges` on a malformed list.
-- The per-write checkers (`checkEach`, `advance`) don't validate. Validating on every write would
-  cost more than the check. Call `validateRanges` once yourself: in the constructor for a constant
-  list, or before the loop for a list built at run time.
+**Why inline.** The library also has `checkProgram`, a pre-pass over a whole program. Settlement
+doesn't use it: it decodes every `STORE` a second time (about 350 gas each), and since it sees storage
+from before the program, it has to reject any protected write that follows a code-running op
+(`ProtectedWriteAfterExternalCode`), which an inline check judges exactly.
 
-- With `mask = FULL`, every write to the range is rejected, even one that stores the current value.
-- A narrower mask applies to a single slot only, and protects part of a packed slot, such as an owner
-  address that shares its slot with a counter. A write passes when every masked bit stays as it is in
-  storage. That check costs one SLOAD, paid only on a write that lands in the range.
-- A masked check compares with storage as it is when the check runs, so it is exact only inline,
-  right before the write. A pre-pass sees storage from before the program. Once a `CALL`, `CREATE`,
-  `CREATE2` or `NESTED` op has run code, that code may have legitimately changed the protected bits,
-  and a later `STORE` could quietly put the old bits back. So a pre-pass rejects every masked write
-  after such an op (`MaskedWriteAfterExternalCode`). Fully protected ranges are unaffected.
-
-**Sorted input is optional.** The merge checker (`Cursor` + `advance`) keeps a position in the range
-list and moves it forward as the slots ascend. Before each write, it checks that its position is
-still valid for the slot, meaning no earlier range reaches the slot. If not, it re-seats by binary
-search. That covers a write below the previous range, and also a cursor carried over from another
-list or never reset. Neither the order of the writes nor the cursor's state can change the verdict,
-only the gas. Nobody has to sort:
-
-- gas-analyzer's canonical extraction, ascending within each slice between `CALL`/`CREATE`
-  boundaries, pays at most one re-seat per slice.
-- Journal-order input is still checked correctly, just less cheaply.
-
-Sorting on-chain isn't an option, because reordering `STORE`s across a `CALL` changes what the call
-observes.
-
-**Cost.** These are per-write marginals from `bench/StorageGuardGas.t.sol`, run with
-`FOUNDRY_PROFILE=gas forge test -vv`. Each is the gas the check adds to one `STORE` it sits next
-to. The figures are for 128 writes against k ranges shaped like a real protected set (slot 0 plus
-high keccak slots), taking the range over three layouts: low slots, mapping entries, and mixed.
-Binary search is `checkEach` and merge is `advance`. The linear scan is a comparison variant that
-lives in `test/utils/StorageGuardVariants.sol`, not in the library.
+**Choosing the checker.** Per-write marginals from `bench/StorageGuardGas.t.sol` for 128 writes
+against k ranges shaped like a real protected set (slot 0 plus high keccak slots), over three layouts:
+low slots, mapping entries, and mixed. Binary search is `checkEach`, merge is `advance`, and the
+linear scan is a comparison variant in `test/utils/StorageGuardVariants.sol`.
 
 | Write order | k | Binary search | Linear scan | Merge |
 |---|---|---|---|---|
@@ -281,22 +317,12 @@ lives in `test/utils/StorageGuardVariants.sol`, not in the library.
   every high range. The merge pulls ahead at k = 16 on mapping entries (366–368 against 568–832).
 - **Cursor safety.** About 65 gas of the merge's cost per write goes to re-checking the cursor's
   position against the list, so a stale or foreign cursor can't let a write through.
-- **Against the write itself.** An SSTORE costs 2,900 (warm), 5,000 (cold) or 22,100 (zero to
-  nonzero), so the check adds roughly 7–30% to an ordinary write. It costs more than a write to a
-  slot already written in the same transaction, which is 100.
-- **Inline, not a pre-pass.** A separate pass over the program before it runs (`checkProgram`)
-  decodes every `STORE` a second time, which adds about 350 gas per write. It also has to reject
-  masked writes that come after code-running ops, which an inline check can judge exactly.
 
-**Recommendation.** Inline the merge checker in `StateChangeHandlerLib._run`'s `STORE` branch, with
-the cursor carried across the whole program and no sort requirement. gas-analyzer's per-slice
-ascending order is already enough to get most of the saving.
+Both benchmarks run with `FOUNDRY_PROFILE=gas forge test -vv`.
 
 **Not covered:**
 
-- A `CALL` update to `address(this)` can reach privileged functions directly, so a consumer relying
-  on this guard should also restrict self-calls.
-- Each `NESTED` frame is checked by its own contract.
+- Restricting what a signed `CALL` may do: [#109](https://github.com/gas-killer/solidity-sdk/issues/109).
 - A target function that is a general-purpose VM over all of its storage can't be restricted this
   way.
 - Ranges are declared by the consumer. Deriving them by scanning a contract's functions is left for
@@ -365,6 +391,11 @@ Operators then settle a transition through `verifyAndUpdate`, which requires tha
 - the recomputed message hash matches the one signed,
 - the aggregate signature verifies against the registry, and the signers hold at least the
   registry's `thresholdNum / thresholdDen` share of its total weight.
+
+Each `STORE` the program carries must also leave protected storage unchanged: the SDK's own slots
+always, plus any your contract declares. If your contract has an owner or other privileged state,
+declare its slots by overriding `_protectedRanges()`; see
+[Protected storage](#protected-storage).
 
 **The AVS and `SchnorrStakeRegistry` addresses to configure live in
 [Configuration](https://gaskiller.xyz/docs/solidity/configuration).** They are properties of a

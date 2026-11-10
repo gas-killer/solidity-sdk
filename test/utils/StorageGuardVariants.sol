@@ -37,22 +37,17 @@ library StorageGuardVariants {
     /// @dev Mirrors `StorageGuard._reject` for an inline check (never blind).
     function _reject(uint256 range, uint256 index, bytes32 slot, bytes32 value) private view {
         bytes32 mask;
+        bytes32 current;
         assembly ("memory-safe") {
             mask := mload(add(range, 0x40))
+            current := sload(slot)
         }
-        if (mask != StorageGuard.FULL) {
-            bytes32 current;
-            assembly ("memory-safe") {
-                current := sload(slot)
-            }
-            if ((current ^ value) & mask == 0) return;
-        }
-        revert StorageGuard.ProtectedSlotWrite(index, slot);
+        if ((current ^ value) & mask != 0) revert StorageGuard.ProtectedSlotWrite(index, slot);
     }
 
     /// @notice `StorageGuard.checkProgram` with a stateless `checkEach` per write instead of the
     ///         cursor. Same contract: validates `ranges`, rejects the same malformed input, and
-    ///         rejects masked writes after a code-running op.
+    ///         rejects protected writes after a code-running op.
     function checkProgramEach(
         StateUpdateType[] memory types,
         bytes[] memory args,
@@ -70,16 +65,16 @@ library StorageGuardVariants {
                 continue;
             }
             (bytes32 slot, bytes32 value) = abi.decode(args[i], (bytes32, bytes32));
-            if (ranCode && _inMaskedRange(ranges, uint256(slot))) {
-                revert StorageGuard.MaskedWriteAfterExternalCode(i, slot);
+            if (ranCode && _inRange(ranges, uint256(slot))) {
+                revert StorageGuard.ProtectedWriteAfterExternalCode(i, slot);
             }
             StorageGuard.checkEach(ranges, i, slot, value);
         }
     }
 
-    function _inMaskedRange(StorageGuard.ProtectedRange[] memory ranges, uint256 s) private pure returns (bool) {
+    function _inRange(StorageGuard.ProtectedRange[] memory ranges, uint256 s) private pure returns (bool) {
         for (uint256 i = 0; i < ranges.length; ++i) {
-            if (ranges[i].start <= s && s <= ranges[i].end) return ranges[i].mask != StorageGuard.FULL;
+            if (ranges[i].start <= s && s <= ranges[i].end) return true;
         }
         return false;
     }

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.27;
 
 import {IGasKillerNested} from "./interface/IGasKillerNested.sol";
+import {StorageGuard} from "./libraries/StorageGuard.sol";
 
 /// @notice Discriminator enum for the type of state update operation to execute
 /// @dev Each variant maps to a different EVM operation: storage writes, external calls, log emissions, or contract deployment
@@ -59,14 +60,24 @@ library StateChangeHandlerLib {
 
     /// @dev Runs a program outside any tree, rejecting every NESTED op. Dispatching NESTED
     ///      through a function pointer keeps `_runNested` out of consumers that never nest.
-    function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args) internal {
+    ///      Every STORE is checked against `ranges` (see `_run`); pass an empty list for none.
+    function _runStateUpdates(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges
+    ) internal {
         NestedContext memory none;
-        _run(types, args, none, _rejectNested);
+        _run(types, args, ranges, none, _rejectNested);
     }
 
-    /// @dev Runs a program inside the tree in `ctx`.
-    function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args, NestedContext memory ctx) internal {
-        _run(types, args, ctx, _runNested);
+    /// @dev Runs a program inside the tree in `ctx`, checking every STORE against `ranges`.
+    function _runStateUpdates(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges,
+        NestedContext memory ctx
+    ) internal {
+        _run(types, args, ranges, ctx, _runNested);
     }
 
     /// @notice Decodes and executes a series of state updates
@@ -79,23 +90,31 @@ library StateChangeHandlerLib {
     ///      - NESTED: Hand a callee its own signed frame of the tree in `ctx`
     /// @param types Array of StateUpdateType enums indicating the type of each state update operation
     /// @param args Array of ABI-encoded arguments corresponding to each operation type
+    /// @param ranges Protected storage. Validated once (`StorageGuard.InvalidRanges`); then every
+    ///        STORE is checked right before it executes and reverts with
+    ///        `StorageGuard.ProtectedSlotWrite` if it would change a protected bit. Checking at
+    ///        that moment is exact even after a CALL has legitimately changed protected storage.
     /// @param ctx The tree this program runs inside; a zero root rejects every NESTED op
     /// @param nested The NESTED handler: `_runNested` inside a tree, `_rejectNested` outside one
     /// @dev types and args arrays must be equal length, with args[i] containing the encoded parameters for types[i]
     function _run(
         StateUpdateType[] memory types,
         bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges,
         NestedContext memory ctx,
         function(uint256, bytes memory, NestedContext memory) nested
     ) private {
         uint256 length = types.length;
         require(length == args.length, InvalidArguments());
+        StorageGuard.validateRanges(ranges);
+        StorageGuard.Cursor memory cursor;
         for (uint256 i = 0; i < length; ++i) {
             StateUpdateType stateUpdateType = types[i];
             bytes memory arg = args[i];
 
             if (stateUpdateType == StateUpdateType.STORE) {
                 (bytes32 slot, bytes32 value) = abi.decode(arg, (bytes32, bytes32));
+                StorageGuard.advance(cursor, ranges, i, slot, value);
                 assembly {
                     sstore(slot, value)
                 }

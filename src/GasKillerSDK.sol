@@ -9,6 +9,7 @@ import {IGasKillerValueBound} from "./interface/IGasKillerValueBound.sol";
 import {StateTracker} from "./StateTracker.sol";
 import {TransitionGuard} from "./TransitionGuard.sol";
 import {StateChangeHandlerLib, StateUpdateType} from "./StateChangeHandlerLib.sol";
+import {StorageGuard} from "./libraries/StorageGuard.sol";
 import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
 
 /// @title GasKillerSDK
@@ -39,6 +40,14 @@ import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
 ///
 ///      Nested settlement is opt-in through `GasKillerNestedSDK`, so a consumer that never
 ///      nests does not carry its bytecode; a `NESTED` op settled here reverts.
+///
+///      Protected storage: every `STORE` a signed program carries is checked, right before it
+///      executes, against `protectedRanges()`. A write that would change a protected bit reverts
+///      the transition (`StorageGuard.ProtectedSlotWrite`). The SDK always protects its own
+///      storage: the transition counter and the configuration struct (AVS address, registry,
+///      stale-block window). Consumers add theirs, such as an `Ownable` owner slot, by
+///      overriding `_protectedRanges()`. A write that leaves protected bits unchanged passes,
+///      which is what keeps the counter copy gas-analyzer puts in every program working.
 abstract contract GasKillerSDK is
     StateTracker,
     TransitionGuard,
@@ -204,7 +213,81 @@ abstract contract GasKillerSDK is
 
     function _stateChangeHandler(bytes calldata storageUpdates) internal {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        StateChangeHandlerLib._runStateUpdates(types, args);
+        StateChangeHandlerLib._runStateUpdates(types, args, _settlementRanges());
+    }
+
+    /// @notice The storage ranges a signed program may not change: the SDK's own slots merged
+    ///         with the consumer's `_protectedRanges()`, in ascending order.
+    /// @dev Settlement validates this list before running a program and reverts with
+    ///      `StorageGuard.InvalidRanges` if it is malformed, for example when a consumer range is
+    ///      unsorted or overlaps one of the SDK's slots. Call `StorageGuard.validateRanges` on it
+    ///      in your tests so that a bad list fails there rather than at the first settlement.
+    function protectedRanges() external view returns (StorageGuard.ProtectedRange[] memory) {
+        return _settlementRanges();
+    }
+
+    /// @notice Storage the consumer wants protected from signed programs. Override to add slots.
+    /// @dev Return inclusive `[start, end]` ranges in strictly ascending order, not overlapping
+    ///      each other or the SDK's own slots (see `protectedRanges`). Use `StorageGuard.FULL` to
+    ///      protect whole slots, or a narrower mask on a single slot to protect part of a packed
+    ///      slot. Built on every settlement, so return a constant list:
+    ///      ```
+    ///      function _protectedRanges() internal pure override returns (StorageGuard.ProtectedRange[] memory r) {
+    ///          r = new StorageGuard.ProtectedRange[](1);
+    ///          r[0] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL); // Ownable._owner
+    ///      }
+    ///      ```
+    function _protectedRanges() internal view virtual returns (StorageGuard.ProtectedRange[] memory) {
+        return new StorageGuard.ProtectedRange[](0);
+    }
+
+    /// @dev The list every program is checked against: the consumer's ranges with the SDK's two
+    ///      fixed ranges merged in by start. Not virtual, so a consumer cannot drop the SDK's own
+    ///      protection. The result is validated by the program runner, so a consumer list that is
+    ///      unsorted or collides with an SDK range reverts settlement instead of failing open.
+    ///
+    ///      The SDK ranges are constants and the config struct sits below the counter, so the
+    ///      merge is three copy passes split at their starts. Consumer entries keep their relative
+    ///      order, so a consumer list that descends or overlaps still does after the merge and
+    ///      still fails validation. Each pass compares its position with the end before reading.
+    function _settlementRanges() internal view returns (StorageGuard.ProtectedRange[] memory out) {
+        StorageGuard.ProtectedRange[] memory consumer = _protectedRanges();
+        StorageGuard.ProtectedRange memory config =
+            StorageGuard.ProtectedRange(uint256(STORAGE_LOCATION), uint256(STORAGE_LOCATION) + 1, StorageGuard.FULL);
+        StorageGuard.ProtectedRange memory counter = StorageGuard.ProtectedRange(
+            uint256(STATE_TRACKER_STORAGE_LOCATION), uint256(STATE_TRACKER_STORAGE_LOCATION), StorageGuard.FULL
+        );
+        out = new StorageGuard.ProtectedRange[](consumer.length + 2);
+        assembly ("memory-safe") {
+            let src := add(consumer, 0x20)
+            let end := add(src, shl(5, mload(consumer)))
+            let dst := add(out, 0x20)
+            // Consumer entries starting below the config struct, then the config struct.
+            for {} lt(src, end) {} {
+                let r := mload(src)
+                if iszero(lt(mload(r), mload(config))) { break }
+                mstore(dst, r)
+                src := add(src, 0x20)
+                dst := add(dst, 0x20)
+            }
+            mstore(dst, config)
+            dst := add(dst, 0x20)
+            // Entries starting below the counter, then the counter, then the rest.
+            for {} lt(src, end) {} {
+                let r := mload(src)
+                if iszero(lt(mload(r), mload(counter))) { break }
+                mstore(dst, r)
+                src := add(src, 0x20)
+                dst := add(dst, 0x20)
+            }
+            mstore(dst, counter)
+            dst := add(dst, 0x20)
+            for {} lt(src, end) {} {
+                mstore(dst, mload(src))
+                src := add(src, 0x20)
+                dst := add(dst, 0x20)
+            }
+        }
     }
 
     /// @notice Query if a contract implements an interface

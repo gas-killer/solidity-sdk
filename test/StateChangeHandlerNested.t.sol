@@ -4,18 +4,21 @@ pragma solidity ^0.8.29;
 import {Test} from "forge-std/Test.sol";
 import {StateChangeHandlerLib, StateUpdateType, NestedContext} from "../src/StateChangeHandlerLib.sol";
 import {IGasKillerNested} from "../src/interface/IGasKillerNested.sol";
+import {StorageGuard} from "../src/libraries/StorageGuard.sol";
 
 /// Runs programs through the handler with or without a tree context.
 contract HandlerHarness {
     function runPlain(StateUpdateType[] memory types, bytes[] memory args) external payable {
-        StateChangeHandlerLib._runStateUpdates(types, args);
+        StateChangeHandlerLib._runStateUpdates(types, args, new StorageGuard.ProtectedRange[](0));
     }
 
     function runInTree(bytes32 root, StateUpdateType[] memory types, bytes[] memory args, bytes[] memory children)
         external
         payable
     {
-        StateChangeHandlerLib._runStateUpdates(types, args, NestedContext(root, children, 0));
+        StateChangeHandlerLib._runStateUpdates(
+            types, args, new StorageGuard.ProtectedRange[](0), NestedContext(root, children, 0)
+        );
     }
 
     function pendingChild() external view returns (bytes32) {

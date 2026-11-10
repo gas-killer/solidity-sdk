@@ -85,8 +85,8 @@ contract StorageGuardHarness is StateTracker {
         bytes32 secondSlot
     ) external view {
         StorageGuard.Cursor memory c;
-        StorageGuard.advance(c, first, 0, firstSlot, bytes32(0));
-        StorageGuard.advance(c, second, 1, secondSlot, bytes32(0));
+        StorageGuard.advance(c, first, 0, firstSlot, bytes32(uint256(1)));
+        StorageGuard.advance(c, second, 1, secondSlot, bytes32(uint256(1)));
     }
 
     function program(bytes memory storageUpdates, StorageGuard.ProtectedRange[] memory ranges) external view {
@@ -101,7 +101,8 @@ contract StorageGuardHarness is StateTracker {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
         if (perWrite) StorageGuardVariants.checkProgramEach(types, args, ranges);
         else StorageGuard.checkProgram(types, args, ranges);
-        StateChangeHandlerLib._runStateUpdates(types, args);
+        // Unguarded run: this harness tests the pre-pass on its own.
+        StateChangeHandlerLib._runStateUpdates(types, args, new StorageGuard.ProtectedRange[](0));
     }
 
     function programEach(bytes memory storageUpdates, StorageGuard.ProtectedRange[] memory ranges) external view {
@@ -130,10 +131,13 @@ contract StorageGuardTest is Test {
         rs[0] = _r(start, end);
     }
 
+    /// @dev One write of a nonzero value. Untouched slots hold zero, so the write changes the
+    ///      slot, which is what a protected range rejects.
     function _w(uint256 slot) internal pure returns (bytes32[] memory s, bytes32[] memory v) {
         s = new bytes32[](1);
         v = new bytes32[](1);
         s[0] = bytes32(slot);
+        v[0] = bytes32(uint256(1));
     }
 
     /// @dev Runs all three checkers; asserts they agree and returns (rejected, index).
@@ -277,7 +281,11 @@ contract StorageGuardTest is Test {
         s[1] = bytes32(uint256(5)); // descent: cursor re-seats
         s[2] = bytes32(uint256(200)); // hit
         s[3] = bytes32(uint256(100)); // also a hit, but later
-        (bool rejected, uint256 index) = _all(rs, s, new bytes32[](4));
+        bytes32[] memory v = new bytes32[](4);
+        for (uint256 i = 0; i < 4; ++i) {
+            v[i] = bytes32(uint256(1));
+        }
+        (bool rejected, uint256 index) = _all(rs, s, v);
         assertTrue(rejected);
         assertEq(index, 2);
     }
@@ -323,6 +331,22 @@ contract StorageGuardTest is Test {
     }
 
     // ---------------------------------------------------------------- masked (packed) slots
+
+    /// @dev The rule for every range: a write may not change protected bits. Rewriting the
+    ///      stored value, as gas-analyzer's copy of the transition counter does, passes.
+    function test_fullRange_allowsUnchangedWriteOnly() public {
+        h.poke(bytes32(uint256(7)), bytes32(uint256(41)));
+        (bytes32[] memory s, bytes32[] memory v) = _w(7);
+        StorageGuard.ProtectedRange[] memory rs = _one(7, 7);
+
+        v[0] = bytes32(uint256(41)); // the stored value: no change
+        (bool rejected,) = _all(rs, s, v);
+        assertFalse(rejected);
+
+        v[0] = bytes32(uint256(42)); // any change at all
+        (rejected,) = _all(rs, s, v);
+        assertTrue(rejected);
+    }
 
     function test_maskedSlot_allowsUnprotectedBitsOnly() public {
         // Slot 7 packs `address owner` (low 160 bits, protected) with a `uint96` counter.
@@ -481,9 +505,11 @@ contract StorageGuardTest is Test {
         t[3] = StateUpdateType.STORE;
         a[3] = _store(0);
         bytes memory p = abi.encode(t, a);
-        vm.expectRevert(abi.encodeWithSelector(StorageGuard.ProtectedSlotWrite.selector, 3, bytes32(0)));
+        // The write follows a CALL, so a pre-pass can't judge it against storage and rejects it.
+        bytes memory err = abi.encodeWithSelector(StorageGuard.ProtectedWriteAfterExternalCode.selector, 3, bytes32(0));
+        vm.expectRevert(err);
         h.program(p, rs);
-        vm.expectRevert(abi.encodeWithSelector(StorageGuard.ProtectedSlotWrite.selector, 3, bytes32(0)));
+        vm.expectRevert(err);
         h.programEach(p, rs);
     }
 
@@ -583,7 +609,7 @@ contract StorageGuardTest is Test {
         for (uint256 each = 0; each < 2; ++each) {
             h.poke(bytes32(uint256(7)), _ownerSlot(address(0xA11CE), 41));
             vm.expectRevert(
-                abi.encodeWithSelector(StorageGuard.MaskedWriteAfterExternalCode.selector, 1, bytes32(uint256(7)))
+                abi.encodeWithSelector(StorageGuard.ProtectedWriteAfterExternalCode.selector, 1, bytes32(uint256(7)))
             );
             h.guardedRun(p, _maskedOwnerRange(), each == 1);
         }
@@ -603,13 +629,13 @@ contract StorageGuardTest is Test {
         return abi.encode(t, a);
     }
 
-    function test_program_everyCodeRunningOpBlindsMaskedRanges() public {
+    function test_program_everyCodeRunningOpBlindsProtectedRanges() public {
         StateUpdateType[4] memory ops =
             [StateUpdateType.CALL, StateUpdateType.CREATE, StateUpdateType.CREATE2, StateUpdateType.NESTED];
         for (uint256 i = 0; i < ops.length; ++i) {
             bytes memory p = _afterOp(ops[i]);
             bytes memory err =
-                abi.encodeWithSelector(StorageGuard.MaskedWriteAfterExternalCode.selector, 1, bytes32(uint256(7)));
+                abi.encodeWithSelector(StorageGuard.ProtectedWriteAfterExternalCode.selector, 1, bytes32(uint256(7)));
             vm.expectRevert(err);
             h.program(p, _maskedOwnerRange());
             vm.expectRevert(err);
@@ -617,7 +643,7 @@ contract StorageGuardTest is Test {
         }
     }
 
-    function test_program_logsDoNotBlindMaskedRanges() public {
+    function test_program_logsDoNotBlindProtectedRanges() public {
         // A LOG runs no code, so the counter bump after it is still judged on its bits and passes.
         bytes memory p = _afterOp(StateUpdateType.LOG0);
         h.program(p, _maskedOwnerRange());
@@ -684,8 +710,8 @@ contract StorageGuardTest is Test {
         }
     }
 
-    /// @dev Naive model: the first write landing in a fully protected range, or in a masked range
-    ///      whose protected bits it changes. A full mask denies even a write of the stored value.
+    /// @dev Naive model: the first write landing in a protected range whose protected bits it
+    ///      changes. A write that leaves them as stored passes, full mask or not.
     function _oracle(StorageGuard.ProtectedRange[] memory rs, bytes32[] memory s, bytes32[] memory v)
         internal
         view
@@ -695,7 +721,6 @@ contract StorageGuardTest is Test {
             uint256 slot = uint256(s[i]);
             for (uint256 j = 0; j < rs.length; ++j) {
                 if (slot < rs[j].start || slot > rs[j].end) continue;
-                if (rs[j].mask == FULL) return (true, i);
                 if ((vm.load(address(h), s[i]) ^ v[i]) & rs[j].mask != 0) return (true, i);
             }
         }
@@ -778,7 +803,7 @@ contract StorageGuardTest is Test {
             if (p.types[i] == StateUpdateType.STORE) {
                 (slot, value) = abi.decode(p.args[i], (bytes32, bytes32));
                 uint256 j = _ppIndex(uint256(slot));
-                if (uint256(slot) == 3) violation = true;
+                if (uint256(slot) == 3 && store[j] != value) violation = true;
                 if (uint256(slot) == 7 && (store[j] ^ value) & OWNER_MASK != 0) violation = true;
                 store[j] = value;
             } else if (p.types[i] == StateUpdateType.CALL) {

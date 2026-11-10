@@ -1,0 +1,303 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+pragma solidity ^0.8.29;
+
+import {Test} from "forge-std/Test.sol";
+import {GasKillerSDK} from "../src/GasKillerSDK.sol";
+import {ISchnorrStakeRegistry} from "../src/interface/ISchnorrStakeRegistry.sol";
+import {TaskSubmission} from "../src/interface/IGasKillerSDKBatch.sol";
+import {StateUpdateType} from "../src/StateChangeHandlerLib.sol";
+import {StorageGuard} from "../src/libraries/StorageGuard.sol";
+
+/// Accepts every signature, so these tests exercise what settlement does with a program the
+/// quorum signed, including a malicious one.
+contract AcceptingRegistry is ISchnorrStakeRegistry {
+    function isValidSignature(bytes32, uint256, address, address[] calldata, uint256) external pure returns (bool) {
+        return true;
+    }
+}
+
+/// A consumer that packs its owner with a counter in slot 0 and protects only the owner bits.
+/// Ownership can change legitimately, through `claimOwnership` by the pending owner.
+contract GuardedVault is GasKillerSDK {
+    address public owner; // slot 0, low 160 bits (protected)
+    uint96 public nonce; // slot 0, high 96 bits (free)
+    uint256 public value; // slot 1
+    address public pendingOwner; // slot 2
+
+    bytes32 internal constant OWNER_BITS = bytes32(uint256(type(uint160).max));
+
+    constructor(address registry, address owner_, address pendingOwner_) {
+        _setSchnorrRegistry(registry);
+        _setAvsAddress(address(0xA75));
+        owner = owner_;
+        pendingOwner = pendingOwner_;
+    }
+
+    function claimOwnership() external {
+        require(msg.sender == pendingOwner, "not pending owner");
+        owner = msg.sender;
+        pendingOwner = address(0);
+    }
+
+    function _protectedRanges() internal pure override returns (StorageGuard.ProtectedRange[] memory r) {
+        r = new StorageGuard.ProtectedRange[](1);
+        r[0] = StorageGuard.ProtectedRange(0, 0, OWNER_BITS);
+    }
+}
+
+/// Claims a vault's ownership when a program CALLs it: a legitimate change to protected storage
+/// made by native code in the middle of a program.
+contract Claimer {
+    function claim(GuardedVault v) external {
+        v.claimOwnership();
+    }
+}
+
+/// A consumer that declares nothing: it still gets the SDK's own protection.
+contract PlainConsumer is GasKillerSDK {
+    constructor(address registry) {
+        _setSchnorrRegistry(registry);
+    }
+}
+
+/// A consumer whose list is malformed in a way chosen by `mode`.
+contract MisconfiguredConsumer is GasKillerSDK {
+    uint256 public mode;
+
+    constructor(address registry, uint256 mode_) {
+        _setSchnorrRegistry(registry);
+        mode = mode_;
+    }
+
+    function _protectedRanges() internal view override returns (StorageGuard.ProtectedRange[] memory r) {
+        r = new StorageGuard.ProtectedRange[](2);
+        if (mode == 0) {
+            // Re-declares the transition counter, which the SDK already protects.
+            r[0] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL);
+            r[1] = StorageGuard.ProtectedRange(
+                0xdebfdfd5a50ad117c10898d68b5ccf0893c6b40d4f443f902e2e7646601bdeaf,
+                0xdebfdfd5a50ad117c10898d68b5ccf0893c6b40d4f443f902e2e7646601bdeaf,
+                StorageGuard.FULL
+            );
+        } else {
+            // Descending.
+            r[0] = StorageGuard.ProtectedRange(5, 5, StorageGuard.FULL);
+            r[1] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL);
+        }
+    }
+}
+
+/// @notice Protected storage enforced by settlement: the SDK's own slots for every consumer, the
+///         consumer's declared slots, exact judgement after a CALL, and fail-closed handling of a
+///         malformed list. Nested settlement is covered in `examples/NestedCycle.t.sol`.
+contract GasKillerSDKProtectedStorageTest is Test {
+    bytes32 constant TRACKER_SLOT = 0xdebfdfd5a50ad117c10898d68b5ccf0893c6b40d4f443f902e2e7646601bdeaf;
+    bytes32 constant SDK_STORAGE = 0x1d6f9f139320a34a32f3b29eb8638270178e831962a74100c9e8b433f21e1200;
+    address constant OWNER = address(0xA11CE);
+    address constant ATTACKER = address(0xBAD);
+    bytes4 constant FN = bytes4(keccak256("work()"));
+
+    AcceptingRegistry registry;
+    Claimer claimer;
+    GuardedVault vault;
+
+    function setUp() public {
+        vm.roll(1000);
+        registry = new AcceptingRegistry();
+        claimer = new Claimer();
+        vault = new GuardedVault(address(registry), OWNER, address(claimer));
+    }
+
+    // ---------------------------------------------------------------- helpers
+
+    struct Program {
+        StateUpdateType[] types;
+        bytes[] args;
+        uint256 n;
+    }
+
+    function _program(uint256 capacity) internal pure returns (Program memory p) {
+        p.types = new StateUpdateType[](capacity);
+        p.args = new bytes[](capacity);
+    }
+
+    function _store(Program memory p, bytes32 slot, bytes32 v) internal pure {
+        p.types[p.n] = StateUpdateType.STORE;
+        p.args[p.n++] = abi.encode(slot, v);
+    }
+
+    function _call(Program memory p, address target, bytes memory data) internal pure {
+        p.types[p.n] = StateUpdateType.CALL;
+        p.args[p.n++] = abi.encode(target, uint256(0), data);
+    }
+
+    function _encode(Program memory p) internal pure returns (bytes memory) {
+        StateUpdateType[] memory t = new StateUpdateType[](p.n);
+        bytes[] memory a = new bytes[](p.n);
+        for (uint256 i = 0; i < p.n; ++i) {
+            (t[i], a[i]) = (p.types[i], p.args[i]);
+        }
+        return abi.encode(t, a);
+    }
+
+    /// @dev A program as gas-analyzer emits it: the counter copy first, then the given ops.
+    function _tracked(GasKillerSDK target, uint256 capacity) internal view returns (Program memory p) {
+        p = _program(capacity + 1);
+        _store(p, TRACKER_SLOT, bytes32(target.stateTransitionCount() + 1));
+    }
+
+    function _settle(GasKillerSDK target, Program memory p) internal {
+        _settle(target, p, "");
+    }
+
+    /// @dev Settles `p`, expecting `revertData` when it is nonempty. Every view call happens
+    ///      before `vm.expectRevert`, which applies to the next external call only.
+    function _settle(GasKillerSDK target, Program memory p, bytes memory revertData) internal {
+        bytes memory updates = _encode(p);
+        uint256 ti = target.stateTransitionCount();
+        bytes32 h = target.getMessageHash(ti, FN, updates);
+        if (revertData.length != 0) vm.expectRevert(revertData);
+        target.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
+    }
+
+    function _ownerSlot(address owner_, uint96 nonce_) internal pure returns (bytes32) {
+        return bytes32((uint256(nonce_) << 160) | uint160(owner_));
+    }
+
+    function _rejection(uint256 index, bytes32 slot) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(StorageGuard.ProtectedSlotWrite.selector, index, slot);
+    }
+
+    // ---------------------------------------------------------------- honest programs
+
+    function test_honestProgramSettles() public {
+        Program memory p = _tracked(vault, 2);
+        _store(p, bytes32(uint256(1)), bytes32(uint256(42))); // value
+        _store(p, bytes32(0), _ownerSlot(OWNER, 5)); // nonce bump, owner kept
+        _settle(vault, p);
+
+        assertEq(vault.value(), 42);
+        assertEq(vault.nonce(), 5);
+        assertEq(vault.owner(), OWNER);
+        assertEq(vault.stateTransitionCount(), 1);
+    }
+
+    function test_counterCopyPassesOnEveryTransition() public {
+        for (uint256 i = 0; i < 3; ++i) {
+            Program memory p = _tracked(vault, 1);
+            _store(p, bytes32(uint256(1)), bytes32(i));
+            _settle(vault, p);
+        }
+        assertEq(vault.stateTransitionCount(), 3);
+    }
+
+    // ---------------------------------------------------------------- the SDK's own slots
+
+    function test_counterRewriteRejected() public {
+        Program memory p = _program(1);
+        _store(p, TRACKER_SLOT, bytes32(uint256(7)));
+        _settle(vault, p, _rejection(0, TRACKER_SLOT));
+    }
+
+    function test_sdkConfigRewriteRejected() public {
+        for (uint256 k = 0; k < 2; ++k) {
+            bytes32 slot = bytes32(uint256(SDK_STORAGE) + k);
+            Program memory p = _tracked(vault, 1);
+            _store(p, slot, bytes32(uint256(uint160(ATTACKER))));
+            _settle(vault, p, _rejection(1, slot));
+        }
+        assertEq(vault.schnorrRegistry(), address(registry));
+        assertEq(vault.avsAddress(), address(0xA75));
+    }
+
+    function test_consumerWithNoRangesStillGetsSdkProtection() public {
+        PlainConsumer plain = new PlainConsumer(address(registry));
+        StorageGuard.ProtectedRange[] memory rs = plain.protectedRanges();
+        assertEq(rs.length, 2);
+
+        Program memory p = _tracked(plain, 1);
+        _store(p, bytes32(uint256(SDK_STORAGE) + 1), bytes32(uint256(uint160(ATTACKER))));
+        _settle(plain, p, _rejection(1, bytes32(uint256(SDK_STORAGE) + 1)));
+    }
+
+    // ---------------------------------------------------------------- the consumer's slots
+
+    function test_ownerRewriteRejected() public {
+        Program memory p = _tracked(vault, 1);
+        _store(p, bytes32(0), _ownerSlot(ATTACKER, 0));
+        _settle(vault, p, _rejection(1, bytes32(0)));
+        assertEq(vault.owner(), OWNER);
+    }
+
+    /// @dev The inline check judges each STORE against storage at that moment. A CALL that
+    ///      legitimately moves ownership is fine; a later STORE that restores the old owner is
+    ///      not; a later STORE that keeps the new owner is.
+    function test_writesAfterALegitimateOwnerChangeAreJudgedExactly() public {
+        bytes memory claim = abi.encodeCall(Claimer.claim, (vault));
+        uint256 snapshot = vm.snapshotState();
+
+        Program memory p = _tracked(vault, 2);
+        _call(p, address(claimer), claim);
+        _store(p, bytes32(0), _ownerSlot(OWNER, 1)); // put the old owner back
+        _settle(vault, p, _rejection(2, bytes32(0)));
+
+        vm.revertToState(snapshot);
+        p = _tracked(vault, 2);
+        _call(p, address(claimer), claim);
+        _store(p, bytes32(0), _ownerSlot(address(claimer), 1)); // nonce bump under the new owner
+        _settle(vault, p);
+        assertEq(vault.owner(), address(claimer));
+        assertEq(vault.nonce(), 1);
+    }
+
+    // ---------------------------------------------------------------- the list itself
+
+    function test_protectedRangesIsTheMergedValidList() public view {
+        StorageGuard.ProtectedRange[] memory rs = vault.protectedRanges();
+        assertEq(rs.length, 3);
+        assertEq(rs[0].start, 0);
+        assertEq(rs[0].end, 0);
+        assertEq(rs[0].mask, bytes32(uint256(type(uint160).max)));
+        assertEq(rs[1].start, uint256(SDK_STORAGE));
+        assertEq(rs[1].end, uint256(SDK_STORAGE) + 1);
+        assertEq(rs[2].start, uint256(TRACKER_SLOT));
+        assertEq(rs[2].end, uint256(TRACKER_SLOT));
+        StorageGuard.validateRanges(rs);
+    }
+
+    function test_malformedConsumerListRevertsSettlement() public {
+        for (uint256 mode = 0; mode < 2; ++mode) {
+            MisconfiguredConsumer bad = new MisconfiguredConsumer(address(registry), mode);
+            Program memory p = _tracked(bad, 0);
+            _settle(bad, p, abi.encodeWithSelector(StorageGuard.InvalidRanges.selector));
+        }
+    }
+
+    // ---------------------------------------------------------------- batches
+
+    function test_batchWithOneMaliciousTransitionRevertsWhole() public {
+        TaskSubmission[] memory subs = new TaskSubmission[](2);
+        for (uint256 i = 0; i < 2; ++i) {
+            Program memory p = _program(2);
+            _store(p, TRACKER_SLOT, bytes32(i + 1));
+            if (i == 0) _store(p, bytes32(uint256(1)), bytes32(uint256(42)));
+            else _store(p, bytes32(0), _ownerSlot(ATTACKER, 0));
+            bytes memory updates = _encode(p);
+            subs[i] = TaskSubmission(
+                vault.getMessageHash(i, FN, updates),
+                uint32(block.number - 1),
+                updates,
+                i,
+                FN,
+                1,
+                address(1),
+                new address[](0),
+                0
+            );
+        }
+        vm.expectRevert(_rejection(1, bytes32(0)));
+        vault.verifyAndUpdateBatch(subs);
+        assertEq(vault.value(), 0, "the honest transition rolled back with the batch");
+        assertEq(vault.owner(), OWNER);
+    }
+}
