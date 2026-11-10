@@ -73,6 +73,18 @@ contract LayoutProbe is GasKillerSDK {
     }
 }
 
+/// A consumer with a tracked function that changes the SDK's config, which the setters' NatSpec
+/// warns can never settle.
+contract TunableConsumer is GasKillerSDK {
+    constructor(address registry) {
+        _setSchnorrRegistry(registry);
+    }
+
+    function setStaleWindow(uint256 blocks) external trackState {
+        _setBlockStaleMeasure(blocks);
+    }
+}
+
 /// A consumer whose list is malformed in a way chosen by `mode`.
 contract MisconfiguredConsumer is GasKillerSDK {
     uint256 public mode;
@@ -280,6 +292,31 @@ contract GasKillerSDKProtectedStorageTest is Test {
         Program memory p = _tracked(plain, 1);
         _store(p, bytes32(uint256(SDK_STORAGE) + 1), bytes32(uint256(uint160(ATTACKER))));
         _settle(plain, p, _rejection(1, bytes32(uint256(SDK_STORAGE) + 1)));
+    }
+
+    /// @notice Pins what the config setters' NatSpec says: a tracked function that changes the
+    ///         config can't settle, and one that stores the current value can. The program is
+    ///         built the way gas-analyzer would: run the function natively, read the slot it
+    ///         wrote, then undo it.
+    function test_trackedFunctionThatChangesConfigCannotSettle() public {
+        TunableConsumer tunable = new TunableConsumer(address(registry));
+        bytes32 slot = bytes32(uint256(SDK_STORAGE) + 1); // registry + blockStaleMeasure, packed
+        bytes32 current = vm.load(address(tunable), slot);
+
+        uint256 snapshot = vm.snapshotState();
+        tunable.setStaleWindow(50);
+        bytes32 written = vm.load(address(tunable), slot);
+        vm.revertToState(snapshot);
+        assertTrue(written != current, "the native call changed the config slot");
+
+        Program memory p = _tracked(tunable, 1);
+        _store(p, slot, written);
+        _settle(tunable, p, _rejection(1, slot));
+
+        p = _tracked(tunable, 1);
+        _store(p, slot, current); // same value: nothing changes
+        _settle(tunable, p);
+        assertEq(tunable.blockStaleMeasure(), 300, "still the default");
     }
 
     // ---------------------------------------------------------------- the consumer's slots

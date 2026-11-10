@@ -374,10 +374,26 @@ abstract contract GasKillerSDK is
         return _getBlockStaleMeasure();
     }
 
+    /// @notice Sets the AVS service manager this contract is scoped to.
+    /// @dev **Do not call from a `trackState` function.** The config struct is protected storage
+    ///      (see `protectedRanges`), so a settled program may not change it. A tracked function
+    ///      that changes this value carries that write in its program, and settlement rejects it
+    ///      every time with `StorageGuard.ProtectedSlotWrite`: the transition can never settle.
+    ///      Call it from the constructor, an initializer, or an admin function that is not
+    ///      `trackState`, all of which run natively and are never settled. Storing the value
+    ///      already there changes nothing and passes.
     function _setAvsAddress(address _avsAddress) internal {
         _sto().avsAddress = _avsAddress;
     }
 
+    /// @notice Sets the registry that verifies quorum signatures for this contract.
+    /// @dev **Do not call from a `trackState` function.** The config struct is protected storage
+    ///      (see `protectedRanges`), so a settled program may not change it. A tracked function
+    ///      that changes this value carries that write in its program, and settlement rejects it
+    ///      every time with `StorageGuard.ProtectedSlotWrite`: the transition can never settle.
+    ///      Call it from the constructor, an initializer, or an admin function that is not
+    ///      `trackState`, all of which run natively and are never settled. Storing the value
+    ///      already there changes nothing and passes.
     function _setSchnorrRegistry(address _registry) internal {
         _sto().registry = ISchnorrStakeRegistry(_registry);
     }
@@ -386,6 +402,15 @@ abstract contract GasKillerSDK is
         return _sto().registry;
     }
 
+    /// @notice Sets how many blocks old a settlement's reference block may be (0 means the
+    ///         default of 300).
+    /// @dev **Do not call from a `trackState` function.** The config struct is protected storage
+    ///      (see `protectedRanges`), so a settled program may not change it. A tracked function
+    ///      that changes this value carries that write in its program, and settlement rejects it
+    ///      every time with `StorageGuard.ProtectedSlotWrite`: the transition can never settle.
+    ///      Call it from the constructor, an initializer, or an admin function that is not
+    ///      `trackState`, all of which run natively and are never settled. Storing the value
+    ///      already there changes nothing and passes.
     function _setBlockStaleMeasure(uint256 _blockStaleMeasure) internal {
         require(_blockStaleMeasure <= type(uint96).max, BlockStaleMeasureOverflow());
         _sto().blockStaleMeasure = uint96(_blockStaleMeasure);
