@@ -1485,8 +1485,8 @@ library StorageGuard {
 ///      Protected storage: every `STORE` a signed program carries is checked, right before it
 ///      executes, against `protectedRanges()`. A write that would change a protected bit reverts
 ///      the transition (`StorageGuard.ProtectedSlotWrite`). The SDK always protects its own
-///      storage: the transition counter and the configuration struct (AVS address, registry,
-///      stale-block window). Consumers add theirs, such as an `Ownable` owner slot, by
+///      storage: the transition counter and the whole ERC-7201 namespace of the configuration
+///      struct (AVS address, registry, stale-block window). Consumers add theirs, such as an `Ownable` owner slot, by
 ///      overriding `_protectedRanges()`. A write that leaves protected bits unchanged passes,
 ///      which is what keeps the counter copy gas-analyzer puts in every program working.
 abstract contract GasKillerSDK is
@@ -1497,6 +1497,11 @@ abstract contract GasKillerSDK is
     IGasKillerSDKBatch,
     IGasKillerValueBound
 {
+    /// @dev Lives in the ERC-7201 namespace at `STORAGE_LOCATION`, and signed programs may not
+    ///      change any slot of that namespace (see `_settlementRanges`). Two rules keep every field
+    ///      covered when the struct grows: it must fit in the namespace's 256 slots, and it must
+    ///      hold only value types. A mapping or dynamic array here would store its entries at
+    ///      keccak-derived slots outside the namespace, where they would be unprotected.
     struct GasKillerSDKStorage {
         address avsAddress;
         ISchnorrStakeRegistry registry;
@@ -1505,6 +1510,11 @@ abstract contract GasKillerSDK is
 
     // keccak256(abi.encode(uint256(keccak256("gaskiller.SchnorrGasKillerSDK.storage")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant STORAGE_LOCATION = 0x1d6f9f139320a34a32f3b29eb8638270178e831962a74100c9e8b433f21e1200;
+
+    /// @dev Last slot of the ERC-7201 namespace that starts at `STORAGE_LOCATION`. The formula
+    ///      clears the low byte, so the namespace is the 256-slot block ending here, whatever the
+    ///      struct's current size.
+    uint256 private constant CONFIG_NAMESPACE_END = uint256(STORAGE_LOCATION) | 0xff;
 
     uint256 private constant DEFAULT_BLOCK_STALE_MEASURE = 300;
 
@@ -1687,14 +1697,16 @@ abstract contract GasKillerSDK is
     ///      protection. The result is validated by the program runner, so a consumer list that is
     ///      unsorted or collides with an SDK range reverts settlement instead of failing open.
     ///
-    ///      The SDK ranges are constants and the config struct sits below the counter, so the
+    ///      The SDK ranges are constants and the config namespace sits below the counter, so the
     ///      merge is three copy passes split at their starts. Consumer entries keep their relative
     ///      order, so a consumer list that descends or overlaps still does after the merge and
     ///      still fails validation. Each pass compares its position with the end before reading.
     function _settlementRanges() internal view returns (StorageGuard.ProtectedRange[] memory out) {
         StorageGuard.ProtectedRange[] memory consumer = _protectedRanges();
+        // The whole namespace, not the struct's current two slots, so a field added later is
+        // covered without anyone remembering to widen this.
         StorageGuard.ProtectedRange memory config =
-            StorageGuard.ProtectedRange(uint256(STORAGE_LOCATION), uint256(STORAGE_LOCATION) + 1, StorageGuard.FULL);
+            StorageGuard.ProtectedRange(uint256(STORAGE_LOCATION), CONFIG_NAMESPACE_END, StorageGuard.FULL);
         StorageGuard.ProtectedRange memory counter = StorageGuard.ProtectedRange(
             uint256(STATE_TRACKER_STORAGE_LOCATION), uint256(STATE_TRACKER_STORAGE_LOCATION), StorageGuard.FULL
         );
@@ -1703,7 +1715,7 @@ abstract contract GasKillerSDK is
             let src := add(consumer, 0x20)
             let end := add(src, shl(5, mload(consumer)))
             let dst := add(out, 0x20)
-            // Consumer entries starting below the config struct, then the config struct.
+            // Consumer entries starting below the config namespace, then the namespace.
             for {} lt(src, end) {} {
                 let r := mload(src)
                 if iszero(lt(mload(r), mload(config))) { break }
