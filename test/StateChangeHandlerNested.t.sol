@@ -4,18 +4,45 @@ pragma solidity ^0.8.29;
 import {Test} from "forge-std/Test.sol";
 import {StateChangeHandlerLib, StateUpdateType, NestedContext} from "../src/StateChangeHandlerLib.sol";
 import {IGasKillerNested} from "../src/interface/IGasKillerNested.sol";
+import {StorageGuard} from "../src/libraries/StorageGuard.sol";
 
 /// Runs programs through the handler with or without a tree context.
 contract HandlerHarness {
+    /// @dev The transition counter, which every real settlement list protects. These programs
+    ///      never write it, so the guard is on without changing what they test.
+    function _ranges() internal pure returns (StorageGuard.ProtectedRange[] memory r) {
+        r = new StorageGuard.ProtectedRange[](1);
+        uint256 tracker = 0xdebfdfd5a50ad117c10898d68b5ccf0893c6b40d4f443f902e2e7646601bdeaf;
+        r[0] = StorageGuard.ProtectedRange(tracker, tracker, StorageGuard.FULL);
+    }
+
     function runPlain(StateUpdateType[] memory types, bytes[] memory args) external payable {
-        StateChangeHandlerLib._runStateUpdates(types, args);
+        StateChangeHandlerLib._runStateUpdates(types, args, _ranges());
+    }
+
+    function runWithRanges(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges
+    ) external {
+        StateChangeHandlerLib._runStateUpdates(types, args, ranges);
+    }
+
+    function runInTreeWithRanges(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges
+    ) external {
+        StateChangeHandlerLib._runStateUpdates(
+            types, args, ranges, NestedContext(bytes32(uint256(1)), new bytes[](0), 0)
+        );
     }
 
     function runInTree(bytes32 root, StateUpdateType[] memory types, bytes[] memory args, bytes[] memory children)
         external
         payable
     {
-        StateChangeHandlerLib._runStateUpdates(types, args, NestedContext(root, children, 0));
+        StateChangeHandlerLib._runStateUpdates(types, args, _ranges(), NestedContext(root, children, 0));
     }
 
     function pendingChild() external view returns (bytes32) {
@@ -73,6 +100,40 @@ contract StateChangeHandlerNestedTest is Test {
         parent = new HandlerHarness();
         child = new RecordingChild();
         vm.deal(address(parent), 10 ether);
+    }
+
+    /// @notice There is no unprotected mode: an empty range list reverts on both entrypoints,
+    ///         even for a program that writes nothing, so a caller who passes one to get past the
+    ///         signature change finds out on the first run.
+    function test_emptyRangeListReverts() public {
+        StorageGuard.ProtectedRange[] memory none = new StorageGuard.ProtectedRange[](0);
+        StateUpdateType[] memory types = new StateUpdateType[](0);
+        bytes[] memory args = new bytes[](0);
+
+        vm.expectRevert(StateChangeHandlerLib.NoProtectedRanges.selector);
+        parent.runWithRanges(types, args, none);
+        vm.expectRevert(StateChangeHandlerLib.NoProtectedRanges.selector);
+        parent.runInTreeWithRanges(types, args, none);
+
+        // One range is enough.
+        StorageGuard.ProtectedRange[] memory one = new StorageGuard.ProtectedRange[](1);
+        one[0] = StorageGuard.ProtectedRange(5, 5, StorageGuard.FULL);
+        parent.runWithRanges(types, args, one);
+        parent.runInTreeWithRanges(types, args, one);
+    }
+
+    /// @notice Pins the documented precondition: the handler doesn't re-validate its list (the SDK
+    ///         validates at deployment), so a direct caller's malformed list fails open. If this
+    ///         starts reverting, update `_run`'s NatSpec.
+    function test_handlerTrustsTheCallerToValidate() public {
+        StorageGuard.ProtectedRange[] memory descending = new StorageGuard.ProtectedRange[](2);
+        descending[0] = StorageGuard.ProtectedRange(9, 9, StorageGuard.FULL);
+        descending[1] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL);
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encode(bytes32(0), bytes32(uint256(1)));
+        parent.runWithRanges(types, args, descending);
+        assertEq(vm.load(address(parent), bytes32(0)), bytes32(uint256(1)), "slot 0 was written");
     }
 
     function test_nestedOutsideTreeReverts() public {

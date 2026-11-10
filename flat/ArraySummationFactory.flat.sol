@@ -161,6 +161,173 @@ contract StateTracker {
     }
 }
 
+// src/libraries/StorageGuard.sol
+
+/// @title StorageGuard
+/// @notice Checks a signed program's `STORE` writes against a denylist of protected storage
+///         ranges, so a quorum-signed update cannot overwrite slots such as an `Ownable` owner,
+///         the `StateTracker` counter, the SDK's own configuration or EIP-1967 proxy slots.
+///         `StateChangeHandlerLib._run` calls `advance` right before every STORE executes.
+/// @dev The list denies rather than allows. Honest writes to mappings and dynamic arrays land on
+///      keccak-derived slots spread across the whole slot space, which an allowlist of ranges
+///      cannot express, while every slot worth protecting is known at compile time. Reaching a
+///      protected slot from an honest write would take a keccak preimage, so a hit means the
+///      program is malicious and the whole program is rejected.
+///
+///      Ranges are inclusive `[start, end]` intervals, strictly ascending and non-overlapping.
+///      **`advance` assumes this and does not check it**: an unsorted or overlapping list fails
+///      open, silently letting writes to protected slots through. Run `validateRanges` once on the
+///      list; `GasKillerSDK` does so in its constructor. Validating on every write would cost
+///      O(k) per write, more than the check itself.
+///
+///      A write to a protected range is rejected when it would change a protected bit, and allowed
+///      when it leaves every protected bit as it is in storage. `mask` is `FULL` to protect the
+///      whole slot. A narrower mask protects only some bits of one packed slot. Allowing writes
+///      that change nothing is what lets the SDK protect its own transition counter: gas-analyzer
+///      copies the counter's new value into every program as a STORE, and `trackState` has already
+///      written that same value by the time the program runs. Deciding costs one SLOAD, paid only
+///      by a write that lands in a range.
+///
+///      `advance` makes one forward pass with a `Cursor`. Writes in ascending slot order walk the
+///      ranges together, and once a write is past the last range every later ascending write costs
+///      one comparison. Before walking, `advance` checks that the cursor's position is valid for
+///      the slot, which holds exactly when no range before it reaches the slot. If it isn't, it
+///      re-seats by binary search (`_lowerBound`) instead of reverting. That happens on a write
+///      below the previous range, and also on a cursor carried over from another list, never
+///      reset, or holding garbage. So neither the order of the writes nor the cursor's contents
+///      can change the verdict, only the gas. Input sorted within each CALL/CREATE-bounded slice,
+///      as gas-analyzer's canonical extraction emits it, pays at most one re-seat per slice.
+///
+///      Writes are judged against storage as it stands when the check runs, which is exact only
+///      right before each write executes. That is how `_run` calls it. Comparison checkers, and a
+///      pre-pass over a whole program with the extra rule a pre-pass needs, live in
+///      `test/utils/StorageGuardVariants.sol`, where the tests check this library against them.
+library StorageGuard {
+    /// @notice One protected interval of storage slots.
+    /// @param start First protected slot (inclusive).
+    /// @param end Last protected slot (inclusive).
+    /// @param mask Protected bits within each slot: `FULL` for every bit, anything narrower only
+    ///        when `start == end`. A write is rejected when it would change a protected bit.
+    struct ProtectedRange {
+        uint256 start;
+        uint256 end;
+        bytes32 mask;
+    }
+
+    /// @notice Merge state carried across consecutive writes. Start from a zeroed one. Its contents
+    ///         only steer the search: `advance` re-checks `next` on every write, so a stale or
+    ///         foreign cursor costs gas but cannot let a write through.
+    /// @param next Where the last write's search ended: a hint for the next write's search.
+    struct Cursor {
+        uint256 next;
+    }
+
+    bytes32 internal constant FULL = bytes32(type(uint256).max);
+
+    /// @notice A write would change protected bits.
+    /// @param index Position of the offending op in its program (or in the caller's own sequence).
+    /// @param slot The protected slot it writes.
+    error ProtectedSlotWrite(uint256 index, bytes32 slot);
+
+    /// @notice The range list is unsorted, overlapping, empty-masked or masks more than one slot.
+    error InvalidRanges();
+
+    /// @notice Reverts with `InvalidRanges` unless `ranges` is a well-formed denylist.
+    /// @dev Per range: `start <= end`, a nonzero mask, a partial mask only on a single slot, and a
+    ///      start above the previous range's end. The first range has no predecessor, so it is
+    ///      checked with `first` set rather than against a sentinel end.
+    function validateRanges(ProtectedRange[] memory ranges) internal pure {
+        bool bad;
+        assembly ("memory-safe") {
+            let it := add(ranges, 0x20)
+            let last := add(it, shl(5, mload(ranges)))
+            let prevEnd := 0
+            for { let first := 1 } lt(it, last) { it := add(it, 0x20) } {
+                let r := mload(it)
+                let start := mload(r)
+                let end := mload(add(r, 0x20))
+                let mask := mload(add(r, 0x40))
+                bad := or(bad, gt(start, end))
+                bad := or(bad, iszero(mask))
+                bad := or(bad, and(iszero(eq(mask, not(0))), iszero(eq(start, end))))
+                bad := or(bad, and(iszero(first), iszero(gt(start, prevEnd))))
+                prevEnd := end
+                first := 0
+            }
+        }
+        if (bad) revert InvalidRanges();
+    }
+
+    // `advance` and `_lowerBound` walk `ranges` in assembly. A `ProtectedRange[] memory` is a
+    // length word followed by one pointer per element, and each element is three words: start,
+    // end, mask. Every loop compares its index with the length before dereferencing it.
+
+    /// @notice Checks one write against `ranges` and moves `c` past it. Reverts with
+    ///         `ProtectedSlotWrite` if the write would change a protected bit.
+    /// @dev `ranges` must have passed `validateRanges`; an unvalidated list can fail open.
+    function advance(Cursor memory c, ProtectedRange[] memory ranges, uint256 index, bytes32 slot, bytes32 value)
+        internal
+        view
+    {
+        uint256 s = uint256(slot);
+        uint256 i = c.next;
+        // The forward walk from `i` is right only if no range before `i` reaches `s`. Ends ascend
+        // strictly in a validated list, so that holds exactly when `i <= len` and (`i == 0` or
+        // `ranges[i-1].end < s`). Otherwise re-seat. `i` is compared with `len` before
+        // `ranges[i-1]` is read.
+        bool reseat;
+        assembly ("memory-safe") {
+            let len := mload(ranges)
+            reseat := gt(i, len)
+            if and(iszero(reseat), gt(i, 0)) {
+                reseat := iszero(lt(mload(add(mload(add(ranges, shl(5, i))), 0x20)), s))
+            }
+        }
+        if (reseat) i = _lowerBound(ranges, s);
+        uint256 hit;
+        assembly ("memory-safe") {
+            let len := mload(ranges)
+            let base := add(ranges, 0x20)
+            for {} lt(i, len) { i := add(i, 1) } {
+                if iszero(lt(mload(add(mload(add(base, shl(5, i))), 0x20)), s)) { break }
+            }
+            mstore(c, i)
+            if lt(i, len) {
+                let r := mload(add(base, shl(5, i)))
+                if iszero(gt(mload(r), s)) { hit := r }
+            }
+        }
+        if (hit != 0) _reject(hit, index, slot, value);
+    }
+
+    /// @dev Index of the first range whose end is at or above `s`, or `ranges.length` when there
+    ///      is none. The library's only binary search. `lo < hi <= length` keeps `mid` in bounds
+    ///      and every sum below 2^256.
+    function _lowerBound(ProtectedRange[] memory ranges, uint256 s) private pure returns (uint256 lo) {
+        assembly ("memory-safe") {
+            let base := add(ranges, 0x20)
+            for { let hi := mload(ranges) } lt(lo, hi) {} {
+                let mid := shr(1, add(lo, hi))
+                switch lt(mload(add(mload(add(base, shl(5, mid))), 0x20)), s)
+                case 1 { lo := add(mid, 1) }
+                default { hi := mid }
+            }
+        }
+    }
+
+    /// @dev `range` points at a range covering `slot`. Reverts unless the write leaves every
+    ///      protected bit as it is in storage.
+    function _reject(uint256 range, uint256 index, bytes32 slot, bytes32 value) private view {
+        bytes32 mask;
+        bytes32 current;
+        assembly ("memory-safe") {
+            mask := mload(add(range, 0x40))
+            current := sload(slot)
+        }
+        if ((current ^ value) & mask != 0) revert ProtectedSlotWrite(index, slot);
+    }
+}
+
 // src/TransitionGuard.sol
 
 /// @title TransitionGuard
@@ -478,14 +645,28 @@ library StateChangeHandlerLib {
 
     /// @dev Runs a program outside any tree, rejecting every NESTED op. Dispatching NESTED
     ///      through a function pointer keeps `_runNested` out of consumers that never nest.
-    function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args) internal {
+    ///      Every STORE is checked against `ranges` (see `_run`). There is no unprotected mode:
+    ///      an empty list reverts with `NoProtectedRanges`. Inside a `GasKillerSDK` contract, pass
+    ///      `_settlementRanges()`, which always includes the SDK's own storage and was validated
+    ///      at deployment. Any other list must pass `StorageGuard.validateRanges` first.
+    function _runStateUpdates(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges
+    ) internal {
         NestedContext memory none;
-        _run(types, args, none, _rejectNested);
+        _run(types, args, ranges, none, _rejectNested);
     }
 
-    /// @dev Runs a program inside the tree in `ctx`.
-    function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args, NestedContext memory ctx) internal {
-        _run(types, args, ctx, _runNested);
+    /// @dev Runs a program inside the tree in `ctx`, checking every STORE against `ranges`. As
+    ///      above, `ranges` may not be empty; pass `_settlementRanges()`.
+    function _runStateUpdates(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges,
+        NestedContext memory ctx
+    ) internal {
+        _run(types, args, ranges, ctx, _runNested);
     }
 
     /// @notice Decodes and executes a series of state updates
@@ -498,23 +679,34 @@ library StateChangeHandlerLib {
     ///      - NESTED: Hand a callee its own signed frame of the tree in `ctx`
     /// @param types Array of StateUpdateType enums indicating the type of each state update operation
     /// @param args Array of ABI-encoded arguments corresponding to each operation type
+    /// @param ranges Protected storage. Must be nonempty (`NoProtectedRanges`), so a caller can't
+    ///        turn protection off by passing an empty list, and **must already have passed
+    ///        `StorageGuard.validateRanges`**: it is not re-validated here, and a malformed list
+    ///        fails open. `GasKillerSDK._settlementRanges()` is validated at deployment. Every
+    ///        STORE is checked right before it executes and reverts with
+    ///        `StorageGuard.ProtectedSlotWrite` if it would change a protected bit. Checking at
+    ///        that moment is exact even after a CALL has legitimately changed protected storage.
     /// @param ctx The tree this program runs inside; a zero root rejects every NESTED op
     /// @param nested The NESTED handler: `_runNested` inside a tree, `_rejectNested` outside one
     /// @dev types and args arrays must be equal length, with args[i] containing the encoded parameters for types[i]
     function _run(
         StateUpdateType[] memory types,
         bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges,
         NestedContext memory ctx,
         function(uint256, bytes memory, NestedContext memory) nested
     ) private {
         uint256 length = types.length;
         require(length == args.length, InvalidArguments());
+        require(ranges.length != 0, NoProtectedRanges());
+        StorageGuard.Cursor memory cursor;
         for (uint256 i = 0; i < length; ++i) {
             StateUpdateType stateUpdateType = types[i];
             bytes memory arg = args[i];
 
             if (stateUpdateType == StateUpdateType.STORE) {
                 (bytes32 slot, bytes32 value) = abi.decode(arg, (bytes32, bytes32));
+                StorageGuard.advance(cursor, ranges, i, slot, value);
                 assembly {
                     sstore(slot, value)
                 }
@@ -684,6 +876,11 @@ library StateChangeHandlerLib {
     /// @notice Thrown when `types` and `args` arrays have different lengths
     error InvalidArguments();
 
+    /// @notice Thrown when a program is run with an empty protected-range list. Every settlement
+    ///         protects at least the SDK's own storage, so an empty list means a caller has
+    ///         switched protection off, usually by accident.
+    error NoProtectedRanges();
+
     /// @notice Thrown when a LOG operation's payload is not a canonical, in-bounds ABI encoding
     error MalformedLogPayload();
 
@@ -743,6 +940,14 @@ library StateChangeHandlerLib {
 ///
 ///      Nested settlement is opt-in through `GasKillerNestedSDK`, so a consumer that never
 ///      nests does not carry its bytecode; a `NESTED` op settled here reverts.
+///
+///      Protected storage: every `STORE` a signed program carries is checked, right before it
+///      executes, against `gasKillerProtectedRanges()`. A write that would change a protected bit reverts
+///      the transition (`StorageGuard.ProtectedSlotWrite`). The SDK always protects its own
+///      storage: the transition counter and the whole ERC-7201 namespace of the configuration
+///      struct (AVS address, registry, stale-block window). Consumers add theirs, such as an `Ownable` owner slot, by
+///      overriding `_protectedRanges()`. A write that leaves protected bits unchanged passes,
+///      which is what keeps the counter copy gas-analyzer puts in every program working.
 abstract contract GasKillerSDK is
     StateTracker,
     TransitionGuard,
@@ -751,6 +956,11 @@ abstract contract GasKillerSDK is
     IGasKillerSDKBatch,
     IGasKillerValueBound
 {
+    /// @dev Lives in the ERC-7201 namespace at `STORAGE_LOCATION`, and signed programs may not
+    ///      change any slot of that namespace (see `_settlementRanges`). Two rules keep every field
+    ///      covered when the struct grows: it must fit in the namespace's 256 slots, and it must
+    ///      hold only value types. A mapping or dynamic array here would store its entries at
+    ///      keccak-derived slots outside the namespace, where they would be unprotected.
     struct GasKillerSDKStorage {
         address avsAddress;
         ISchnorrStakeRegistry registry;
@@ -759,6 +969,11 @@ abstract contract GasKillerSDK is
 
     // keccak256(abi.encode(uint256(keccak256("gaskiller.SchnorrGasKillerSDK.storage")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant STORAGE_LOCATION = 0x1d6f9f139320a34a32f3b29eb8638270178e831962a74100c9e8b433f21e1200;
+
+    /// @dev Last slot of the ERC-7201 namespace that starts at `STORAGE_LOCATION`. The formula
+    ///      clears the low byte, so the namespace is the 256-slot block ending here, whatever the
+    ///      struct's current size.
+    uint256 private constant CONFIG_NAMESPACE_END = uint256(STORAGE_LOCATION) | 0xff;
 
     uint256 private constant DEFAULT_BLOCK_STALE_MEASURE = 300;
 
@@ -770,6 +985,16 @@ abstract contract GasKillerSDK is
     error EmptyBatch();
     error InsufficientBatchValue(uint256 sent, uint256 required);
     error BlockStaleMeasureOverflow();
+
+    /// @notice Validates the protected-range list once, at deployment.
+    /// @dev `_protectedRanges` is `pure`, so the list can't depend on anything a consumer's own
+    ///      constructor sets later, and it can't change after deployment. Settlement therefore
+    ///      relies on this check instead of repeating it. A malformed list reverts here with
+    ///      `StorageGuard.InvalidRanges`. Behind a proxy, the implementation's constructor runs it
+    ///      against the same code the proxy executes.
+    constructor() {
+        StorageGuard.validateRanges(_settlementRanges());
+    }
 
     /// @notice Verify an aggregate Schnorr quorum signature and apply the state updates.
     /// @dev `msg.value` is bound into the digest, so the transition settles only with exactly
@@ -796,7 +1021,7 @@ abstract contract GasKillerSDK is
         address Raddr,
         address[] calldata nonSigners
     ) external payable guardTransition {
-        _verifyAndUpdateOne(
+        _verifyTransition(
             msgHash,
             referenceBlockNumber,
             storageUpdates,
@@ -807,6 +1032,7 @@ abstract contract GasKillerSDK is
             Raddr,
             nonSigners
         );
+        _stateChangeHandler(storageUpdates, _settlementRanges());
     }
 
     /// @notice Verify and apply a sequence of independently signed state transitions in
@@ -844,13 +1070,16 @@ abstract contract GasKillerSDK is
     function verifyAndUpdateBatch(TaskSubmission[] calldata submissions) external payable guardTransition {
         uint256 len = submissions.length;
         require(len != 0, EmptyBatch());
+        // Built once for the whole batch: the list is a compile-time constant, validated at
+        // deployment, so every item would rebuild the same thing.
+        StorageGuard.ProtectedRange[] memory ranges = _settlementRanges();
         uint256 required;
         for (uint256 i = 0; i < len; ++i) {
             TaskSubmission calldata sub = submissions[i];
             // Already settled (e.g. front-run or redelivered) → skip, don't poison the batch.
             if (sub.transitionIndex + 1 <= stateTransitionCount()) continue;
             required += sub.value;
-            _verifyAndUpdateOne(
+            _verifyTransition(
                 sub.msgHash,
                 sub.referenceBlockNumber,
                 sub.storageUpdates,
@@ -861,6 +1090,7 @@ abstract contract GasKillerSDK is
                 sub.Raddr,
                 sub.nonSigners
             );
+            _stateChangeHandler(sub.storageUpdates, ranges);
         }
         require(msg.value >= required, InsufficientBatchValue(msg.value, required));
         if (msg.value > required) {
@@ -871,9 +1101,11 @@ abstract contract GasKillerSDK is
         }
     }
 
-    /// @dev The single-transition settlement path shared by both entrypoints. Callers must
-    ///      hold the `guardTransition` latch.
-    function _verifyAndUpdateOne(
+    /// @dev The checks shared by both entrypoints: bumps the transition counter (`trackState`)
+    ///      and verifies the transition, but doesn't apply it. Callers must hold the
+    ///      `guardTransition` latch and apply the program with `_stateChangeHandler` straight
+    ///      after, which keeps the order the same as before: count, check, run.
+    function _verifyTransition(
         bytes32 msgHash,
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
@@ -891,8 +1123,6 @@ abstract contract GasKillerSDK is
         require(_digest(transitionIndex, targetFunction, storageUpdates, value) == msgHash, InvalidSignature());
 
         _verifyQuorum(msgHash, s, Raddr, nonSigners, referenceBlockNumber);
-
-        _stateChangeHandler(storageUpdates);
     }
 
     function _verifyQuorum(
@@ -906,9 +1136,95 @@ abstract contract GasKillerSDK is
         require(ok, InvalidQuorumSignature());
     }
 
-    function _stateChangeHandler(bytes calldata storageUpdates) internal {
+    /// @dev `ranges` is `_settlementRanges()`, built by the entrypoint once per call.
+    function _stateChangeHandler(bytes calldata storageUpdates, StorageGuard.ProtectedRange[] memory ranges) internal {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        StateChangeHandlerLib._runStateUpdates(types, args);
+        StateChangeHandlerLib._runStateUpdates(types, args, ranges);
+    }
+
+    /// @notice The storage ranges a signed program may not change: the SDK's own slots merged
+    ///         with the consumer's `_protectedRanges()`, in ascending order.
+    /// @dev A compile-time constant of this contract's code, validated once by the constructor
+    ///      (see `constructor`), so it can't be malformed once deployed. Prefixed like no other
+    ///      SDK getter because a generic `protectedRanges` could already exist in a consumer.
+    function gasKillerProtectedRanges() external pure returns (StorageGuard.ProtectedRange[] memory) {
+        return _settlementRanges();
+    }
+
+    /// @notice Storage the consumer wants protected from signed programs. Override to add slots.
+    /// @dev Return inclusive `[start, end]` ranges in strictly ascending order, not overlapping
+    ///      each other or the SDK's own slots (see `gasKillerProtectedRanges`). Use `StorageGuard.FULL` to
+    ///      protect whole slots, or a narrower mask on a single slot to protect part of a packed
+    ///      slot. The function is `pure`, so the list is a constant of the contract's code: it
+    ///      can't read storage or immutables, and the constructor validates it once, so a
+    ///      malformed list makes deployment revert with `StorageGuard.InvalidRanges`. For example:
+    ///      ```
+    ///      function _protectedRanges() internal pure override returns (StorageGuard.ProtectedRange[] memory r) {
+    ///          r = new StorageGuard.ProtectedRange[](1);
+    ///          r[0] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL); // Ownable._owner
+    ///      }
+    ///      ```
+    function _protectedRanges() internal pure virtual returns (StorageGuard.ProtectedRange[] memory) {
+        return new StorageGuard.ProtectedRange[](0);
+    }
+
+    /// @dev The list every program is checked against: the consumer's ranges with the SDK's two
+    ///      fixed ranges merged in by start. Not virtual, so a consumer cannot drop the SDK's own
+    ///      protection. The constructor validates the result once, so a consumer list that is
+    ///      unsorted or collides with an SDK range makes deployment revert instead of failing open.
+    ///      Settlement doesn't re-validate: the list is `pure`, so it is the one that was checked.
+    ///
+    ///      The SDK ranges are constants and the config namespace sits below the counter, so the
+    ///      merge is three copy passes split at their starts. Consumer entries keep their relative
+    ///      order, so a consumer list that descends or overlaps still does after the merge and
+    ///      still fails validation. Each pass compares its position with the end before reading.
+    function _settlementRanges() internal pure returns (StorageGuard.ProtectedRange[] memory out) {
+        StorageGuard.ProtectedRange[] memory consumer = _protectedRanges();
+        // The whole namespace, not the struct's current two slots, so a field added later is
+        // covered without anyone remembering to widen this.
+        StorageGuard.ProtectedRange memory config =
+            StorageGuard.ProtectedRange(uint256(STORAGE_LOCATION), CONFIG_NAMESPACE_END, StorageGuard.FULL);
+        StorageGuard.ProtectedRange memory counter = StorageGuard.ProtectedRange(
+            uint256(STATE_TRACKER_STORAGE_LOCATION), uint256(STATE_TRACKER_STORAGE_LOCATION), StorageGuard.FULL
+        );
+        // Only the array of pointers: `new ProtectedRange[](n)` would also allocate and zero a
+        // struct behind every slot, and the merge below overwrites every pointer.
+        uint256 outLength = consumer.length + 2;
+        assembly ("memory-safe") {
+            out := mload(0x40)
+            mstore(out, outLength)
+            mstore(0x40, add(add(out, 0x20), shl(5, outLength)))
+        }
+        assembly ("memory-safe") {
+            let src := add(consumer, 0x20)
+            let end := add(src, shl(5, mload(consumer)))
+            let dst := add(out, 0x20)
+            // Consumer entries starting below the config namespace, then the namespace.
+            for {} lt(src, end) {} {
+                let r := mload(src)
+                if iszero(lt(mload(r), mload(config))) { break }
+                mstore(dst, r)
+                src := add(src, 0x20)
+                dst := add(dst, 0x20)
+            }
+            mstore(dst, config)
+            dst := add(dst, 0x20)
+            // Entries starting below the counter, then the counter, then the rest.
+            for {} lt(src, end) {} {
+                let r := mload(src)
+                if iszero(lt(mload(r), mload(counter))) { break }
+                mstore(dst, r)
+                src := add(src, 0x20)
+                dst := add(dst, 0x20)
+            }
+            mstore(dst, counter)
+            dst := add(dst, 0x20)
+            for {} lt(src, end) {} {
+                mstore(dst, mload(src))
+                src := add(src, 0x20)
+                dst := add(dst, 0x20)
+            }
+        }
     }
 
     /// @notice Query if a contract implements an interface
@@ -983,10 +1299,26 @@ abstract contract GasKillerSDK is
         return _getBlockStaleMeasure();
     }
 
+    /// @notice Sets the AVS service manager this contract is scoped to.
+    /// @dev **Do not call from a `trackState` function.** The config struct is protected storage
+    ///      (see `gasKillerProtectedRanges`), so a settled program may not change it. A tracked function
+    ///      that changes this value carries that write in its program, and settlement rejects it
+    ///      every time with `StorageGuard.ProtectedSlotWrite`: the transition can never settle.
+    ///      Call it from the constructor, an initializer, or an admin function that is not
+    ///      `trackState`, all of which run natively and are never settled. Storing the value
+    ///      already there changes nothing and passes.
     function _setAvsAddress(address _avsAddress) internal {
         _sto().avsAddress = _avsAddress;
     }
 
+    /// @notice Sets the registry that verifies quorum signatures for this contract.
+    /// @dev **Do not call from a `trackState` function.** The config struct is protected storage
+    ///      (see `gasKillerProtectedRanges`), so a settled program may not change it. A tracked function
+    ///      that changes this value carries that write in its program, and settlement rejects it
+    ///      every time with `StorageGuard.ProtectedSlotWrite`: the transition can never settle.
+    ///      Call it from the constructor, an initializer, or an admin function that is not
+    ///      `trackState`, all of which run natively and are never settled. Storing the value
+    ///      already there changes nothing and passes.
     function _setSchnorrRegistry(address _registry) internal {
         _sto().registry = ISchnorrStakeRegistry(_registry);
     }
@@ -995,6 +1327,15 @@ abstract contract GasKillerSDK is
         return _sto().registry;
     }
 
+    /// @notice Sets how many blocks old a settlement's reference block may be (0 means the
+    ///         default of 300).
+    /// @dev **Do not call from a `trackState` function.** The config struct is protected storage
+    ///      (see `gasKillerProtectedRanges`), so a settled program may not change it. A tracked function
+    ///      that changes this value carries that write in its program, and settlement rejects it
+    ///      every time with `StorageGuard.ProtectedSlotWrite`: the transition can never settle.
+    ///      Call it from the constructor, an initializer, or an admin function that is not
+    ///      `trackState`, all of which run natively and are never settled. Storing the value
+    ///      already there changes nothing and passes.
     function _setBlockStaleMeasure(uint256 _blockStaleMeasure) internal {
         require(_blockStaleMeasure <= type(uint96).max, BlockStaleMeasureOverflow());
         _sto().blockStaleMeasure = uint96(_blockStaleMeasure);

@@ -11,6 +11,7 @@ import {CycleRelay} from "../../src/examples/nested-cycle/CycleRelay.sol";
 import {HashChain} from "../../src/examples/HashChain.sol";
 import {SchnorrSigner} from "../utils/SchnorrSigner.sol";
 import {NestedTreeBuilder} from "../utils/NestedTreeBuilder.sol";
+import {StorageGuard} from "../../src/libraries/StorageGuard.sol";
 
 /// Called from inside the re-entered root frame. Mirrors `CycleRoot.finish`'s native check,
 /// which never runs on replay: the re-entered frame must see the counter `start` already wrote
@@ -102,6 +103,30 @@ contract NestedCycleTest is Test {
         } catch (bytes memory err) {
             // The observer's error arrives wrapped in one RevertingContext per enclosing frame.
             assertTrue(_contains(err, reason), "observer rejected the early final write");
+        }
+    }
+
+    /// Every frame is checked against its own contract's protected storage. A frame whose copy of
+    /// the transition counter disagrees with what `trackState` wrote is rejected, whichever
+    /// contract in the tree it belongs to.
+    function test_framesCannotRewriteTheirTransitionCounter() public {
+        bytes memory reason = abi.encodeWithSelector(StorageGuard.ProtectedSlotWrite.selector, 0, TRACKER_SLOT);
+
+        // Root frame: its first op is the counter copy.
+        NestedTreeBuilder.Frame[] memory frames = _frames(1, false);
+        frames[0].args[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(9)));
+        TreeSubmission memory sub = _toSubmission(frames.build(expiryBlock));
+        vm.expectRevert(reason);
+        root.verifyAndUpdateTree(sub);
+
+        // A callee's frame: the error arrives wrapped in the parent's RevertingContext.
+        frames = _frames(1, false);
+        frames[1].args[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(9)));
+        sub = _toSubmission(frames.build(expiryBlock));
+        try root.verifyAndUpdateTree(sub) {
+            fail("tree settled");
+        } catch (bytes memory err) {
+            assertTrue(_contains(err, reason), "relay frame's counter rewrite rejected");
         }
     }
 
