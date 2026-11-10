@@ -60,6 +60,19 @@ contract PlainConsumer is GasKillerSDK {
     }
 }
 
+/// Fills every field of the SDK's config struct through the SDK's own setters.
+contract LayoutProbe is GasKillerSDK {
+    constructor(address registry) {
+        _setSchnorrRegistry(registry);
+    }
+
+    function fill() external {
+        _setAvsAddress(address(type(uint160).max));
+        _setSchnorrRegistry(address(type(uint160).max));
+        _setBlockStaleMeasure(type(uint96).max);
+    }
+}
+
 /// A consumer whose list is malformed in a way chosen by `mode`.
 contract MisconfiguredConsumer is GasKillerSDK {
     uint256 public mode;
@@ -210,6 +223,55 @@ contract GasKillerSDKProtectedStorageTest is Test {
         assertEq(vault.avsAddress(), address(0xA75));
     }
 
+    /// @notice Every slot of the config struct's namespace is protected, not just the two the
+    ///         struct uses today, so a field added later is covered. The slot just past the
+    ///         namespace is not, so the range is exactly the namespace.
+    function testFuzz_wholeConfigNamespaceIsProtected(uint8 offset) public {
+        bytes32 slot = bytes32(uint256(SDK_STORAGE) + offset);
+        Program memory p = _tracked(vault, 1);
+        _store(p, slot, bytes32(uint256(1)));
+        _settle(vault, p, _rejection(1, slot));
+    }
+
+    function test_slotPastTheConfigNamespaceIsNotProtected() public {
+        Program memory p = _tracked(vault, 1);
+        _store(p, bytes32(uint256(SDK_STORAGE) + 256), bytes32(uint256(1)));
+        _settle(vault, p);
+    }
+
+    /// @notice Ties the protected range to the struct's real layout. Writes every field of the
+    ///         config struct through the SDK's own setters with all-ones values, then requires
+    ///         that every slot it occupies is inside the protected config range. A new field
+    ///         needs its setter added to `LayoutProbe.fill`; the namespace-wide range protects
+    ///         it either way.
+    function test_configStructLayoutIsInsideTheProtectedRange() public {
+        // The location is ERC-7201: its derivation, with the low byte cleared, so the namespace
+        // is the 256-slot block starting there.
+        assertEq(
+            SDK_STORAGE,
+            keccak256(abi.encode(uint256(keccak256("gaskiller.SchnorrGasKillerSDK.storage")) - 1))
+                & ~bytes32(uint256(0xff))
+        );
+
+        LayoutProbe probe = new LayoutProbe(address(registry));
+        StorageGuard.ProtectedRange[] memory rs = probe.protectedRanges();
+        (uint256 start, uint256 end) = (rs[0].start, rs[0].end);
+        assertEq(start, uint256(SDK_STORAGE));
+
+        probe.fill();
+        uint256 used;
+        for (uint256 slot = uint256(SDK_STORAGE); slot < uint256(SDK_STORAGE) + 512; ++slot) {
+            if (vm.load(address(probe), bytes32(slot)) == bytes32(0)) continue;
+            assertLe(slot, end, "a config field lives outside the protected range");
+            ++used;
+        }
+        // Tripwire, not protection: when the struct grows, add the new field's setter to
+        // `LayoutProbe.fill` and update this count, so the check above covers it.
+        assertEq(used, 2, "config struct changed: add its setter to LayoutProbe.fill and update this count");
+        // Nothing below the namespace either.
+        assertEq(vm.load(address(probe), bytes32(uint256(SDK_STORAGE) - 1)), bytes32(0));
+    }
+
     function test_consumerWithNoRangesStillGetsSdkProtection() public {
         PlainConsumer plain = new PlainConsumer(address(registry));
         StorageGuard.ProtectedRange[] memory rs = plain.protectedRanges();
@@ -259,7 +321,7 @@ contract GasKillerSDKProtectedStorageTest is Test {
         assertEq(rs[0].end, 0);
         assertEq(rs[0].mask, bytes32(uint256(type(uint160).max)));
         assertEq(rs[1].start, uint256(SDK_STORAGE));
-        assertEq(rs[1].end, uint256(SDK_STORAGE) + 1);
+        assertEq(rs[1].end, uint256(SDK_STORAGE) + 255, "the config struct's whole ERC-7201 namespace");
         assertEq(rs[2].start, uint256(TRACKER_SLOT));
         assertEq(rs[2].end, uint256(TRACKER_SLOT));
         StorageGuard.validateRanges(rs);

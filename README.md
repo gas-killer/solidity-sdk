@@ -218,8 +218,9 @@ list of protected storage ranges, right before the write executes, and reverts t
 
 **On by default.** Every consumer protects the SDK's own storage with no code: the transition
 counter, and the configuration struct holding the AVS address, the registry and the stale-block
-window. A tracked function that natively changes any of those settings can't be settled through
-Gas Killer.
+window. The protected range for the struct is its whole 256-slot ERC-7201 namespace, not just the
+slots it uses today, so a field added to the struct later is covered automatically. A tracked
+function that natively changes any of those settings can't be settled through Gas Killer.
 
 **Adding your own slots.** Override `_protectedRanges()` and return a constant list of inclusive
 `[start, end]` ranges in ascending order, for example the owner slot of an `Ownable` that is your
