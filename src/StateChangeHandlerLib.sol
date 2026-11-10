@@ -62,7 +62,8 @@ library StateChangeHandlerLib {
     ///      through a function pointer keeps `_runNested` out of consumers that never nest.
     ///      Every STORE is checked against `ranges` (see `_run`). There is no unprotected mode:
     ///      an empty list reverts with `NoProtectedRanges`. Inside a `GasKillerSDK` contract, pass
-    ///      `_settlementRanges()`, which always includes the SDK's own storage.
+    ///      `_settlementRanges()`, which always includes the SDK's own storage and was validated
+    ///      at deployment. Any other list must pass `StorageGuard.validateRanges` first.
     function _runStateUpdates(
         StateUpdateType[] memory types,
         bytes[] memory args,
@@ -94,7 +95,9 @@ library StateChangeHandlerLib {
     /// @param types Array of StateUpdateType enums indicating the type of each state update operation
     /// @param args Array of ABI-encoded arguments corresponding to each operation type
     /// @param ranges Protected storage. Must be nonempty (`NoProtectedRanges`), so a caller can't
-    ///        turn protection off by passing an empty list. Validated once (`StorageGuard.InvalidRanges`); then every
+    ///        turn protection off by passing an empty list, and **must already have passed
+    ///        `StorageGuard.validateRanges`**: it is not re-validated here, and a malformed list
+    ///        fails open. `GasKillerSDK._settlementRanges()` is validated at deployment. Every
     ///        STORE is checked right before it executes and reverts with
     ///        `StorageGuard.ProtectedSlotWrite` if it would change a protected bit. Checking at
     ///        that moment is exact even after a CALL has legitimately changed protected storage.
@@ -111,7 +114,6 @@ library StateChangeHandlerLib {
         uint256 length = types.length;
         require(length == args.length, InvalidArguments());
         require(ranges.length != 0, NoProtectedRanges());
-        StorageGuard.validateRanges(ranges);
         StorageGuard.Cursor memory cursor;
         for (uint256 i = 0; i < length; ++i) {
             StateUpdateType stateUpdateType = types[i];

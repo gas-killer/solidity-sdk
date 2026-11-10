@@ -85,30 +85,25 @@ contract TunableConsumer is GasKillerSDK {
     }
 }
 
-/// A consumer whose list is malformed in a way chosen by `mode`.
-contract MisconfiguredConsumer is GasKillerSDK {
-    uint256 public mode;
-
-    constructor(address registry, uint256 mode_) {
-        _setSchnorrRegistry(registry);
-        mode = mode_;
-    }
-
-    function _protectedRanges() internal view override returns (StorageGuard.ProtectedRange[] memory r) {
+/// Re-declares the transition counter, which the SDK already protects.
+contract OverlappingConsumer is GasKillerSDK {
+    function _protectedRanges() internal pure override returns (StorageGuard.ProtectedRange[] memory r) {
         r = new StorageGuard.ProtectedRange[](2);
-        if (mode == 0) {
-            // Re-declares the transition counter, which the SDK already protects.
-            r[0] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL);
-            r[1] = StorageGuard.ProtectedRange(
-                0xdebfdfd5a50ad117c10898d68b5ccf0893c6b40d4f443f902e2e7646601bdeaf,
-                0xdebfdfd5a50ad117c10898d68b5ccf0893c6b40d4f443f902e2e7646601bdeaf,
-                StorageGuard.FULL
-            );
-        } else {
-            // Descending.
-            r[0] = StorageGuard.ProtectedRange(5, 5, StorageGuard.FULL);
-            r[1] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL);
-        }
+        r[0] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL);
+        r[1] = StorageGuard.ProtectedRange(
+            0xdebfdfd5a50ad117c10898d68b5ccf0893c6b40d4f443f902e2e7646601bdeaf,
+            0xdebfdfd5a50ad117c10898d68b5ccf0893c6b40d4f443f902e2e7646601bdeaf,
+            StorageGuard.FULL
+        );
+    }
+}
+
+/// Declares its ranges in descending order.
+contract DescendingConsumer is GasKillerSDK {
+    function _protectedRanges() internal pure override returns (StorageGuard.ProtectedRange[] memory r) {
+        r = new StorageGuard.ProtectedRange[](2);
+        r[0] = StorageGuard.ProtectedRange(5, 5, StorageGuard.FULL);
+        r[1] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL);
     }
 }
 
@@ -364,12 +359,12 @@ contract GasKillerSDKProtectedStorageTest is Test {
         StorageGuard.validateRanges(rs);
     }
 
-    function test_malformedConsumerListRevertsSettlement() public {
-        for (uint256 mode = 0; mode < 2; ++mode) {
-            MisconfiguredConsumer bad = new MisconfiguredConsumer(address(registry), mode);
-            Program memory p = _tracked(bad, 0);
-            _settle(bad, p, abi.encodeWithSelector(StorageGuard.InvalidRanges.selector));
-        }
+    /// @notice A malformed list fails at deployment, before any settlement can be attempted.
+    function test_malformedConsumerListRevertsDeployment() public {
+        vm.expectRevert(StorageGuard.InvalidRanges.selector);
+        new OverlappingConsumer();
+        vm.expectRevert(StorageGuard.InvalidRanges.selector);
+        new DescendingConsumer();
     }
 
     // ---------------------------------------------------------------- batches

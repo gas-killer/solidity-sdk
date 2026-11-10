@@ -122,6 +122,20 @@ contract StateChangeHandlerNestedTest is Test {
         parent.runInTreeWithRanges(types, args, one);
     }
 
+    /// @notice Pins the documented precondition: the handler doesn't re-validate its list (the SDK
+    ///         validates at deployment), so a direct caller's malformed list fails open. If this
+    ///         starts reverting, update `_run`'s NatSpec.
+    function test_handlerTrustsTheCallerToValidate() public {
+        StorageGuard.ProtectedRange[] memory descending = new StorageGuard.ProtectedRange[](2);
+        descending[0] = StorageGuard.ProtectedRange(9, 9, StorageGuard.FULL);
+        descending[1] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL);
+        StateUpdateType[] memory types = new StateUpdateType[](1);
+        bytes[] memory args = new bytes[](1);
+        args[0] = abi.encode(bytes32(0), bytes32(uint256(1)));
+        parent.runWithRanges(types, args, descending);
+        assertEq(vm.load(address(parent), bytes32(0)), bytes32(uint256(1)), "slot 0 was written");
+    }
+
     function test_nestedOutsideTreeReverts() public {
         (StateUpdateType[] memory types, bytes[] memory args) = _program(1, 0);
         vm.expectRevert(StateChangeHandlerLib.NestedOutsideTree.selector);

@@ -86,6 +86,16 @@ abstract contract GasKillerSDK is
     error InsufficientBatchValue(uint256 sent, uint256 required);
     error BlockStaleMeasureOverflow();
 
+    /// @notice Validates the protected-range list once, at deployment.
+    /// @dev `_protectedRanges` is `pure`, so the list can't depend on anything a consumer's own
+    ///      constructor sets later, and it can't change after deployment. Settlement therefore
+    ///      relies on this check instead of repeating it. A malformed list reverts here with
+    ///      `StorageGuard.InvalidRanges`. Behind a proxy, the implementation's constructor runs it
+    ///      against the same code the proxy executes.
+    constructor() {
+        StorageGuard.validateRanges(_settlementRanges());
+    }
+
     /// @notice Verify an aggregate Schnorr quorum signature and apply the state updates.
     /// @dev `msg.value` is bound into the digest, so the transition settles only with exactly
     ///      the value the task was analyzed with: a deposit cannot be credited without its ETH,
@@ -111,7 +121,7 @@ abstract contract GasKillerSDK is
         address Raddr,
         address[] calldata nonSigners
     ) external payable guardTransition {
-        _verifyAndUpdateOne(
+        _verifyTransition(
             msgHash,
             referenceBlockNumber,
             storageUpdates,
@@ -122,6 +132,7 @@ abstract contract GasKillerSDK is
             Raddr,
             nonSigners
         );
+        _stateChangeHandler(storageUpdates, _settlementRanges());
     }
 
     /// @notice Verify and apply a sequence of independently signed state transitions in
@@ -159,13 +170,16 @@ abstract contract GasKillerSDK is
     function verifyAndUpdateBatch(TaskSubmission[] calldata submissions) external payable guardTransition {
         uint256 len = submissions.length;
         require(len != 0, EmptyBatch());
+        // Built once for the whole batch: the list is a compile-time constant, validated at
+        // deployment, so every item would rebuild the same thing.
+        StorageGuard.ProtectedRange[] memory ranges = _settlementRanges();
         uint256 required;
         for (uint256 i = 0; i < len; ++i) {
             TaskSubmission calldata sub = submissions[i];
             // Already settled (e.g. front-run or redelivered) → skip, don't poison the batch.
             if (sub.transitionIndex + 1 <= stateTransitionCount()) continue;
             required += sub.value;
-            _verifyAndUpdateOne(
+            _verifyTransition(
                 sub.msgHash,
                 sub.referenceBlockNumber,
                 sub.storageUpdates,
@@ -176,6 +190,7 @@ abstract contract GasKillerSDK is
                 sub.Raddr,
                 sub.nonSigners
             );
+            _stateChangeHandler(sub.storageUpdates, ranges);
         }
         require(msg.value >= required, InsufficientBatchValue(msg.value, required));
         if (msg.value > required) {
@@ -186,9 +201,11 @@ abstract contract GasKillerSDK is
         }
     }
 
-    /// @dev The single-transition settlement path shared by both entrypoints. Callers must
-    ///      hold the `guardTransition` latch.
-    function _verifyAndUpdateOne(
+    /// @dev The checks shared by both entrypoints: bumps the transition counter (`trackState`)
+    ///      and verifies the transition, but doesn't apply it. Callers must hold the
+    ///      `guardTransition` latch and apply the program with `_stateChangeHandler` straight
+    ///      after, which keeps the order the same as before: count, check, run.
+    function _verifyTransition(
         bytes32 msgHash,
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
@@ -206,8 +223,6 @@ abstract contract GasKillerSDK is
         require(_digest(transitionIndex, targetFunction, storageUpdates, value) == msgHash, InvalidSignature());
 
         _verifyQuorum(msgHash, s, Raddr, nonSigners, referenceBlockNumber);
-
-        _stateChangeHandler(storageUpdates);
     }
 
     function _verifyQuorum(
@@ -221,18 +236,17 @@ abstract contract GasKillerSDK is
         require(ok, InvalidQuorumSignature());
     }
 
-    function _stateChangeHandler(bytes calldata storageUpdates) internal {
+    /// @dev `ranges` is `_settlementRanges()`, built by the entrypoint once per call.
+    function _stateChangeHandler(bytes calldata storageUpdates, StorageGuard.ProtectedRange[] memory ranges) internal {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        StateChangeHandlerLib._runStateUpdates(types, args, _settlementRanges());
+        StateChangeHandlerLib._runStateUpdates(types, args, ranges);
     }
 
     /// @notice The storage ranges a signed program may not change: the SDK's own slots merged
     ///         with the consumer's `_protectedRanges()`, in ascending order.
-    /// @dev Settlement validates this list before running a program and reverts with
-    ///      `StorageGuard.InvalidRanges` if it is malformed, for example when a consumer range is
-    ///      unsorted or overlaps one of the SDK's slots. Call `StorageGuard.validateRanges` on it
-    ///      in your tests so that a bad list fails there rather than at the first settlement.
-    function protectedRanges() external view returns (StorageGuard.ProtectedRange[] memory) {
+    /// @dev A compile-time constant of this contract's code, validated once by the constructor
+    ///      (see `constructor`), so it can't be malformed once deployed.
+    function protectedRanges() external pure returns (StorageGuard.ProtectedRange[] memory) {
         return _settlementRanges();
     }
 
@@ -240,27 +254,30 @@ abstract contract GasKillerSDK is
     /// @dev Return inclusive `[start, end]` ranges in strictly ascending order, not overlapping
     ///      each other or the SDK's own slots (see `protectedRanges`). Use `StorageGuard.FULL` to
     ///      protect whole slots, or a narrower mask on a single slot to protect part of a packed
-    ///      slot. Built on every settlement, so return a constant list:
+    ///      slot. The function is `pure`, so the list is a constant of the contract's code: it
+    ///      can't read storage or immutables, and the constructor validates it once, so a
+    ///      malformed list makes deployment revert with `StorageGuard.InvalidRanges`. For example:
     ///      ```
     ///      function _protectedRanges() internal pure override returns (StorageGuard.ProtectedRange[] memory r) {
     ///          r = new StorageGuard.ProtectedRange[](1);
     ///          r[0] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL); // Ownable._owner
     ///      }
     ///      ```
-    function _protectedRanges() internal view virtual returns (StorageGuard.ProtectedRange[] memory) {
+    function _protectedRanges() internal pure virtual returns (StorageGuard.ProtectedRange[] memory) {
         return new StorageGuard.ProtectedRange[](0);
     }
 
     /// @dev The list every program is checked against: the consumer's ranges with the SDK's two
     ///      fixed ranges merged in by start. Not virtual, so a consumer cannot drop the SDK's own
-    ///      protection. The result is validated by the program runner, so a consumer list that is
-    ///      unsorted or collides with an SDK range reverts settlement instead of failing open.
+    ///      protection. The constructor validates the result once, so a consumer list that is
+    ///      unsorted or collides with an SDK range makes deployment revert instead of failing open.
+    ///      Settlement doesn't re-validate: the list is `pure`, so it is the one that was checked.
     ///
     ///      The SDK ranges are constants and the config namespace sits below the counter, so the
     ///      merge is three copy passes split at their starts. Consumer entries keep their relative
     ///      order, so a consumer list that descends or overlaps still does after the merge and
     ///      still fails validation. Each pass compares its position with the end before reading.
-    function _settlementRanges() internal view returns (StorageGuard.ProtectedRange[] memory out) {
+    function _settlementRanges() internal pure returns (StorageGuard.ProtectedRange[] memory out) {
         StorageGuard.ProtectedRange[] memory consumer = _protectedRanges();
         // The whole namespace, not the struct's current two slots, so a field added later is
         // covered without anyone remembering to widen this.
@@ -269,7 +286,14 @@ abstract contract GasKillerSDK is
         StorageGuard.ProtectedRange memory counter = StorageGuard.ProtectedRange(
             uint256(STATE_TRACKER_STORAGE_LOCATION), uint256(STATE_TRACKER_STORAGE_LOCATION), StorageGuard.FULL
         );
-        out = new StorageGuard.ProtectedRange[](consumer.length + 2);
+        // Only the array of pointers: `new ProtectedRange[](n)` would also allocate and zero a
+        // struct behind every slot, and the merge below overwrites every pointer.
+        uint256 outLength = consumer.length + 2;
+        assembly ("memory-safe") {
+            out := mload(0x40)
+            mstore(out, outLength)
+            mstore(0x40, add(add(out, 0x20), shl(5, outLength)))
+        }
         assembly ("memory-safe") {
             let src := add(consumer, 0x20)
             let end := add(src, shl(5, mload(consumer)))

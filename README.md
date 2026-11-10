@@ -222,9 +222,10 @@ window. The protected range for the struct is its whole 256-slot ERC-7201 namesp
 slots it uses today, so a field added to the struct later is covered automatically. A tracked
 function that natively changes any of those settings can't be settled through Gas Killer.
 
-**Adding your own slots.** Override `_protectedRanges()` and return a constant list of inclusive
+**Adding your own slots.** Override `_protectedRanges()` and return a list of inclusive
 `[start, end]` ranges in ascending order, for example the owner slot of an `Ownable` that is your
-contract's first state variable:
+contract's first state variable. The function is `pure`, so the list is a constant of your contract's
+code: it can't be computed from storage, immutables or constructor arguments.
 
 ```solidity
 import {StorageGuard} from "gas-killer-sdk/libraries/StorageGuard.sol";
@@ -237,11 +238,11 @@ function _protectedRanges() internal pure override returns (StorageGuard.Protect
 
 - `StorageGuard.FULL` protects every bit of every slot in the range. A narrower mask, on a single
   slot, protects part of a packed slot, such as an owner address that shares its slot with a counter.
-- The SDK merges your list with its own and validates the result on every settlement. A list that is
-  unsorted, overlapping, or collides with an SDK slot makes settlement revert (`InvalidRanges`) rather
-  than silently protect less. `protectedRanges()` returns the merged list: check it with
-  `StorageGuard.validateRanges` in your tests, so a bad list fails there and not at the first
-  settlement.
+- The SDK merges your list with its own and validates the result once, in its constructor. A list
+  that is unsorted, overlapping, or collides with an SDK slot makes deployment revert
+  (`InvalidRanges`), so it can't reach a live settlement. Because the list is `pure`, the one that was
+  validated is the one every settlement uses, and settlement doesn't re-check it.
+  `protectedRanges()` returns the merged list.
 - Nested settlement checks each frame against its own contract's list, and a batch reverts as a whole
   if any of its transitions writes protected storage.
 
@@ -265,12 +266,14 @@ for a consumer declaring k ranges.
 
 | n `STORE`s | Before | k = 0 | k = 1 | k = 4 |
 |---|---|---|---|---|
-| 1 | 53,513 | +3,056 (+5.7%) | +3,873 (+7.2%) | +6,418 (+12%) |
-| 8 | 215,998 | +5,454 (+2.5%) | +6,274 (+2.9%) | +8,828 (+4.1%) |
-| 32 | 773,283 | +13,676 (+1.8%) | +14,507 (+1.9%) | +17,092 (+2.2%) |
+| 1 | 53,513 | +2,100 (+3.9%) | +2,569 (+4.8%) | +4,102 (+7.7%) |
+| 8 | 215,998 | +4,496 (+2.1%) | +4,967 (+2.3%) | +6,506 (+3.0%) |
+| 32 | 773,283 | +12,713 (+1.6%) | +13,201 (+1.7%) | +14,773 (+1.9%) |
 
-That is about 340 gas per `STORE`, about 820 per declared range per settlement (building, merging and
-validating the list), and about 2,800 fixed.
+That is about 340 gas per `STORE`, about 500 per declared range per settlement call (building and
+merging the list), and about 1,750 fixed. A `verifyAndUpdateBatch` builds the list once for all of
+its items: a 20-item batch of single-`STORE` transitions costs +33,762 (+5.2%) at k = 0 and +45,337
+(+6.9%) at k = 4, about 1,700–2,300 per item.
 
 ### Design and measurements
 

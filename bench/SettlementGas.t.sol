@@ -5,6 +5,7 @@ import {Test, console2} from "forge-std/Test.sol";
 import {GasKillerSDK} from "../src/GasKillerSDK.sol";
 import {ISchnorrStakeRegistry} from "../src/interface/ISchnorrStakeRegistry.sol";
 import {StateUpdateType} from "../src/StateChangeHandlerLib.sol";
+import {TaskSubmission} from "../src/interface/IGasKillerSDKBatch.sol";
 import {StorageGuard} from "../src/libraries/StorageGuard.sol";
 
 contract AcceptAll is ISchnorrStakeRegistry {
@@ -13,45 +14,53 @@ contract AcceptAll is ISchnorrStakeRegistry {
     }
 }
 
-/// Declares `k` (0, 1 or 4) single-slot ranges at 1000, 1010, ..., above every slot the programs
-/// write.
-contract RangedConsumer is GasKillerSDK {
-    uint256 public immutable k;
-
-    constructor(address registry, uint256 k_) {
+/// A consumer declaring no ranges of its own; the SDK's two still apply.
+contract RangedConsumer0 is GasKillerSDK {
+    constructor(address registry) {
         _setSchnorrRegistry(registry);
-        k = k_;
     }
+}
 
-    /// @dev Literal lists, as a consumer would write them.
-    function _protectedRanges() internal view override returns (StorageGuard.ProtectedRange[] memory r) {
-        r = new StorageGuard.ProtectedRange[](k);
-        if (k >= 1) r[0] = StorageGuard.ProtectedRange(1000, 1000, StorageGuard.FULL);
-        if (k >= 4) {
-            r[1] = StorageGuard.ProtectedRange(1010, 1010, StorageGuard.FULL);
-            r[2] = StorageGuard.ProtectedRange(1020, 1020, StorageGuard.FULL);
-            r[3] = StorageGuard.ProtectedRange(1030, 1030, StorageGuard.FULL);
-        }
+/// One single-slot range, above every slot the programs write.
+contract RangedConsumer1 is RangedConsumer0 {
+    constructor(address registry) RangedConsumer0(registry) {}
+
+    function _protectedRanges() internal pure override returns (StorageGuard.ProtectedRange[] memory r) {
+        r = new StorageGuard.ProtectedRange[](1);
+        r[0] = StorageGuard.ProtectedRange(1000, 1000, StorageGuard.FULL);
+    }
+}
+
+/// Four single-slot ranges, above every slot the programs write.
+contract RangedConsumer4 is RangedConsumer0 {
+    constructor(address registry) RangedConsumer0(registry) {}
+
+    function _protectedRanges() internal pure override returns (StorageGuard.ProtectedRange[] memory r) {
+        r = new StorageGuard.ProtectedRange[](4);
+        r[0] = StorageGuard.ProtectedRange(1000, 1000, StorageGuard.FULL);
+        r[1] = StorageGuard.ProtectedRange(1010, 1010, StorageGuard.FULL);
+        r[2] = StorageGuard.ProtectedRange(1020, 1020, StorageGuard.FULL);
+        r[3] = StorageGuard.ProtectedRange(1030, 1030, StorageGuard.FULL);
     }
 }
 
 /// @notice Whole-settlement gas through `verifyAndUpdate` with protected storage enforced: the
 ///         SDK's two ranges plus k consumer ranges, for a program of the counter copy plus n
-///         STOREs to fresh slots. Each figure is one settlement, measured as a delta around the
+///         STOREs to fresh slots, and for a 20-item batch. Each figure is one settlement, measured as a delta around the
 ///         call, so it includes the cold zero-to-nonzero writes (22,100 each).
 ///
 ///         Reference measurements (forge 1.5.1, solc 0.8.33, cancun). "Before" is the same
-///         settlement on the tree before protected storage was wired in (49f5c5c), where k has
-///         no effect:
+///         settlement on the tree before protected storage was wired in (49f5c5c):
 ///
 ///           n   | before  | k = 0           | k = 1           | k = 4
-///           1   |  53,513 | +3,056 (+5.7%)  | +3,873 (+7.2%)  | +6,418 (+12%)
-///           8   | 215,998 | +5,454 (+2.5%)  | +6,274 (+2.9%)  | +8,828 (+4.1%)
-///           32  | 773,283 | +13,676 (+1.8%) | +14,507 (+1.9%) | +17,092 (+2.2%)
+///           1   |  53,513 | +2,100 (+3.9%)  | +2,569 (+4.8%)  | +4,102 (+7.7%)
+///           8   | 215,998 | +4,496 (+2.1%)  | +4,967 (+2.3%)  | +6,506 (+3.0%)
+///           32  | 773,283 | +12,713 (+1.6%) | +13,201 (+1.7%) | +14,773 (+1.9%)
 ///
-///         About 340 gas per STORE for the check, about 820 per declared range per settlement
-///         (building, merging and validating the list), and about 2,800 fixed (the SDK's two
-///         ranges, and the counter copy's SLOAD to confirm it changes nothing).
+///         About 340 gas per STORE for the check, about 500 per declared range per call
+///         (building and merging the list; it is validated at deployment, not here), and about
+///         1,750 fixed. `test_batch`: a 20-item batch builds the list once, +33,762 (+5.2%) at
+///         k = 0 and +45,337 (+6.9%) at k = 4 over 653,750 / 657,603.
 ///
 ///         Run with `FOUNDRY_PROFILE=gas forge test -vv`.
 contract SettlementGasTest is Test {
@@ -63,6 +72,12 @@ contract SettlementGasTest is Test {
     function setUp() public {
         vm.roll(1000);
         registry = new AcceptAll();
+    }
+
+    function _consumer(uint256 k) internal returns (GasKillerSDK) {
+        if (k == 1) return new RangedConsumer1(address(registry));
+        if (k == 4) return new RangedConsumer4(address(registry));
+        return new RangedConsumer0(address(registry));
     }
 
     function _updates(uint256 n) internal pure returns (bytes memory) {
@@ -89,15 +104,52 @@ contract SettlementGasTest is Test {
         uint256[3] memory ns = [uint256(1), 8, 32];
         uint256[3] memory ks = [uint256(0), 1, 4];
         // One untimed settlement first, so no measured call pays the registry's cold access.
-        _settleGas(new RangedConsumer(address(registry), 0), 1);
+        _settleGas(_consumer(0), 1);
         console2.log("settlement gas, counter copy + n fresh STOREs");
         console2.log("n    k  |  gas");
         for (uint256 ni = 0; ni < 3; ++ni) {
             for (uint256 ki = 0; ki < 3; ++ki) {
-                RangedConsumer c = new RangedConsumer(address(registry), ks[ki]);
+                GasKillerSDK c = _consumer(ks[ki]);
                 uint256 used = _settleGas(c, ns[ni]);
                 console2.log(string.concat(vm.toString(ns[ni]), "  ", vm.toString(ks[ki]), "  |  ", vm.toString(used)));
             }
+        }
+    }
+
+    /// @dev A batch of `items` transitions, each the counter copy plus one fresh STORE.
+    function _batchGas(GasKillerSDK target, uint256 items) internal returns (uint256 used) {
+        TaskSubmission[] memory subs = new TaskSubmission[](items);
+        for (uint256 i = 0; i < items; ++i) {
+            StateUpdateType[] memory t = new StateUpdateType[](2);
+            bytes[] memory a = new bytes[](2);
+            a[0] = abi.encode(TRACKER_SLOT, bytes32(i + 1));
+            a[1] = abi.encode(bytes32(i + 1), bytes32(i + 1));
+            bytes memory updates = abi.encode(t, a);
+            subs[i] = TaskSubmission(
+                target.getMessageHash(i, FN, updates),
+                uint32(block.number - 1),
+                updates,
+                i,
+                FN,
+                1,
+                address(1),
+                new address[](0),
+                0
+            );
+        }
+        uint256 g = gasleft();
+        target.verifyAndUpdateBatch(subs);
+        used = g - gasleft();
+    }
+
+    function test_batch() public {
+        uint256[3] memory ks = [uint256(0), 1, 4];
+        _settleGas(_consumer(0), 1); // warm the registry
+        console2.log("batch gas, 20 items, each the counter copy + 1 fresh STORE");
+        console2.log("k  |  gas");
+        for (uint256 ki = 0; ki < 3; ++ki) {
+            uint256 used = _batchGas(_consumer(ks[ki]), 20);
+            console2.log(string.concat(vm.toString(ks[ki]), "  |  ", vm.toString(used)));
         }
     }
 }
