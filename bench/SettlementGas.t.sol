@@ -45,9 +45,9 @@ contract RangedConsumer is GasKillerSDK {
 ///         no effect:
 ///
 ///           n   | before  | k = 0           | k = 1           | k = 4
-///           1   |  53,513 | +3,107 (+5.8%)  | +3,924 (+7.3%)  | +6,469 (+12%)
-///           8   | 215,998 | +5,505 (+2.5%)  | +6,325 (+2.9%)  | +8,879 (+4.1%)
-///           32  | 773,283 | +13,727 (+1.8%) | +14,558 (+1.9%) | +17,143 (+2.2%)
+///           1   |  53,513 | +3,056 (+5.7%)  | +3,873 (+7.2%)  | +6,418 (+12%)
+///           8   | 215,998 | +5,454 (+2.5%)  | +6,274 (+2.9%)  | +8,828 (+4.1%)
+///           32  | 773,283 | +13,676 (+1.8%) | +14,507 (+1.9%) | +17,092 (+2.2%)
 ///
 ///         About 340 gas per STORE for the check, about 820 per declared range per settlement
 ///         (building, merging and validating the list), and about 2,800 fixed (the SDK's two

@@ -8,17 +8,41 @@ import {StorageGuard} from "../src/libraries/StorageGuard.sol";
 
 /// Runs programs through the handler with or without a tree context.
 contract HandlerHarness {
+    /// @dev The transition counter, which every real settlement list protects. These programs
+    ///      never write it, so the guard is on without changing what they test.
+    function _ranges() internal pure returns (StorageGuard.ProtectedRange[] memory r) {
+        r = new StorageGuard.ProtectedRange[](1);
+        uint256 tracker = 0xdebfdfd5a50ad117c10898d68b5ccf0893c6b40d4f443f902e2e7646601bdeaf;
+        r[0] = StorageGuard.ProtectedRange(tracker, tracker, StorageGuard.FULL);
+    }
+
     function runPlain(StateUpdateType[] memory types, bytes[] memory args) external payable {
-        StateChangeHandlerLib._runStateUpdates(types, args, new StorageGuard.ProtectedRange[](0));
+        StateChangeHandlerLib._runStateUpdates(types, args, _ranges());
+    }
+
+    function runWithRanges(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges
+    ) external {
+        StateChangeHandlerLib._runStateUpdates(types, args, ranges);
+    }
+
+    function runInTreeWithRanges(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges
+    ) external {
+        StateChangeHandlerLib._runStateUpdates(
+            types, args, ranges, NestedContext(bytes32(uint256(1)), new bytes[](0), 0)
+        );
     }
 
     function runInTree(bytes32 root, StateUpdateType[] memory types, bytes[] memory args, bytes[] memory children)
         external
         payable
     {
-        StateChangeHandlerLib._runStateUpdates(
-            types, args, new StorageGuard.ProtectedRange[](0), NestedContext(root, children, 0)
-        );
+        StateChangeHandlerLib._runStateUpdates(types, args, _ranges(), NestedContext(root, children, 0));
     }
 
     function pendingChild() external view returns (bytes32) {
@@ -76,6 +100,26 @@ contract StateChangeHandlerNestedTest is Test {
         parent = new HandlerHarness();
         child = new RecordingChild();
         vm.deal(address(parent), 10 ether);
+    }
+
+    /// @notice There is no unprotected mode: an empty range list reverts on both entrypoints,
+    ///         even for a program that writes nothing, so a caller who passes one to get past the
+    ///         signature change finds out on the first run.
+    function test_emptyRangeListReverts() public {
+        StorageGuard.ProtectedRange[] memory none = new StorageGuard.ProtectedRange[](0);
+        StateUpdateType[] memory types = new StateUpdateType[](0);
+        bytes[] memory args = new bytes[](0);
+
+        vm.expectRevert(StateChangeHandlerLib.NoProtectedRanges.selector);
+        parent.runWithRanges(types, args, none);
+        vm.expectRevert(StateChangeHandlerLib.NoProtectedRanges.selector);
+        parent.runInTreeWithRanges(types, args, none);
+
+        // One range is enough.
+        StorageGuard.ProtectedRange[] memory one = new StorageGuard.ProtectedRange[](1);
+        one[0] = StorageGuard.ProtectedRange(5, 5, StorageGuard.FULL);
+        parent.runWithRanges(types, args, one);
+        parent.runInTreeWithRanges(types, args, one);
     }
 
     function test_nestedOutsideTreeReverts() public {

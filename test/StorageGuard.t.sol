@@ -94,15 +94,15 @@ contract StorageGuardHarness is StateTracker {
         StorageGuard.checkProgram(types, args, ranges);
     }
 
-    /// @dev The shape a pre-pass integration would take: check the whole program, then run it.
+    /// @dev A pre-pass followed by the real, inline-guarded run over the same list.
     function guardedRun(bytes memory storageUpdates, StorageGuard.ProtectedRange[] memory ranges, bool perWrite)
         external
     {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
         if (perWrite) StorageGuardVariants.checkProgramEach(types, args, ranges);
         else StorageGuard.checkProgram(types, args, ranges);
-        // Unguarded run: this harness tests the pre-pass on its own.
-        StateChangeHandlerLib._runStateUpdates(types, args, new StorageGuard.ProtectedRange[](0));
+        // The real settlement run, guarded inline by the same list.
+        StateChangeHandlerLib._runStateUpdates(types, args, ranges);
     }
 
     function programEach(bytes memory storageUpdates, StorageGuard.ProtectedRange[] memory ranges) external view {
