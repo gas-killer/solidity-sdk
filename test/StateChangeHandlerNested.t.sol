@@ -102,9 +102,10 @@ contract StateChangeHandlerNestedTest is Test {
         vm.deal(address(parent), 10 ether);
     }
 
-    /// @notice There is no unprotected mode: an empty range list reverts on both entrypoints,
-    ///         even for a program that writes nothing, so a caller who passes one to get past the
-    ///         signature change finds out on the first run.
+    /// @notice An empty range list never means unprotected: it reverts on both guarded
+    ///         entrypoints, even for a program that writes nothing, so a caller who passes one to
+    ///         get past the signature change finds out on the first run. The only unchecked path
+    ///         is the explicitly named `_runStateUpdatesUnguarded`.
     function test_emptyRangeListReverts() public {
         StorageGuard.ProtectedRange[] memory none = new StorageGuard.ProtectedRange[](0);
         StateUpdateType[] memory types = new StateUpdateType[](0);

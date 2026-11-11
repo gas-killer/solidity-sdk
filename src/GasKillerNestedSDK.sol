@@ -97,7 +97,8 @@ abstract contract GasKillerNestedSDK is GasKillerSDK, IGasKillerNested {
 
     function _runProgram(bytes memory storageUpdates, NestedContext memory ctx) private {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        StateChangeHandlerLib._runStateUpdates(types, args, _settlementRanges(), ctx);
+        if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args, ctx);
+        else StateChangeHandlerLib._runStateUpdates(types, args, _settlementRanges(), ctx);
     }
 
     /// @dev Nested settlement reverts against a registry without `ISchnorrApprovalRegistry`, and

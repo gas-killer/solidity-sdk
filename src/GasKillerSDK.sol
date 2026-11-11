@@ -132,7 +132,9 @@ abstract contract GasKillerSDK is
             Raddr,
             nonSigners
         );
-        _stateChangeHandler(storageUpdates, _settlementRanges());
+        StorageGuard.ProtectedRange[] memory ranges;
+        if (!_unsafeDisableStorageGuard()) ranges = _settlementRanges();
+        _stateChangeHandler(storageUpdates, ranges);
     }
 
     /// @notice Verify and apply a sequence of independently signed state transitions in
@@ -171,8 +173,10 @@ abstract contract GasKillerSDK is
         uint256 len = submissions.length;
         require(len != 0, EmptyBatch());
         // Built once for the whole batch: the list is a compile-time constant, validated at
-        // deployment, so every item would rebuild the same thing.
-        StorageGuard.ProtectedRange[] memory ranges = _settlementRanges();
+        // deployment, so every item would rebuild the same thing. Not built at all when the
+        // consumer has opted out.
+        StorageGuard.ProtectedRange[] memory ranges;
+        if (!_unsafeDisableStorageGuard()) ranges = _settlementRanges();
         uint256 required;
         for (uint256 i = 0; i < len; ++i) {
             TaskSubmission calldata sub = submissions[i];
@@ -236,19 +240,42 @@ abstract contract GasKillerSDK is
         require(ok, InvalidQuorumSignature());
     }
 
-    /// @dev `ranges` is `_settlementRanges()`, built by the entrypoint once per call.
+    /// @dev `ranges` is `_settlementRanges()`, built by the entrypoint once per call, and is
+    ///      ignored when the consumer has opted out (`_unsafeDisableStorageGuard`).
     function _stateChangeHandler(bytes calldata storageUpdates, StorageGuard.ProtectedRange[] memory ranges) internal {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        StateChangeHandlerLib._runStateUpdates(types, args, ranges);
+        if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args);
+        else StateChangeHandlerLib._runStateUpdates(types, args, ranges);
     }
 
     /// @notice The storage ranges a signed program may not change: the SDK's own slots merged
-    ///         with the consumer's `_protectedRanges()`, in ascending order.
+    ///         with the consumer's `_protectedRanges()`, in ascending order. Empty when the
+    ///         consumer has opted out of the check (`_unsafeDisableStorageGuard`); a guarded
+    ///         contract always lists at least the SDK's two ranges.
     /// @dev A compile-time constant of this contract's code, validated once by the constructor
     ///      (see `constructor`), so it can't be malformed once deployed. Prefixed like no other
     ///      SDK getter because a generic `protectedRanges` could already exist in a consumer.
-    function gasKillerProtectedRanges() external pure returns (StorageGuard.ProtectedRange[] memory) {
-        return _settlementRanges();
+    function gasKillerProtectedRanges() external pure returns (StorageGuard.ProtectedRange[] memory ranges) {
+        if (!_unsafeDisableStorageGuard()) ranges = _settlementRanges();
+    }
+
+    /// @notice **Unsafe.** Override to return true to stop settlement checking signed STOREs
+    ///         against protected storage. Saves about 1,400 gas per call, 500 more per declared
+    ///         range, and about 280 per STORE (see `bench/SettlementGas.t.sol`).
+    /// @dev With the check off, a quorum that signs a malicious program can overwrite any slot of
+    ///      this contract: an owner, an upgrade slot, the transition counter (replaying or
+    ///      skipping transitions) and the SDK's own configuration, including the registry that
+    ///      verifies signatures. Opt out only if the contract's correctness already rests on
+    ///      trusting the quorum completely, for example one with no owner, no upgrade path and
+    ///      nothing else a rewrite could take over.
+    ///
+    ///      The function is `pure`, so the choice is fixed in the contract's code: no signed
+    ///      program, owner or setter can switch it at runtime. It applies to `verifyAndUpdate`,
+    ///      `verifyAndUpdateBatch` and nested settlement alike, and `gasKillerProtectedRanges`
+    ///      returns an empty list so off-chain tooling can see it. `_protectedRanges` is ignored
+    ///      while it returns true, though the constructor still validates it.
+    function _unsafeDisableStorageGuard() internal pure virtual returns (bool) {
+        return false;
     }
 
     /// @notice Storage the consumer wants protected from signed programs. Override to add slots.

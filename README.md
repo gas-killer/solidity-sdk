@@ -220,7 +220,8 @@ list of protected storage ranges, right before the write executes, and reverts t
 counter, and the configuration struct holding the AVS address, the registry and the stale-block
 window. The protected range for the struct is its whole 256-slot ERC-7201 namespace, not just the
 slots it uses today, so a field added to the struct later is covered automatically. A tracked
-function that natively changes any of those settings can't be settled through Gas Killer.
+function that natively changes any of those settings can't be settled through Gas Killer. Protection
+stays on unless the contract's code opts out (see **Opting out** below).
 
 **Adding your own slots.** Override `_protectedRanges()` and return a list of inclusive
 `[start, end]` ranges in ascending order, for example the owner slot of an `Ownable` that is your
@@ -260,20 +261,40 @@ because `msg.sender` is the contract, but it can reach functions that trust `msg
 address(this)`, and it can spend what the contract holds elsewhere (tokens, approvals, ETH).
 Restricting calls is [#109](https://github.com/gas-killer/solidity-sdk/issues/109).
 
+**Opting out.** A contract whose security already rests on trusting the quorum completely, for
+example one with no owner, no upgrade path and nothing else a rewrite could take over, can turn the
+check off:
+
+```solidity
+function _unsafeDisableStorageGuard() internal pure override returns (bool) {
+    return true;
+}
+```
+
+With it off, a quorum that signs a malicious program can overwrite any slot: an owner, an upgrade
+slot, the transition counter, and the SDK's configuration, including the registry that verifies
+signatures. The hook is `pure`, so the choice is fixed in the contract's code at deployment. No
+signed program, owner or setter can switch it at runtime. It applies to single, batched and nested
+settlement, and an opted-out contract's `gasKillerProtectedRanges()` returns an empty list, so
+tooling can tell; a protected one always lists at least the SDK's two ranges. Nested settlement
+checks each frame against its own contract, so one opted-out contract in a tree doesn't weaken the
+others.
+
 **Cost at settlement.** Measured through `verifyAndUpdate` (`bench/SettlementGas.t.sol`), against the
 same settlement before protection was wired in: a program of the counter copy plus n fresh `STORE`s,
-for a consumer declaring k ranges.
+for a consumer declaring k ranges, or opted out.
 
-| n `STORE`s | Before | k = 0 | k = 1 | k = 4 |
-|---|---|---|---|---|
-| 1 | 53,513 | +2,011 (+3.8%) | +2,488 (+4.6%) | +4,044 (+7.6%) |
-| 8 | 215,998 | +4,393 (+2.0%) | +4,872 (+2.3%) | +6,435 (+3.0%) |
-| 32 | 773,283 | +12,560 (+1.6%) | +13,057 (+1.7%) | +14,653 (+1.9%) |
+| n `STORE`s | Before | Opted out | k = 0 | k = 1 | k = 4 |
+|---|---|---|---|---|---|
+| 1 | 53,513 | +135 (+0.3%) | +2,075 (+3.9%) | +2,552 (+4.8%) | +4,108 (+7.7%) |
+| 8 | 215,998 | +541 (+0.3%) | +4,499 (+2.1%) | +4,978 (+2.3%) | +6,541 (+3.0%) |
+| 32 | 773,288 | +1,933 (+0.2%) | +12,820 (+1.7%) | +13,317 (+1.7%) | +14,912 (+1.9%) |
 
-That is about 340 gas per `STORE`, about 500 per declared range per settlement call (building and
-merging the list), and about 1,670 fixed. A `verifyAndUpdateBatch` builds the list once for all of
-its items: a 20-item batch of single-`STORE` transitions costs +33,729 (+5.2%) at k = 0 and +45,942
-(+7.0%) at k = 4, about 1,700–2,300 per item.
+Protected, that is about 340 gas per `STORE` (the counter copy included), about 500 per declared
+range per settlement call (building and merging the list), and about 1,400 fixed. Opted out, about
+60 per `STORE` remains, the cost of skipping the check. A `verifyAndUpdateBatch` builds the list
+once for all of its items. A 20-item batch of single-`STORE` transitions, over 653,659 before,
+costs +34,750 (+5.3%) at k = 0, +46,963 (+7.2%) at k = 4, and +8,323 (+1.3%) opted out.
 
 ### Design and measurements
 

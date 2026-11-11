@@ -29,6 +29,15 @@ contract CycleObserver {
     }
 }
 
+/// A relay opted out of protected storage, to check that nested settlement honours the hook.
+contract UnguardedCycleRelay is CycleRelay {
+    constructor(address avs, address registry) CycleRelay(avs, registry) {}
+
+    function _unsafeDisableStorageGuard() internal pure override returns (bool) {
+        return true;
+    }
+}
+
 /// @notice End to end: `CycleRoot.start` → `CycleRelay.relay` → `CycleRoot.finish` settled as
 ///         one tree in which the root contract applies two frames, the second while the first
 ///         is still applying.
@@ -128,6 +137,28 @@ contract NestedCycleTest is Test {
         } catch (bytes memory err) {
             assertTrue(_contains(err, reason), "relay frame's counter rewrite rejected");
         }
+    }
+
+    /// The hook applies per contract: an opted-out relay's frame may rewrite the relay's counter,
+    /// while the guarded root's frames are still checked.
+    function test_optedOutCalleeFrameIsNotChecked() public {
+        relay = new UnguardedCycleRelay(address(0xA75), address(registry));
+        root = new CycleRoot(address(0xA75), address(registry), relay, ROUNDS);
+        relay.setRoot(root);
+        uint256 snapshot = vm.snapshotState();
+
+        NestedTreeBuilder.Frame[] memory frames = _frames(1, false);
+        frames[1].args[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(9)));
+        root.verifyAndUpdateTree(_toSubmission(frames.build(expiryBlock)));
+        assertEq(relay.stateTransitionCount(), 9);
+        assertEq(relay.relayed(), 1);
+
+        vm.revertToState(snapshot);
+        frames = _frames(1, false);
+        frames[0].args[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(9)));
+        TreeSubmission memory sub = _toSubmission(frames.build(expiryBlock));
+        vm.expectRevert(abi.encodeWithSelector(StorageGuard.ProtectedSlotWrite.selector, 0, TRACKER_SLOT));
+        root.verifyAndUpdateTree(sub);
     }
 
     function _contains(bytes memory haystack, bytes memory needle) private pure returns (bool) {

@@ -53,6 +53,18 @@ contract Claimer {
     }
 }
 
+/// The same vault, opted out of the check: its declared owner range and the SDK's own ranges no
+/// longer apply.
+contract UnguardedVault is GuardedVault {
+    constructor(address registry, address owner_, address pendingOwner_)
+        GuardedVault(registry, owner_, pendingOwner_)
+    {}
+
+    function _unsafeDisableStorageGuard() internal pure override returns (bool) {
+        return true;
+    }
+}
+
 /// A consumer that declares nothing: it still gets the SDK's own protection.
 contract PlainConsumer is GasKillerSDK {
     constructor(address registry) {
@@ -365,6 +377,58 @@ contract GasKillerSDKProtectedStorageTest is Test {
         new OverlappingConsumer();
         vm.expectRevert(StorageGuard.InvalidRanges.selector);
         new DescendingConsumer();
+    }
+
+    // ---------------------------------------------------------------- opting out
+
+    /// @notice Protection is on unless the consumer overrides the hook: every guarded contract
+    ///         reports the SDK's ranges, and the rejection tests above run against the default.
+    function test_guardIsOnByDefault() public {
+        assertEq(new PlainConsumer(address(registry)).gasKillerProtectedRanges().length, 2);
+        assertEq(vault.gasKillerProtectedRanges().length, 3);
+    }
+
+    /// @notice An opted-out consumer applies writes the guard would reject: its owner, the SDK's
+    ///         config and the transition counter. Its reported list is empty.
+    function test_optedOutConsumerAppliesProtectedWrites() public {
+        UnguardedVault open = new UnguardedVault(address(registry), OWNER, address(claimer));
+        assertEq(open.gasKillerProtectedRanges().length, 0);
+
+        Program memory p = _tracked(open, 3);
+        _store(p, bytes32(0), _ownerSlot(ATTACKER, 0));
+        _store(p, SDK_STORAGE, bytes32(uint256(uint160(ATTACKER)))); // avsAddress
+        _store(p, TRACKER_SLOT, bytes32(uint256(7)));
+        _settle(open, p);
+
+        assertEq(open.owner(), ATTACKER);
+        assertEq(open.avsAddress(), ATTACKER);
+        assertEq(open.stateTransitionCount(), 7);
+    }
+
+    function test_optedOutConsumerAppliesProtectedWritesInABatch() public {
+        UnguardedVault open = new UnguardedVault(address(registry), OWNER, address(claimer));
+        TaskSubmission[] memory subs = new TaskSubmission[](2);
+        for (uint256 i = 0; i < 2; ++i) {
+            Program memory p = _program(2);
+            _store(p, TRACKER_SLOT, bytes32(i + 1));
+            _store(p, bytes32(0), _ownerSlot(ATTACKER, uint96(i)));
+            bytes memory updates = _encode(p);
+            subs[i] = TaskSubmission(
+                open.getMessageHash(i, FN, updates),
+                uint32(block.number - 1),
+                updates,
+                i,
+                FN,
+                1,
+                address(1),
+                new address[](0),
+                0
+            );
+        }
+        open.verifyAndUpdateBatch(subs);
+        assertEq(open.owner(), ATTACKER);
+        assertEq(open.nonce(), 1);
+        assertEq(open.stateTransitionCount(), 2);
     }
 
     // ---------------------------------------------------------------- batches

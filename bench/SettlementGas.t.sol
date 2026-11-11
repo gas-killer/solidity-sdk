@@ -44,23 +44,33 @@ contract RangedConsumer4 is RangedConsumer0 {
     }
 }
 
-/// @notice Whole-settlement gas through `verifyAndUpdate` with protected storage enforced: the
-///         SDK's two ranges plus k consumer ranges, for a program of the counter copy plus n
-///         STOREs to fresh slots, and for a 20-item batch. Each figure is one settlement, measured as a delta around the
-///         call, so it includes the cold zero-to-nonzero writes (22,100 each).
+/// Opted out of the check (`_unsafeDisableStorageGuard`).
+contract UnguardedConsumer is RangedConsumer0 {
+    constructor(address registry) RangedConsumer0(registry) {}
+
+    function _unsafeDisableStorageGuard() internal pure override returns (bool) {
+        return true;
+    }
+}
+
+/// @notice Whole-settlement gas through `verifyAndUpdate`: the SDK's two ranges plus k consumer
+///         ranges, or opted out of the check, for a program of the counter copy plus n STOREs to
+///         fresh slots, and for a 20-item batch. Each figure is one settlement, measured as a
+///         delta around the call, so it includes the cold zero-to-nonzero writes (22,100 each).
 ///
 ///         Reference measurements (forge 1.5.1, solc 0.8.33, cancun). "Before" is the same
 ///         settlement on the tree before protected storage was wired in (49f5c5c):
 ///
-///           n   | before  | k = 0           | k = 1           | k = 4
-///           1   |  53,513 | +2,011 (+3.8%)  | +2,488 (+4.6%)  | +4,044 (+7.6%)
-///           8   | 215,998 | +4,393 (+2.0%)  | +4,872 (+2.3%)  | +6,435 (+3.0%)
-///           32  | 773,283 | +12,560 (+1.6%) | +13,057 (+1.7%) | +14,653 (+1.9%)
+///           n   | before  | opted out    | k = 0           | k = 1           | k = 4
+///           1   |  53,513 | +135 (+0.3%) | +2,075 (+3.9%)  | +2,552 (+4.8%)  | +4,108 (+7.7%)
+///           8   | 215,998 | +541 (+0.3%) | +4,499 (+2.1%)  | +4,978 (+2.3%)  | +6,541 (+3.0%)
+///           32  | 773,288 | +1,933 (+0.2%) | +12,820 (+1.7%) | +13,317 (+1.7%) | +14,912 (+1.9%)
 ///
-///         About 340 gas per STORE for the check, about 500 per declared range per call
-///         (building and merging the list; it is validated at deployment, not here), and about
-///         1,670 fixed. `test_batch`: a 20-item batch builds the list once, +33,729 (+5.2%) at
-///         k = 0 and +45,942 (+7.0%) at k = 4 over 653,750 / 657,603.
+///         Protected: about 340 gas per STORE, about 500 per declared range per call (building
+///         and merging the list; it is validated at deployment, not here), and about 1,400 fixed.
+///         Opted out: about 60 per STORE. `test_batch`: a 20-item batch builds the list once,
+///         +34,750 (+5.3%) at k = 0, +46,963 (+7.2%) at k = 4 and +8,323 (+1.3%) opted out, over
+///         653,659.
 ///
 ///         Run with `FOUNDRY_PROFILE=gas forge test -vv`.
 contract SettlementGasTest is Test {
@@ -74,7 +84,11 @@ contract SettlementGasTest is Test {
         registry = new AcceptAll();
     }
 
+    /// The `k` that stands for an opted-out consumer.
+    uint256 constant OFF = type(uint256).max;
+
     function _consumer(uint256 k) internal returns (GasKillerSDK) {
+        if (k == OFF) return new UnguardedConsumer(address(registry));
         if (k == 1) return new RangedConsumer1(address(registry));
         if (k == 4) return new RangedConsumer4(address(registry));
         return new RangedConsumer0(address(registry));
@@ -100,24 +114,32 @@ contract SettlementGasTest is Test {
         used = g - gasleft();
     }
 
+    function _k(uint256 k) internal pure returns (string memory) {
+        return k == OFF ? "off" : vm.toString(k);
+    }
+
     function test_settlement() public {
         uint256[3] memory ns = [uint256(1), 8, 32];
-        uint256[3] memory ks = [uint256(0), 1, 4];
+        uint256[4] memory ks = [OFF, 0, 1, 4];
         // One untimed settlement first, so no measured call pays the registry's cold access.
         _settleGas(_consumer(0), 1);
         console2.log("settlement gas, counter copy + n fresh STOREs");
         console2.log("n    k  |  gas");
         for (uint256 ni = 0; ni < 3; ++ni) {
-            for (uint256 ki = 0; ki < 3; ++ki) {
+            for (uint256 ki = 0; ki < 4; ++ki) {
                 GasKillerSDK c = _consumer(ks[ki]);
                 uint256 used = _settleGas(c, ns[ni]);
-                console2.log(string.concat(vm.toString(ns[ni]), "  ", vm.toString(ks[ki]), "  |  ", vm.toString(used)));
+                console2.log(string.concat(vm.toString(ns[ni]), "  ", _k(ks[ki]), "  |  ", vm.toString(used)));
             }
         }
     }
 
-    /// @dev A batch of `items` transitions, each the counter copy plus one fresh STORE.
-    function _batchGas(GasKillerSDK target, uint256 items) internal returns (uint256 used) {
+    /// @dev A batch of `items` transitions, each the counter copy plus one fresh STORE, against a
+    ///      fresh consumer with `k` ranges. External and called through `this`, so each batch
+    ///      starts from fresh memory: in one frame the submissions of earlier rows would make
+    ///      later rows pay for memory expansion, about 1,900 gas at 20 items.
+    function batchGas(uint256 k, uint256 items) external returns (uint256 used) {
+        GasKillerSDK target = _consumer(k);
         TaskSubmission[] memory subs = new TaskSubmission[](items);
         for (uint256 i = 0; i < items; ++i) {
             StateUpdateType[] memory t = new StateUpdateType[](2);
@@ -143,13 +165,13 @@ contract SettlementGasTest is Test {
     }
 
     function test_batch() public {
-        uint256[3] memory ks = [uint256(0), 1, 4];
+        uint256[4] memory ks = [OFF, 0, 1, 4];
         _settleGas(_consumer(0), 1); // warm the registry
         console2.log("batch gas, 20 items, each the counter copy + 1 fresh STORE");
         console2.log("k  |  gas");
-        for (uint256 ki = 0; ki < 3; ++ki) {
-            uint256 used = _batchGas(_consumer(ks[ki]), 20);
-            console2.log(string.concat(vm.toString(ks[ki]), "  |  ", vm.toString(used)));
+        for (uint256 ki = 0; ki < 4; ++ki) {
+            uint256 used = this.batchGas(ks[ki], 20);
+            console2.log(string.concat(_k(ks[ki]), "  |  ", vm.toString(used)));
         }
     }
 }
