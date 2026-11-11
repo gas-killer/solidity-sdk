@@ -123,9 +123,10 @@ library StateChangeHandlerLib {
     ///      - NESTED: Hand a callee its own signed frame of the tree in `ctx`
     /// @param types Array of StateUpdateType enums indicating the type of each state update operation
     /// @param args Array of ABI-encoded arguments corresponding to each operation type
-    /// @param ranges Protected storage, nonempty: the guarded entry points reject an empty list
-    ///        (`NoProtectedRanges`), so a caller can't turn protection off by passing one. It
-    ///        **must already have passed
+    /// @param ranges Protected storage. Nonempty when `check` is `StorageGuard.advance`: the
+    ///        guarded entry points reject an empty list (`NoProtectedRanges`), so a caller can't
+    ///        turn protection off by passing one. Empty from `_runStateUpdatesUnguarded`, whose
+    ///        `_skipCheck` never reads it. When checked, it **must already have passed
     ///        `StorageGuard.validateRanges`**: it is not re-validated here, and a malformed list
     ///        fails open. `GasKillerSDK._settlementRanges()` is validated at deployment. Every
     ///        STORE is checked right before it executes and reverts with

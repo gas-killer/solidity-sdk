@@ -61,9 +61,9 @@ contract UnguardedConsumer is RangedConsumer0 {
 ///         Reference measurements (forge 1.5.1, solc 0.8.33, cancun). "Before" is the same
 ///         settlement on the tree before protected storage was wired in (49f5c5c):
 ///
-///           n   | before  | opted out    | k = 0           | k = 1           | k = 4
-///           1   |  53,513 | +135 (+0.3%) | +2,075 (+3.9%)  | +2,552 (+4.8%)  | +4,108 (+7.7%)
-///           8   | 215,998 | +541 (+0.3%) | +4,499 (+2.1%)  | +4,978 (+2.3%)  | +6,541 (+3.0%)
+///           n   | before  | opted out      | k = 0           | k = 1           | k = 4
+///           1   |  53,513 | +135 (+0.3%)   | +2,075 (+3.9%)  | +2,552 (+4.8%)  | +4,108 (+7.7%)
+///           8   | 215,998 | +541 (+0.3%)   | +4,499 (+2.1%)  | +4,978 (+2.3%)  | +6,541 (+3.0%)
 ///           32  | 773,288 | +1,933 (+0.2%) | +12,820 (+1.7%) | +13,317 (+1.7%) | +14,912 (+1.9%)
 ///
 ///         Protected: about 340 gas per STORE, about 500 per declared range per call (building

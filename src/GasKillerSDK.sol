@@ -132,6 +132,8 @@ abstract contract GasKillerSDK is
             Raddr,
             nonSigners
         );
+        // Inline rather than a helper: a helper isn't inlined and costs ~22 gas per settlement.
+        // Must match `_guardRanges`.
         StorageGuard.ProtectedRange[] memory ranges;
         if (!_unsafeDisableStorageGuard()) ranges = _settlementRanges();
         _stateChangeHandler(storageUpdates, ranges);
@@ -173,8 +175,8 @@ abstract contract GasKillerSDK is
         uint256 len = submissions.length;
         require(len != 0, EmptyBatch());
         // Built once for the whole batch: the list is a compile-time constant, validated at
-        // deployment, so every item would rebuild the same thing. Not built at all when the
-        // consumer has opted out.
+        // deployment, so every item would rebuild the same thing. Inline, and must match
+        // `_guardRanges`, as in `verifyAndUpdate`.
         StorageGuard.ProtectedRange[] memory ranges;
         if (!_unsafeDisableStorageGuard()) ranges = _settlementRanges();
         uint256 required;
@@ -240,8 +242,10 @@ abstract contract GasKillerSDK is
         require(ok, InvalidQuorumSignature());
     }
 
-    /// @dev `ranges` is `_settlementRanges()`, built by the entrypoint once per call, and is
-    ///      ignored when the consumer has opted out (`_unsafeDisableStorageGuard`).
+    /// @dev `ranges` is the `_guardRanges()` list, built inline by the entrypoint once per call. The opt-out is
+    ///      dispatched here and only here; an opted-out program ignores `ranges`, and a guarded
+    ///      one with an empty list reverts (`NoProtectedRanges`), so the list alone never turns
+    ///      protection off.
     function _stateChangeHandler(bytes calldata storageUpdates, StorageGuard.ProtectedRange[] memory ranges) internal {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
         if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args);
@@ -255,7 +259,15 @@ abstract contract GasKillerSDK is
     /// @dev A compile-time constant of this contract's code, validated once by the constructor
     ///      (see `constructor`), so it can't be malformed once deployed. Prefixed like no other
     ///      SDK getter because a generic `protectedRanges` could already exist in a consumer.
-    function gasKillerProtectedRanges() external pure returns (StorageGuard.ProtectedRange[] memory ranges) {
+    function gasKillerProtectedRanges() external pure returns (StorageGuard.ProtectedRange[] memory) {
+        return _guardRanges();
+    }
+
+    /// @dev The list settlement checks against: `_settlementRanges()`, or empty, without building
+    ///      it, when the consumer has opted out. The two settlement entry points build the same
+    ///      list inline, for gas. Only the list; whether STOREs are checked is decided by
+    ///      `_stateChangeHandler`.
+    function _guardRanges() private pure returns (StorageGuard.ProtectedRange[] memory ranges) {
         if (!_unsafeDisableStorageGuard()) ranges = _settlementRanges();
     }
 
