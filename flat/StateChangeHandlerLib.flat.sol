@@ -347,8 +347,9 @@ library StateChangeHandlerLib {
 
     /// @dev Runs a program outside any tree, rejecting every NESTED op. Dispatching NESTED
     ///      through a function pointer keeps `_runNested` out of consumers that never nest.
-    ///      Every STORE is checked against `ranges` (see `_run`). There is no unprotected mode:
-    ///      an empty list reverts with `NoProtectedRanges`. Inside a `GasKillerSDK` contract, pass
+    ///      Every STORE is checked against `ranges` (see `_run`). An empty list reverts with
+    ///      `NoProtectedRanges` rather than running unchecked; the only unchecked path is the
+    ///      explicitly named `_runStateUpdatesUnguarded`. Inside a `GasKillerSDK` contract, pass
     ///      `_settlementRanges()`, which always includes the SDK's own storage and was validated
     ///      at deployment. Any other list must pass `StorageGuard.validateRanges` first.
     function _runStateUpdates(
@@ -356,8 +357,9 @@ library StateChangeHandlerLib {
         bytes[] memory args,
         StorageGuard.ProtectedRange[] memory ranges
     ) internal {
+        require(ranges.length != 0, NoProtectedRanges());
         NestedContext memory none;
-        _run(types, args, ranges, none, _rejectNested);
+        _run(types, args, ranges, StorageGuard.advance, none, _rejectNested);
     }
 
     /// @dev Runs a program inside the tree in `ctx`, checking every STORE against `ranges`. As
@@ -368,8 +370,35 @@ library StateChangeHandlerLib {
         StorageGuard.ProtectedRange[] memory ranges,
         NestedContext memory ctx
     ) internal {
-        _run(types, args, ranges, ctx, _runNested);
+        require(ranges.length != 0, NoProtectedRanges());
+        _run(types, args, ranges, StorageGuard.advance, ctx, _runNested);
     }
+
+    /// @dev Runs a program outside any tree **without checking any STORE**: a signed program can
+    ///      overwrite any slot, including the transition counter, the SDK's configuration and an
+    ///      owner. Only for a consumer that has opted out with
+    ///      `GasKillerSDK._unsafeDisableStorageGuard`. A separate, explicitly named entry point:
+    ///      the guarded ones reject an empty list, so no list a caller builds can turn protection
+    ///      off.
+    function _runStateUpdatesUnguarded(StateUpdateType[] memory types, bytes[] memory args) internal {
+        NestedContext memory none;
+        StorageGuard.ProtectedRange[] memory noRanges;
+        _run(types, args, noRanges, _skipCheck, none, _rejectNested);
+    }
+
+    /// @dev Runs a program inside the tree in `ctx` without checking any STORE. As above, only
+    ///      for a consumer that has opted out.
+    function _runStateUpdatesUnguarded(StateUpdateType[] memory types, bytes[] memory args, NestedContext memory ctx)
+        internal
+    {
+        StorageGuard.ProtectedRange[] memory noRanges;
+        _run(types, args, noRanges, _skipCheck, ctx, _runNested);
+    }
+
+    /// @dev The STORE check of an unguarded run: none.
+    function _skipCheck(StorageGuard.Cursor memory, StorageGuard.ProtectedRange[] memory, uint256, bytes32, bytes32)
+        private
+        pure {}
 
     /// @notice Decodes and executes a series of state updates
     /// @dev This function processes an array of state updates, executing them in sequence. Each update can be one of:
@@ -381,13 +410,18 @@ library StateChangeHandlerLib {
     ///      - NESTED: Hand a callee its own signed frame of the tree in `ctx`
     /// @param types Array of StateUpdateType enums indicating the type of each state update operation
     /// @param args Array of ABI-encoded arguments corresponding to each operation type
-    /// @param ranges Protected storage. Must be nonempty (`NoProtectedRanges`), so a caller can't
-    ///        turn protection off by passing an empty list, and **must already have passed
+    /// @param ranges Protected storage. Nonempty when `check` is `StorageGuard.advance`: the
+    ///        guarded entry points reject an empty list (`NoProtectedRanges`), so a caller can't
+    ///        turn protection off by passing one. Empty from `_runStateUpdatesUnguarded`, whose
+    ///        `_skipCheck` never reads it. When checked, it **must already have passed
     ///        `StorageGuard.validateRanges`**: it is not re-validated here, and a malformed list
     ///        fails open. `GasKillerSDK._settlementRanges()` is validated at deployment. Every
     ///        STORE is checked right before it executes and reverts with
     ///        `StorageGuard.ProtectedSlotWrite` if it would change a protected bit. Checking at
     ///        that moment is exact even after a CALL has legitimately changed protected storage.
+    /// @param check The STORE check: `StorageGuard.advance`, or `_skipCheck` (which ignores
+    ///        `ranges`) from `_runStateUpdatesUnguarded`. A function pointer rather than a flag,
+    ///        so neither path pays a per-write branch for the other.
     /// @param ctx The tree this program runs inside; a zero root rejects every NESTED op
     /// @param nested The NESTED handler: `_runNested` inside a tree, `_rejectNested` outside one
     /// @dev types and args arrays must be equal length, with args[i] containing the encoded parameters for types[i]
@@ -395,12 +429,13 @@ library StateChangeHandlerLib {
         StateUpdateType[] memory types,
         bytes[] memory args,
         StorageGuard.ProtectedRange[] memory ranges,
+        function(StorageGuard.Cursor memory, StorageGuard.ProtectedRange[] memory, uint256, bytes32, bytes32)
+            view check,
         NestedContext memory ctx,
         function(uint256, bytes memory, NestedContext memory) nested
     ) private {
         uint256 length = types.length;
         require(length == args.length, InvalidArguments());
-        require(ranges.length != 0, NoProtectedRanges());
         StorageGuard.Cursor memory cursor;
         for (uint256 i = 0; i < length; ++i) {
             StateUpdateType stateUpdateType = types[i];
@@ -408,7 +443,7 @@ library StateChangeHandlerLib {
 
             if (stateUpdateType == StateUpdateType.STORE) {
                 (bytes32 slot, bytes32 value) = abi.decode(arg, (bytes32, bytes32));
-                StorageGuard.advance(cursor, ranges, i, slot, value);
+                check(cursor, ranges, i, slot, value);
                 assembly {
                     sstore(slot, value)
                 }

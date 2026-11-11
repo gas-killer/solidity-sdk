@@ -699,8 +699,9 @@ library StateChangeHandlerLib {
 
     /// @dev Runs a program outside any tree, rejecting every NESTED op. Dispatching NESTED
     ///      through a function pointer keeps `_runNested` out of consumers that never nest.
-    ///      Every STORE is checked against `ranges` (see `_run`). There is no unprotected mode:
-    ///      an empty list reverts with `NoProtectedRanges`. Inside a `GasKillerSDK` contract, pass
+    ///      Every STORE is checked against `ranges` (see `_run`). An empty list reverts with
+    ///      `NoProtectedRanges` rather than running unchecked; the only unchecked path is the
+    ///      explicitly named `_runStateUpdatesUnguarded`. Inside a `GasKillerSDK` contract, pass
     ///      `_settlementRanges()`, which always includes the SDK's own storage and was validated
     ///      at deployment. Any other list must pass `StorageGuard.validateRanges` first.
     function _runStateUpdates(
@@ -708,8 +709,9 @@ library StateChangeHandlerLib {
         bytes[] memory args,
         StorageGuard.ProtectedRange[] memory ranges
     ) internal {
+        require(ranges.length != 0, NoProtectedRanges());
         NestedContext memory none;
-        _run(types, args, ranges, none, _rejectNested);
+        _run(types, args, ranges, StorageGuard.advance, none, _rejectNested);
     }
 
     /// @dev Runs a program inside the tree in `ctx`, checking every STORE against `ranges`. As
@@ -720,8 +722,35 @@ library StateChangeHandlerLib {
         StorageGuard.ProtectedRange[] memory ranges,
         NestedContext memory ctx
     ) internal {
-        _run(types, args, ranges, ctx, _runNested);
+        require(ranges.length != 0, NoProtectedRanges());
+        _run(types, args, ranges, StorageGuard.advance, ctx, _runNested);
     }
+
+    /// @dev Runs a program outside any tree **without checking any STORE**: a signed program can
+    ///      overwrite any slot, including the transition counter, the SDK's configuration and an
+    ///      owner. Only for a consumer that has opted out with
+    ///      `GasKillerSDK._unsafeDisableStorageGuard`. A separate, explicitly named entry point:
+    ///      the guarded ones reject an empty list, so no list a caller builds can turn protection
+    ///      off.
+    function _runStateUpdatesUnguarded(StateUpdateType[] memory types, bytes[] memory args) internal {
+        NestedContext memory none;
+        StorageGuard.ProtectedRange[] memory noRanges;
+        _run(types, args, noRanges, _skipCheck, none, _rejectNested);
+    }
+
+    /// @dev Runs a program inside the tree in `ctx` without checking any STORE. As above, only
+    ///      for a consumer that has opted out.
+    function _runStateUpdatesUnguarded(StateUpdateType[] memory types, bytes[] memory args, NestedContext memory ctx)
+        internal
+    {
+        StorageGuard.ProtectedRange[] memory noRanges;
+        _run(types, args, noRanges, _skipCheck, ctx, _runNested);
+    }
+
+    /// @dev The STORE check of an unguarded run: none.
+    function _skipCheck(StorageGuard.Cursor memory, StorageGuard.ProtectedRange[] memory, uint256, bytes32, bytes32)
+        private
+        pure {}
 
     /// @notice Decodes and executes a series of state updates
     /// @dev This function processes an array of state updates, executing them in sequence. Each update can be one of:
@@ -733,13 +762,18 @@ library StateChangeHandlerLib {
     ///      - NESTED: Hand a callee its own signed frame of the tree in `ctx`
     /// @param types Array of StateUpdateType enums indicating the type of each state update operation
     /// @param args Array of ABI-encoded arguments corresponding to each operation type
-    /// @param ranges Protected storage. Must be nonempty (`NoProtectedRanges`), so a caller can't
-    ///        turn protection off by passing an empty list, and **must already have passed
+    /// @param ranges Protected storage. Nonempty when `check` is `StorageGuard.advance`: the
+    ///        guarded entry points reject an empty list (`NoProtectedRanges`), so a caller can't
+    ///        turn protection off by passing one. Empty from `_runStateUpdatesUnguarded`, whose
+    ///        `_skipCheck` never reads it. When checked, it **must already have passed
     ///        `StorageGuard.validateRanges`**: it is not re-validated here, and a malformed list
     ///        fails open. `GasKillerSDK._settlementRanges()` is validated at deployment. Every
     ///        STORE is checked right before it executes and reverts with
     ///        `StorageGuard.ProtectedSlotWrite` if it would change a protected bit. Checking at
     ///        that moment is exact even after a CALL has legitimately changed protected storage.
+    /// @param check The STORE check: `StorageGuard.advance`, or `_skipCheck` (which ignores
+    ///        `ranges`) from `_runStateUpdatesUnguarded`. A function pointer rather than a flag,
+    ///        so neither path pays a per-write branch for the other.
     /// @param ctx The tree this program runs inside; a zero root rejects every NESTED op
     /// @param nested The NESTED handler: `_runNested` inside a tree, `_rejectNested` outside one
     /// @dev types and args arrays must be equal length, with args[i] containing the encoded parameters for types[i]
@@ -747,12 +781,13 @@ library StateChangeHandlerLib {
         StateUpdateType[] memory types,
         bytes[] memory args,
         StorageGuard.ProtectedRange[] memory ranges,
+        function(StorageGuard.Cursor memory, StorageGuard.ProtectedRange[] memory, uint256, bytes32, bytes32)
+            view check,
         NestedContext memory ctx,
         function(uint256, bytes memory, NestedContext memory) nested
     ) private {
         uint256 length = types.length;
         require(length == args.length, InvalidArguments());
-        require(ranges.length != 0, NoProtectedRanges());
         StorageGuard.Cursor memory cursor;
         for (uint256 i = 0; i < length; ++i) {
             StateUpdateType stateUpdateType = types[i];
@@ -760,7 +795,7 @@ library StateChangeHandlerLib {
 
             if (stateUpdateType == StateUpdateType.STORE) {
                 (bytes32 slot, bytes32 value) = abi.decode(arg, (bytes32, bytes32));
-                StorageGuard.advance(cursor, ranges, i, slot, value);
+                check(cursor, ranges, i, slot, value);
                 assembly {
                     sstore(slot, value)
                 }
@@ -1086,7 +1121,11 @@ abstract contract GasKillerSDK is
             Raddr,
             nonSigners
         );
-        _stateChangeHandler(storageUpdates, _settlementRanges());
+        // Inline rather than a helper: a helper isn't inlined and costs ~22 gas per settlement.
+        // Must match `_guardRanges`.
+        StorageGuard.ProtectedRange[] memory ranges;
+        if (!_unsafeDisableStorageGuard()) ranges = _settlementRanges();
+        _stateChangeHandler(storageUpdates, ranges);
     }
 
     /// @notice Verify and apply a sequence of independently signed state transitions in
@@ -1125,8 +1164,10 @@ abstract contract GasKillerSDK is
         uint256 len = submissions.length;
         require(len != 0, EmptyBatch());
         // Built once for the whole batch: the list is a compile-time constant, validated at
-        // deployment, so every item would rebuild the same thing.
-        StorageGuard.ProtectedRange[] memory ranges = _settlementRanges();
+        // deployment, so every item would rebuild the same thing. Inline, and must match
+        // `_guardRanges`, as in `verifyAndUpdate`.
+        StorageGuard.ProtectedRange[] memory ranges;
+        if (!_unsafeDisableStorageGuard()) ranges = _settlementRanges();
         uint256 required;
         for (uint256 i = 0; i < len; ++i) {
             TaskSubmission calldata sub = submissions[i];
@@ -1190,19 +1231,52 @@ abstract contract GasKillerSDK is
         require(ok, InvalidQuorumSignature());
     }
 
-    /// @dev `ranges` is `_settlementRanges()`, built by the entrypoint once per call.
+    /// @dev `ranges` is the `_guardRanges()` list, built inline by the entrypoint once per call.
+    ///      The opt-out is dispatched here (and in `GasKillerNestedSDK._runProgram`), never by
+    ///      the list: an opted-out program ignores `ranges`, and a guarded one with an empty list
+    ///      reverts (`NoProtectedRanges`), so the list alone never turns protection off.
     function _stateChangeHandler(bytes calldata storageUpdates, StorageGuard.ProtectedRange[] memory ranges) internal {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        StateChangeHandlerLib._runStateUpdates(types, args, ranges);
+        if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args);
+        else StateChangeHandlerLib._runStateUpdates(types, args, ranges);
     }
 
     /// @notice The storage ranges a signed program may not change: the SDK's own slots merged
-    ///         with the consumer's `_protectedRanges()`, in ascending order.
+    ///         with the consumer's `_protectedRanges()`, in ascending order. Empty when the
+    ///         consumer has opted out of the check (`_unsafeDisableStorageGuard`); a guarded
+    ///         contract always lists at least the SDK's two ranges.
     /// @dev A compile-time constant of this contract's code, validated once by the constructor
     ///      (see `constructor`), so it can't be malformed once deployed. Prefixed like no other
     ///      SDK getter because a generic `protectedRanges` could already exist in a consumer.
     function gasKillerProtectedRanges() external pure returns (StorageGuard.ProtectedRange[] memory) {
-        return _settlementRanges();
+        return _guardRanges();
+    }
+
+    /// @dev The list settlement checks against: `_settlementRanges()`, or empty, without building
+    ///      it, when the consumer has opted out. The two settlement entry points build the same
+    ///      list inline, for gas. Only the list; whether STOREs are checked is decided by
+    ///      `_stateChangeHandler`.
+    function _guardRanges() private pure returns (StorageGuard.ProtectedRange[] memory ranges) {
+        if (!_unsafeDisableStorageGuard()) ranges = _settlementRanges();
+    }
+
+    /// @notice **Unsafe.** Override to return true to stop settlement checking signed STOREs
+    ///         against protected storage. Saves about 1,400 gas per call, 500 more per declared
+    ///         range, and about 280 per STORE (see `bench/SettlementGas.t.sol`).
+    /// @dev With the check off, a quorum that signs a malicious program can overwrite any slot of
+    ///      this contract: an owner, an upgrade slot, the transition counter (replaying or
+    ///      skipping transitions) and the SDK's own configuration, including the registry that
+    ///      verifies signatures. Opt out only if the contract's correctness already rests on
+    ///      trusting the quorum completely, for example one with no owner, no upgrade path and
+    ///      nothing else a rewrite could take over.
+    ///
+    ///      The function is `pure`, so the choice is fixed in the contract's code: no signed
+    ///      program, owner or setter can switch it at runtime. It applies to `verifyAndUpdate`,
+    ///      `verifyAndUpdateBatch` and nested settlement alike, and `gasKillerProtectedRanges`
+    ///      returns an empty list so off-chain tooling can see it. `_protectedRanges` is ignored
+    ///      while it returns true, though the constructor still validates it.
+    function _unsafeDisableStorageGuard() internal pure virtual returns (bool) {
+        return false;
     }
 
     /// @notice Storage the consumer wants protected from signed programs. Override to add slots.
