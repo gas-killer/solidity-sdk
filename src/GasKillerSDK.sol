@@ -242,10 +242,10 @@ abstract contract GasKillerSDK is
         require(ok, InvalidQuorumSignature());
     }
 
-    /// @dev `ranges` is the `_guardRanges()` list, built inline by the entrypoint once per call. The opt-out is
-    ///      dispatched here and only here; an opted-out program ignores `ranges`, and a guarded
-    ///      one with an empty list reverts (`NoProtectedRanges`), so the list alone never turns
-    ///      protection off.
+    /// @dev `ranges` is the `_guardRanges()` list, built inline by the entrypoint once per call.
+    ///      The opt-out is dispatched here (and in `GasKillerNestedSDK._runProgram`), never by
+    ///      the list: an opted-out program ignores `ranges`, and a guarded one with an empty list
+    ///      reverts (`NoProtectedRanges`), so the list alone never turns protection off.
     function _stateChangeHandler(bytes calldata storageUpdates, StorageGuard.ProtectedRange[] memory ranges) internal {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
         if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args);
