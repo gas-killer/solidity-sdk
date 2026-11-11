@@ -15,9 +15,7 @@ env:
 jobs:
   flatten:
     name: Flatten Solidity Contracts
-    # Pinned: the "Install solc" step uses the ethereum PPA, which publishes solc for 24.04
-    # (noble) but not for 26.04 (resolute), which ubuntu-latest now resolves to.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
 
     permissions: # allow the default token to push back changes
       contents: write
@@ -45,18 +43,11 @@ jobs:
             forge flatten "$f" -o "flat/${base}.flat.sol"
           done
 
-      - name: Install solc
-        run: |
-          sudo add-apt-repository -y ppa:ethereum/ethereum
-          sudo apt-get update
-          sudo apt-get install -y solc
-
-      # sanity-check that each flat file still compiles
+      # Sanity-check that each flat file still compiles, with the same solc and settings as the
+      # project build. forge picks and checksum-verifies the compiler itself, so there is no
+      # separate solc install to drift from it or to depend on the ethereum PPA.
       - name: Compile flattened sources
-        run: |
-          for f in flat/*.sol; do
-            solc --optimize "$f" --via-ir --bin > /dev/null
-          done
+        run: forge build flat --force
 
       # Commit & push the fresh flats back to the branch.
       # Skip on pull_request: its merge-commit checkout makes the commit step
