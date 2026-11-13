@@ -1,0 +1,1968 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+pragma solidity ^0.8.0 ^0.8.27;
+
+// lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol
+
+// OpenZeppelin Contracts v4.4.1 (utils/introspection/IERC165.sol)
+
+/**
+ * @dev Interface of the ERC165 standard, as defined in the
+ * https://eips.ethereum.org/EIPS/eip-165[EIP].
+ *
+ * Implementers can declare support of contract interfaces, which can then be
+ * queried by others ({ERC165Checker}).
+ *
+ * For an implementation, see {ERC165}.
+ */
+interface IERC165 {
+    /**
+     * @dev Returns true if this contract implements the interface defined by
+     * `interfaceId`. See the corresponding
+     * https://eips.ethereum.org/EIPS/eip-165#how-interfaces-are-identified[EIP section]
+     * to learn more about how these ids are created.
+     *
+     * This function call must use less than 30 000 gas.
+     */
+    function supportsInterface(bytes4 interfaceId) external view returns (bool);
+}
+
+// lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol
+
+// OpenZeppelin Contracts (last updated v4.9.0) (token/ERC20/IERC20.sol)
+
+/**
+ * @dev Interface of the ERC20 standard as defined in the EIP.
+ */
+interface IERC20 {
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    /**
+     * @dev Returns the amount of tokens in existence.
+     */
+    function totalSupply() external view returns (uint256);
+
+    /**
+     * @dev Returns the amount of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
+
+    /**
+     * @dev Moves `amount` tokens from the caller's account to `to`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address to, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Moves `amount` tokens from `from` to `to` using the
+     * allowance mechanism. `amount` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+}
+
+// src/interface/IGasKillerSDKBatch.sol
+
+/// @notice One independently quorum-signed state transition, as submitted to
+///         `verifyAndUpdateBatch`. The arguments of `IGasKillerSDK.verifyAndUpdate` plus the
+///         `value` it would have been sent with, so the signed digest is the same either way
+///         and the off-chain signing path does not know or care whether a transition settles
+///         alone or in a batch.
+struct TaskSubmission {
+    bytes32 msgHash;
+    uint32 referenceBlockNumber;
+    bytes storageUpdates;
+    uint256 transitionIndex;
+    bytes4 targetFunction;
+    uint256 s;
+    address Raddr;
+    address[] nonSigners;
+    uint256 value;
+}
+
+/// @title IGasKillerSDKBatch
+/// @notice Optional batching + in-transition-latch extension of `IGasKillerSDK`.
+/// @dev Kept separate from `IGasKillerSDK` on purpose: that interface is
+///      deliberately single-function so `type(IGasKillerSDK).interfaceId` equals
+///      the `verifyAndUpdate` selector, which the router's ERC-165 preflight probes.
+///      Contracts supporting this extension report **both** interface IDs.
+///
+///      Batching amortizes the per-transaction fixed costs across N transitions: the
+///      21,000 intrinsic, the cold-access warm-up of the registry account + its aggregate
+///      key/weight/watermark slots, and the SDK's own config slots — everything after the
+///      first sub-transition runs at warm-access prices (measured: the registry verify
+///      alone drops from ~17.0k cold to ~6.5k warm at full participation).
+///
+///      Batch assemblers (the off-chain router composing `submissions`) should be aware
+///      that `StateChangeHandlerLib`'s `CALL` update forwards *all* remaining gas to its
+///      target with no cap. A greedy or griefing CALL target in an early sub-transition can
+///      consume enough gas to starve every later sub-transition, reverting the whole
+///      (atomic) batch — no partial-state hazard, since it's all-or-nothing, but it does
+///      nullify the amortization this extension exists for. Ordering submissions with
+///      untrusted CALL targets last, or excluding them from batches entirely, avoids this.
+interface IGasKillerSDKBatch {
+    /// @notice Verify and apply a sequence of independently signed state transitions.
+    /// @dev Transitions apply in calldata order with consecutive `transitionIndex`es.
+    ///      Submissions whose index is already settled are skipped (front-run/redelivery
+    ///      tolerance — settlement is permissionless, so without the skip one lifted
+    ///      submission settled standalone would revert the whole batch); an index gap or
+    ///      any failing applied sub-transition reverts the whole batch. The in-transition
+    ///      latch is held across the entire batch.
+    ///
+    ///      Payable. Each submission's digest binds its own `value`, and `msg.value` must cover
+    ///      the sum over the submissions actually applied. A skipped (already-settled)
+    ///      submission adds nothing to that sum. The surplus, such as a front-run item's
+    ///      share, is refunded to `msg.sender`; a sender that can't accept ETH leaves it in
+    ///      the contract instead of reverting the batch.
+    /// @param submissions The transitions to apply, in order.
+    function verifyAndUpdateBatch(TaskSubmission[] calldata submissions) external payable;
+
+    /// @notice True while a state transition (or batch) is being applied — external
+    ///         readers should treat mid-transition state as unsigned and fail closed.
+    function inTransition() external view returns (bool);
+}
+
+// src/interface/IGasKillerValueBound.sol
+
+/// @title IGasKillerValueBound
+/// @notice Reported by consumers whose settlement digest binds `msg.value`.
+/// @dev `type(IGasKillerSDK).interfaceId` didn't move when the digest started binding the value,
+///      so this ID is what tells such a consumer apart from one built on an older SDK, which
+///      accepts a value-bearing signature with any `msg.value`. Single-function, so the ID is the
+///      `getMessageHashWithValue` selector.
+interface IGasKillerValueBound {
+    /// @notice The digest the quorum signs for a transition settled with `value` wei.
+    function getMessageHashWithValue(
+        uint256 transitionIndex,
+        bytes4 targetFunction,
+        bytes calldata storageUpdates,
+        uint256 value
+    ) external view returns (bytes32);
+}
+
+// src/interface/ISchnorrStakeRegistry.sol
+
+/// @title ISchnorrStakeRegistry
+/// @notice Verification surface the `GasKillerSDK` depends on. Kept minimal (and
+///         separate from the concrete registry) so the SDK can be unit-tested against a
+///         mock, mirroring how `GasKillerSDK` depends on ERC-1271 `isValidSignature`.
+interface ISchnorrStakeRegistry {
+    /// @notice Verify an aggregate Schnorr quorum signature over `message`.
+    /// @param message     the signed 32-byte task digest.
+    /// @param s           aggregate response scalar.
+    /// @param Raddr       aggregate nonce address `address(R)`.
+    /// @param nonSigners  operator identities that did not sign, strictly ascending.
+    /// @param refBlock    reference block; must be `>= effectiveBlock` and `< block.number`.
+    function isValidSignature(
+        bytes32 message,
+        uint256 s,
+        address Raddr,
+        address[] calldata nonSigners,
+        uint256 refBlock
+    ) external view returns (bool);
+}
+
+// src/StateTracker.sol
+
+/// @title StateTracker
+/// @notice Tracks the number of state transitions that have occurred in a contract
+/// @dev Uses a precomputed ERC-7201-style storage slot to store the transition counter.
+///      The slot is computed as: `keccak256("gasKiller.stateTracker") - 1`
+///
+///      Inherit this contract to enable Gas Killer state-transition tracking.
+contract StateTracker {
+    /// @notice Precomputed storage slot for the state transition counter
+    /// @dev Computed as `keccak256("gasKiller.stateTracker") - 1`
+    bytes32 internal constant STATE_TRACKER_STORAGE_LOCATION =
+        0xdebfdfd5a50ad117c10898d68b5ccf0893c6b40d4f443f902e2e7646601bdeaf;
+
+    /// @notice Increment the state transition counter before executing the modified function
+    /// @dev Apply this modifier to any function that constitutes a tracked state transition.
+    ///      Steps: load current count → increment by 1 → store → execute function body.
+    modifier trackState() {
+        assembly {
+            let count := sload(STATE_TRACKER_STORAGE_LOCATION)
+            sstore(STATE_TRACKER_STORAGE_LOCATION, add(0x01, count))
+        }
+        _;
+    }
+
+    /// @notice Return the current number of state transitions that have occurred
+    /// @return count The total number of tracked state transitions
+    function stateTransitionCount() public view returns (uint256 count) {
+        assembly {
+            count := sload(STATE_TRACKER_STORAGE_LOCATION)
+        }
+    }
+}
+
+// src/libraries/StorageGuard.sol
+
+/// @title StorageGuard
+/// @notice Checks a signed program's `STORE` writes against a denylist of protected storage
+///         ranges, so a quorum-signed update cannot overwrite slots such as an `Ownable` owner,
+///         the `StateTracker` counter, the SDK's own configuration or EIP-1967 proxy slots.
+///         `StateChangeHandlerLib._run` calls `advance` right before every STORE executes.
+/// @dev The list denies rather than allows. Honest writes to mappings and dynamic arrays land on
+///      keccak-derived slots spread across the whole slot space, which an allowlist of ranges
+///      cannot express, while every slot worth protecting is known at compile time. Reaching a
+///      protected slot from an honest write would take a keccak preimage, so a hit means the
+///      program is malicious and the whole program is rejected.
+///
+///      Ranges are inclusive `[start, end]` intervals, strictly ascending and non-overlapping.
+///      **`advance` assumes this and does not check it**: an unsorted or overlapping list fails
+///      open, silently letting writes to protected slots through. Run `validateRanges` once on the
+///      list; `GasKillerSDK` does so in its constructor. Validating on every write would cost
+///      O(k) per write, more than the check itself.
+///
+///      A write to a protected range is rejected when it would change a protected bit, and allowed
+///      when it leaves every protected bit as it is in storage. `mask` is `FULL` to protect the
+///      whole slot. A narrower mask protects only some bits of one packed slot. Allowing writes
+///      that change nothing is what lets the SDK protect its own transition counter: gas-analyzer
+///      copies the counter's new value into every program as a STORE, and `trackState` has already
+///      written that same value by the time the program runs. Deciding costs one SLOAD, paid only
+///      by a write that lands in a range.
+///
+///      `advance` makes one forward pass with a `Cursor`. Writes in ascending slot order walk the
+///      ranges together, and once a write is past the last range every later ascending write costs
+///      one comparison. Before walking, `advance` checks that the cursor's position is valid for
+///      the slot, which holds exactly when no range before it reaches the slot. If it isn't, it
+///      re-seats by binary search (`_lowerBound`) instead of reverting. That happens on a write
+///      below the previous range, and also on a cursor carried over from another list, never
+///      reset, or holding garbage. So neither the order of the writes nor the cursor's contents
+///      can change the verdict, only the gas. Input sorted within each CALL/CREATE-bounded slice,
+///      as gas-analyzer's canonical extraction emits it, pays at most one re-seat per slice.
+///
+///      Writes are judged against storage as it stands when the check runs, which is exact only
+///      right before each write executes. That is how `_run` calls it. Comparison checkers, and a
+///      pre-pass over a whole program with the extra rule a pre-pass needs, live in
+///      `test/utils/StorageGuardVariants.sol`, where the tests check this library against them.
+library StorageGuard {
+    /// @notice One protected interval of storage slots.
+    /// @param start First protected slot (inclusive).
+    /// @param end Last protected slot (inclusive).
+    /// @param mask Protected bits within each slot: `FULL` for every bit, anything narrower only
+    ///        when `start == end`. A write is rejected when it would change a protected bit.
+    struct ProtectedRange {
+        uint256 start;
+        uint256 end;
+        bytes32 mask;
+    }
+
+    /// @notice Merge state carried across consecutive writes. Start from a zeroed one. Its contents
+    ///         only steer the search: `advance` re-checks `next` on every write, so a stale or
+    ///         foreign cursor costs gas but cannot let a write through.
+    /// @param next Where the last write's search ended: a hint for the next write's search.
+    struct Cursor {
+        uint256 next;
+    }
+
+    bytes32 internal constant FULL = bytes32(type(uint256).max);
+
+    /// @notice A write would change protected bits.
+    /// @param index Position of the offending op in its program (or in the caller's own sequence).
+    /// @param slot The protected slot it writes.
+    error ProtectedSlotWrite(uint256 index, bytes32 slot);
+
+    /// @notice The range list is unsorted, overlapping, empty-masked or masks more than one slot.
+    error InvalidRanges();
+
+    /// @notice Reverts with `InvalidRanges` unless `ranges` is a well-formed denylist.
+    /// @dev Per range: `start <= end`, a nonzero mask, a partial mask only on a single slot, and a
+    ///      start above the previous range's end. The first range has no predecessor, so it is
+    ///      checked with `first` set rather than against a sentinel end.
+    function validateRanges(ProtectedRange[] memory ranges) internal pure {
+        bool bad;
+        assembly ("memory-safe") {
+            let it := add(ranges, 0x20)
+            let last := add(it, shl(5, mload(ranges)))
+            let prevEnd := 0
+            for { let first := 1 } lt(it, last) { it := add(it, 0x20) } {
+                let r := mload(it)
+                let start := mload(r)
+                let end := mload(add(r, 0x20))
+                let mask := mload(add(r, 0x40))
+                bad := or(bad, gt(start, end))
+                bad := or(bad, iszero(mask))
+                bad := or(bad, and(iszero(eq(mask, not(0))), iszero(eq(start, end))))
+                bad := or(bad, and(iszero(first), iszero(gt(start, prevEnd))))
+                prevEnd := end
+                first := 0
+            }
+        }
+        if (bad) revert InvalidRanges();
+    }
+
+    // `advance` and `_lowerBound` walk `ranges` in assembly. A `ProtectedRange[] memory` is a
+    // length word followed by one pointer per element, and each element is three words: start,
+    // end, mask. Every loop compares its index with the length before dereferencing it.
+
+    /// @notice Checks one write against `ranges` and moves `c` past it. Reverts with
+    ///         `ProtectedSlotWrite` if the write would change a protected bit.
+    /// @dev `ranges` must have passed `validateRanges`; an unvalidated list can fail open.
+    function advance(Cursor memory c, ProtectedRange[] memory ranges, uint256 index, bytes32 slot, bytes32 value)
+        internal
+        view
+    {
+        uint256 s = uint256(slot);
+        uint256 i = c.next;
+        // The forward walk from `i` is right only if no range before `i` reaches `s`. Ends ascend
+        // strictly in a validated list, so that holds exactly when `i <= len` and (`i == 0` or
+        // `ranges[i-1].end < s`). Otherwise re-seat. `i` is compared with `len` before
+        // `ranges[i-1]` is read.
+        bool reseat;
+        assembly ("memory-safe") {
+            let len := mload(ranges)
+            reseat := gt(i, len)
+            if and(iszero(reseat), gt(i, 0)) {
+                reseat := iszero(lt(mload(add(mload(add(ranges, shl(5, i))), 0x20)), s))
+            }
+        }
+        if (reseat) i = _lowerBound(ranges, s);
+        uint256 hit;
+        assembly ("memory-safe") {
+            let len := mload(ranges)
+            let base := add(ranges, 0x20)
+            for {} lt(i, len) { i := add(i, 1) } {
+                if iszero(lt(mload(add(mload(add(base, shl(5, i))), 0x20)), s)) { break }
+            }
+            mstore(c, i)
+            if lt(i, len) {
+                let r := mload(add(base, shl(5, i)))
+                if iszero(gt(mload(r), s)) { hit := r }
+            }
+        }
+        if (hit != 0) _reject(hit, index, slot, value);
+    }
+
+    /// @dev Index of the first range whose end is at or above `s`, or `ranges.length` when there
+    ///      is none. The library's only binary search. `lo < hi <= length` keeps `mid` in bounds
+    ///      and every sum below 2^256.
+    function _lowerBound(ProtectedRange[] memory ranges, uint256 s) private pure returns (uint256 lo) {
+        assembly ("memory-safe") {
+            let base := add(ranges, 0x20)
+            for { let hi := mload(ranges) } lt(lo, hi) {} {
+                let mid := shr(1, add(lo, hi))
+                switch lt(mload(add(mload(add(base, shl(5, mid))), 0x20)), s)
+                case 1 { lo := add(mid, 1) }
+                default { hi := mid }
+            }
+        }
+    }
+
+    /// @dev `range` points at a range covering `slot`. Reverts unless the write leaves every
+    ///      protected bit as it is in storage.
+    function _reject(uint256 range, uint256 index, bytes32 slot, bytes32 value) private view {
+        bytes32 mask;
+        bytes32 current;
+        assembly ("memory-safe") {
+            mask := mload(add(range, 0x40))
+            current := sload(slot)
+        }
+        if ((current ^ value) & mask != 0) revert ProtectedSlotWrite(index, slot);
+    }
+}
+
+// src/TransitionGuard.sol
+
+/// @title TransitionGuard
+/// @notice EIP-1153 transient-storage reentrancy guard that doubles as an
+///         "in transition" latch external contracts can query.
+/// @dev Two holes in the unguarded settlement path, one mechanism:
+///
+///      1. **Reentrancy.** `StateChangeHandlerLib`'s `CALL` update forwards all remaining
+///         gas to an arbitrary target *mid-transition* — after `trackState` has already
+///         bumped the counter and before the transition's later updates have executed. A
+///         re-entrant `verifyAndUpdate` carrying transition N+1's valid quorum signature
+///         would pass the transition-index check and interleave N+1's updates inside N.
+///         `guardTransition` makes the re-entrant call revert instead.
+///
+///      2. **Midway state.** During a `CALL` update the called contract observes storage
+///         that never existed per the signed semantics: the transition counter already
+///         shows N+1 while only a prefix of transition N's updates have landed. The quorum
+///         signed the *final* post-transition state, not this intermediate one. The same
+///         transient flag is exposed as `inTransition()`, so integrators reading a Gas
+///         Killer contract can fail closed (revert or fall back) while a transition is
+///         being applied, for one warm TLOAD (~100 gas) paid by the reader.
+///
+///      Transient storage clears automatically at the end of the transaction, so the
+///      guard costs ~3 transient ops (~300 gas) per guarded call and never leaves a
+///      dirty storage slot behind. Requires an EVM with EIP-1153 (Cancun or later).
+///
+///      The slot holds the active nested-settlement root rather than a flag, so a call tree
+///      that re-enters this contract (A → B → A) can apply its second frame here while every
+///      other re-entry still reverts. Single-transition and batch settlement hold
+///      `EXCLUSIVE_MARKER`, a value no root (a hash output) can take.
+abstract contract TransitionGuard {
+    /// @notice Precomputed transient-storage slot for the guard flag
+    /// @dev Computed as `keccak256("gasKiller.transitionGuard") - 1`, mirroring
+    ///      `StateTracker`'s slot-derivation convention.
+    bytes32 internal constant TRANSITION_GUARD_SLOT =
+        0x577f51c71236185614d2425ce0aefc41d4e67f3a91a20821f72674b76f8d3ec0;
+
+    bytes32 internal constant EXCLUSIVE_MARKER = bytes32(uint256(1));
+
+    /// @notice Thrown when a guarded function is re-entered while a transition is applying
+    error ReentrantTransition();
+
+    /// @notice Reverts on re-entry and holds the in-transition latch for the duration of
+    ///         the function body (a batch entrypoint holds it across the whole batch).
+    modifier guardTransition() {
+        _enterExclusive(EXCLUSIVE_MARKER);
+        _;
+        _exitTransition(bytes32(0));
+    }
+
+    /// @notice True while a state transition (or batch of transitions) is being applied
+    /// @dev External contracts that read Gas Killer state and can be called mid-transition
+    ///      (directly or transitively via a `CALL` update) should check this and fail
+    ///      closed — mid-transition storage is not a quorum-signed state.
+    function inTransition() public view virtual returns (bool locked) {
+        return _activeRoot() != bytes32(0);
+    }
+
+    function _activeRoot() internal view returns (bytes32 root) {
+        assembly {
+            root := tload(TRANSITION_GUARD_SLOT)
+        }
+    }
+
+    /// @dev For entrypoints that start a transition: reverts if any transition is applying.
+    function _enterExclusive(bytes32 root) internal {
+        if (_activeRoot() != bytes32(0)) revert ReentrantTransition();
+        _setActiveRoot(root);
+    }
+
+    /// @dev For a nested frame: allowed when idle, or when re-entered by a frame of the same
+    ///      root. Returns the value to restore on exit, so an inner frame of a cycle leaves the
+    ///      outer frame's latch in place.
+    function _enterNested(bytes32 root) internal returns (bytes32 previous) {
+        previous = _activeRoot();
+        if (previous != bytes32(0) && previous != root) revert ReentrantTransition();
+        _setActiveRoot(root);
+    }
+
+    function _exitTransition(bytes32 previous) internal {
+        _setActiveRoot(previous);
+    }
+
+    function _setActiveRoot(bytes32 root) private {
+        assembly {
+            tstore(TRANSITION_GUARD_SLOT, root)
+        }
+    }
+}
+
+// lib/openzeppelin-contracts/contracts/utils/introspection/ERC165.sol
+
+// OpenZeppelin Contracts v4.4.1 (utils/introspection/ERC165.sol)
+
+/**
+ * @dev Implementation of the {IERC165} interface.
+ *
+ * Contracts that want to implement ERC165 should inherit from this contract and override {supportsInterface} to check
+ * for the additional interface id that will be supported. For example:
+ *
+ * ```solidity
+ * function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+ *     return interfaceId == type(MyInterface).interfaceId || super.supportsInterface(interfaceId);
+ * }
+ * ```
+ *
+ * Alternatively, {ERC165Storage} provides an easier to use but more expensive implementation.
+ */
+abstract contract ERC165 is IERC165 {
+    /**
+     * @dev See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+        return interfaceId == type(IERC165).interfaceId;
+    }
+}
+
+// src/interface/IGasKillerSDK.sol
+
+/// @title IGasKillerSDK
+/// @notice Interface for GasKillerSDK contracts
+/// @dev Defines the core functionality that GasKillerSDK implementations must
+///      provide. State updates are approved by an operator quorum expressed as a
+///      **single** aggregate Schnorr signature verified by a `SchnorrStakeRegistry`
+///      (constant gas, non-signer subtraction) instead of `N` per-operator ECDSA
+///      signatures. Deliberately single-function so
+///      `type(IGasKillerSDK).interfaceId` equals the `verifyAndUpdate`
+///      selector — the router's ERC-165 preflight probes exactly this ID.
+interface IGasKillerSDK is IERC165 {
+    /// @notice Verify the operators' aggregate Schnorr quorum signature and apply the
+    ///         encoded state updates
+    /// @dev Payable, and `msg.value` is part of the signed digest: the transition settles only
+    ///      with exactly the value the task was analyzed with, so a function that credits
+    ///      `msg.value` cannot be settled without its ETH. Value moved by state updates is fixed
+    ///      inside the signed `storageUpdates`; a shortfall reverts the whole transition.
+    ///
+    ///      `payable` does not change the function selector, so
+    ///      `type(IGasKillerSDK).interfaceId` — which the router's ERC-165 preflight
+    ///      probes — is unaffected.
+    /// @param msgHash The hash of the message to verify (sha256 of the encoded task)
+    /// @param referenceBlockNumber The block number at which operator keys and stake
+    ///        weights are evaluated by the stake registry
+    /// @param storageUpdates The storage updates to verify and apply
+    /// @param transitionIndex The transition index
+    /// @param targetFunction The target function selector
+    /// @param s Aggregate Schnorr response scalar
+    /// @param Raddr Aggregate nonce address `address(R)`
+    /// @param nonSigners Operators that did not sign, in strictly ascending order
+    function verifyAndUpdate(
+        bytes32 msgHash,
+        uint32 referenceBlockNumber,
+        bytes calldata storageUpdates,
+        uint256 transitionIndex,
+        bytes4 targetFunction,
+        uint256 s,
+        address Raddr,
+        address[] calldata nonSigners
+    ) external payable;
+}
+
+// src/interface/ISchnorrApprovalRegistry.sol
+
+/// @notice An aggregate Schnorr quorum signature and the reference block it is checked at.
+struct QuorumSignature {
+    uint256 s;
+    address Raddr;
+    address[] nonSigners;
+    uint256 refBlock;
+}
+
+/// @title ISchnorrApprovalRegistry
+/// @notice Per-transaction root approvals for nested settlement. The root of a nested tree
+///         is verified once, and every frame of the tree checks the cached approval in its own
+///         registry instead of re-verifying the signature.
+/// @dev Kept separate from `ISchnorrStakeRegistry` so consumers that never nest, and the
+///      mocks they are tested against, see no new surface. Implementations must report this
+///      interface through ERC-165: a consumer reports `IGasKillerNested` only when its registry
+///      does.
+interface ISchnorrApprovalRegistry is ISchnorrStakeRegistry {
+    error ApprovalExpired(uint256 expiryBlock);
+    error InvalidExpiryProof();
+    error InvalidApprovalSignature();
+
+    /// @notice Verify a quorum signature over `root` and approve it for the rest of this
+    ///         transaction.
+    /// @dev Reverts unless the signature verifies exactly as `isValidSignature` would, the
+    ///      expiry leaf for `(rootContract, expiryBlock)` is in the tree, and the expiry has not
+    ///      passed. A repeat call re-runs every check but keeps the first approved `refBlock`.
+    /// @param root         the signed Merkle root.
+    /// @param rootContract the contract whose tree entrypoint settles the root.
+    /// @param expiryBlock  the last block at which the tree may settle.
+    /// @param expiryProof  Merkle proof of the expiry leaf.
+    /// @param sig          the quorum signature over `root`.
+    function verifyAndApprove(
+        bytes32 root,
+        address rootContract,
+        uint256 expiryBlock,
+        bytes32[] calldata expiryProof,
+        QuorumSignature calldata sig
+    ) external;
+
+    /// @notice Whether `root` was approved earlier in this transaction, and at which reference
+    ///         block.
+    /// @dev Reports unapproved once an operator-set change has moved `effectiveBlock` past the
+    ///      approved `refBlock`, so a mid-transaction mutation fails closed.
+    function approvedRefBlock(bytes32 root) external view returns (bool approved, uint256 refBlock);
+}
+
+// src/interface/IGasKillerNested.sol
+
+/// @notice Everything the root contract needs to settle a nested tree.
+/// @param root            the signed Merkle root.
+/// @param expiryBlock     the last block at which the tree may settle.
+/// @param expiryProof     Merkle proof of the expiry leaf.
+/// @param sig             the quorum signature over `root`.
+/// @param transitionIndex expected `stateTransitionCount() - 1` of the root contract.
+/// @param targetFunction  selector bound into the root leaf.
+/// @param storageUpdates  the root frame's program.
+/// @param proof           Merkle proof of the root leaf.
+/// @param children        one `abi.encode(NestedFrames.Witness)` per `NESTED` op in the root
+///                        frame's program, in program order.
+struct TreeSubmission {
+    bytes32 root;
+    uint256 expiryBlock;
+    bytes32[] expiryProof;
+    QuorumSignature sig;
+    uint256 transitionIndex;
+    bytes4 targetFunction;
+    bytes storageUpdates;
+    bytes32[] proof;
+    bytes[] children;
+}
+
+/// @title IGasKillerNested
+/// @notice Nested settlement: one quorum signature over a Merkle root authorizes a tree of
+///         frames across SDK-enabled contracts, each applied by the contract it belongs to.
+/// @dev An ERC-165 extension separate from `IGasKillerSDK`, whose interface ID must stay equal
+///      to the `verifyAndUpdate` selector the router probes.
+interface IGasKillerNested {
+    error NotApproved(bytes32 root);
+    error LeafMismatch(bytes32 expected, bytes32 computed);
+    error NotPendingChild(address parent, bytes32 leaf);
+    error NotTreeMember(bytes32 leaf);
+
+    /// @notice Settle a tree whose root frame belongs to this contract.
+    function verifyAndUpdateTree(TreeSubmission calldata submission) external payable;
+
+    /// @notice Apply this contract's frame of an approved tree. Called by the frame's signed
+    ///         parent while it executes the `NESTED` op that names this frame.
+    /// @param root         the approved root.
+    /// @param expectedLeaf the leaf hash the parent's signed program names.
+    /// @param witness      `abi.encode(NestedFrames.Witness)` for this frame.
+    /// @return             `applyNested.selector`; the parent rejects any other return.
+    function applyNested(bytes32 root, bytes32 expectedLeaf, bytes calldata witness) external payable returns (bytes4);
+
+    /// @notice The leaf of the child this contract is calling right now, or zero.
+    function pendingChild() external view returns (bytes32);
+}
+
+// src/StateChangeHandlerLib.sol
+
+/// @notice Discriminator enum for the type of state update operation to execute
+/// @dev Each variant maps to a different EVM operation: storage writes, external calls, log emissions, or contract deployment
+enum StateUpdateType {
+    /// @notice Write a 32-byte value directly to a storage slot
+    STORE,
+    /// @notice Execute an external call with optional ETH value transfer
+    CALL,
+    /// @notice Emit a log with no indexed topics
+    LOG0,
+    /// @notice Emit a log with one indexed topic
+    LOG1,
+    /// @notice Emit a log with two indexed topics
+    LOG2,
+    /// @notice Emit a log with three indexed topics
+    LOG3,
+    /// @notice Emit a log with four indexed topics
+    LOG4,
+    /// @notice Deploy a contract using CREATE (nonce-derived address)
+    CREATE,
+    /// @notice Deploy a contract using CREATE2 (salt-derived deterministic address)
+    CREATE2,
+    /// @notice Apply an SDK-enabled callee's own signed frame of a nested tree
+    NESTED
+}
+
+/// @notice The tree a program runs inside, when it runs inside one.
+/// @dev `root` is zero for single-transition settlement, where `NESTED` ops are rejected.
+///      `children` holds one witness per `NESTED` op in program order; `consumed` counts the
+///      ones handed out so far.
+struct NestedContext {
+    bytes32 root;
+    bytes[] children;
+    uint256 consumed;
+}
+
+/// @notice What a program may send out of its contract. Checked before every op that runs other
+///         code with the contract's authority or moves its ETH: `CALL`, `CREATE`, `CREATE2` and
+///         `NESTED`.
+/// @dev `StorageGuard` only sees `STORE`s. A signed `CALL` runs real code as the consumer, so a
+///      malicious quorum could otherwise spend anything the consumer holds or controls elsewhere.
+///      Before each such op, `_run` adds its value to `sent`, reverts with
+///      `OutgoingValueExceeded` once the total passes `valueCap`, and then calls `authorize`,
+///      which reverts to reject the op.
+/// @param targetFunction The selector the transition was signed for, handed to `authorize`.
+///        Zero in a nested callee's frame, which the tree binds by calldata hash only.
+/// @param valueCap The most wei the program's ops may send in total.
+/// @param sent Wei sent so far by the program's ops. Start it at zero.
+/// @param authorize Called as `(targetFunction, index, kind, target, value, data)`. For a
+///        `CALL`, `data` is the calldata. For `CREATE`/`CREATE2` it is the initcode, with a zero
+///        `target`, since the address isn't known before the deployment. For `NESTED`, `data` is
+///        empty: the callee applies and checks its own signed frame.
+struct CallPolicy {
+    bytes4 targetFunction;
+    uint256 valueCap;
+    uint256 sent;
+    function(bytes4, uint256, StateUpdateType, address, uint256, bytes memory) authorize;
+}
+
+/// @title StateChangeHandlerLib
+/// @notice Library for decoding and executing batched state update operations
+/// @dev Processes ABI-encoded arrays of typed state updates; supports STORE, CALL, LOG0-LOG4, CREATE, CREATE2 and NESTED
+library StateChangeHandlerLib {
+    /// keccak256("gasKiller.pendingChild") - 1, following `StateTracker`'s slot convention.
+    bytes32 internal constant PENDING_CHILD_SLOT = 0x70b036af5917f7c22df33faec4b5fd311a27d9e8310987dea3cc060d66152963;
+
+    function _pendingChild() internal view returns (bytes32 leaf) {
+        assembly {
+            leaf := tload(PENDING_CHILD_SLOT)
+        }
+    }
+
+    function _setPendingChild(bytes32 leaf) private {
+        assembly {
+            tstore(PENDING_CHILD_SLOT, leaf)
+        }
+    }
+
+    /// @dev Runs a program outside any tree, rejecting every NESTED op. Dispatching NESTED
+    ///      through a function pointer keeps `_runNested` out of consumers that never nest.
+    ///      Every STORE is checked against `ranges` (see `_run`). An empty list reverts with
+    ///      `NoProtectedRanges` rather than running unchecked; the only unchecked path is the
+    ///      explicitly named `_runStateUpdatesUnguarded`. Inside a `GasKillerSDK` contract, pass
+    ///      `_settlementRanges()`, which always includes the SDK's own storage and was validated
+    ///      at deployment. Any other list must pass `StorageGuard.validateRanges` first. Every
+    ///      CALL, CREATE, CREATE2 and NESTED is checked against `policy` (see `CallPolicy`); pass
+    ///      `_unrestrictedCalls()` for none.
+    function _runStateUpdates(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges,
+        CallPolicy memory policy
+    ) internal {
+        require(ranges.length != 0, NoProtectedRanges());
+        NestedContext memory none;
+        _run(types, args, ranges, StorageGuard.advance, policy, none, _rejectNested);
+    }
+
+    /// @dev Runs a program inside the tree in `ctx`, checking every STORE against `ranges`. As
+    ///      above, `ranges` may not be empty; pass `_settlementRanges()`.
+    function _runStateUpdates(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges,
+        CallPolicy memory policy,
+        NestedContext memory ctx
+    ) internal {
+        require(ranges.length != 0, NoProtectedRanges());
+        _run(types, args, ranges, StorageGuard.advance, policy, ctx, _runNested);
+    }
+
+    /// @dev Runs a program outside any tree **without checking any STORE**: a signed program can
+    ///      overwrite any slot, including the transition counter, the SDK's configuration and an
+    ///      owner. Only for a consumer that has opted out with
+    ///      `GasKillerSDK._unsafeDisableStorageGuard`. A separate, explicitly named entry point:
+    ///      the guarded ones reject an empty list, so no list a caller builds can turn protection
+    ///      off.
+    ///      `policy` still applies: the opt-out covers STOREs only.
+    function _runStateUpdatesUnguarded(StateUpdateType[] memory types, bytes[] memory args, CallPolicy memory policy)
+        internal
+    {
+        NestedContext memory none;
+        StorageGuard.ProtectedRange[] memory noRanges;
+        _run(types, args, noRanges, _skipCheck, policy, none, _rejectNested);
+    }
+
+    /// @dev Runs a program inside the tree in `ctx` without checking any STORE. As above, only
+    ///      for a consumer that has opted out.
+    function _runStateUpdatesUnguarded(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        CallPolicy memory policy,
+        NestedContext memory ctx
+    ) internal {
+        StorageGuard.ProtectedRange[] memory noRanges;
+        _run(types, args, noRanges, _skipCheck, policy, ctx, _runNested);
+    }
+
+    /// @dev A policy that allows every op and any total value, for callers outside a
+    ///      `GasKillerSDK` contract. `targetFunction` is zero.
+    function _unrestrictedCalls() internal pure returns (CallPolicy memory) {
+        return CallPolicy(bytes4(0), type(uint256).max, 0, _allowCall);
+    }
+
+    function _allowCall(bytes4, uint256, StateUpdateType, address, uint256, bytes memory) private pure {}
+
+    /// @dev Counts `value` against the policy's cap, then hands the op to its `authorize`.
+    function _authorize(
+        CallPolicy memory policy,
+        uint256 index,
+        StateUpdateType kind,
+        address target,
+        uint256 value,
+        bytes memory data
+    ) private {
+        if (value != 0) {
+            uint256 sent = policy.sent + value;
+            if (sent > policy.valueCap) revert OutgoingValueExceeded(index, sent, policy.valueCap);
+            policy.sent = sent;
+        }
+        policy.authorize(policy.targetFunction, index, kind, target, value, data);
+    }
+
+    /// @dev The STORE check of an unguarded run: none.
+    function _skipCheck(StorageGuard.Cursor memory, StorageGuard.ProtectedRange[] memory, uint256, bytes32, bytes32)
+        private
+        pure {}
+
+    /// @notice Decodes and executes a series of state updates
+    /// @dev This function processes an array of state updates, executing them in sequence. Each update can be one of:
+    ///      - STORE: Direct storage writes using assembly
+    ///      - CALL: External contract calls with value transfer
+    ///      - LOG0-LOG4: Event emission with 0-4 indexed topics
+    ///      - CREATE: Contract deployment via CREATE opcode
+    ///      - CREATE2: Deterministic contract deployment via CREATE2 opcode
+    ///      - NESTED: Hand a callee its own signed frame of the tree in `ctx`
+    /// @param types Array of StateUpdateType enums indicating the type of each state update operation
+    /// @param args Array of ABI-encoded arguments corresponding to each operation type
+    /// @param ranges Protected storage. Nonempty when `check` is `StorageGuard.advance`: the
+    ///        guarded entry points reject an empty list (`NoProtectedRanges`), so a caller can't
+    ///        turn protection off by passing one. Empty from `_runStateUpdatesUnguarded`, whose
+    ///        `_skipCheck` never reads it. When checked, it **must already have passed
+    ///        `StorageGuard.validateRanges`**: it is not re-validated here, and a malformed list
+    ///        fails open. `GasKillerSDK._settlementRanges()` is validated at deployment. Every
+    ///        STORE is checked right before it executes and reverts with
+    ///        `StorageGuard.ProtectedSlotWrite` if it would change a protected bit. Checking at
+    ///        that moment is exact even after a CALL has legitimately changed protected storage.
+    /// @param check The STORE check: `StorageGuard.advance`, or `_skipCheck` (which ignores
+    ///        `ranges`) from `_runStateUpdatesUnguarded`. A function pointer rather than a flag,
+    ///        so neither path pays a per-write branch for the other.
+    /// @param policy Checked before every CALL, CREATE, CREATE2 and NESTED, before it runs (see
+    ///        `CallPolicy`). `policy.sent` accumulates across the program.
+    /// @param ctx The tree this program runs inside; a zero root rejects every NESTED op
+    /// @param nested The NESTED handler: `_runNested` inside a tree, `_rejectNested` outside one
+    /// @dev types and args arrays must be equal length, with args[i] containing the encoded parameters for types[i]
+    function _run(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges,
+        function(StorageGuard.Cursor memory, StorageGuard.ProtectedRange[] memory, uint256, bytes32, bytes32)
+            view check,
+        CallPolicy memory policy,
+        NestedContext memory ctx,
+        function(uint256, bytes memory, NestedContext memory, CallPolicy memory) nested
+    ) private {
+        require(types.length == args.length, InvalidArguments());
+        StorageGuard.Cursor memory cursor;
+        // `types.length` is re-read rather than held in a local: with `policy` the STORE branch
+        // would otherwise be one slot past the stack limit.
+        for (uint256 i = 0; i < types.length; ++i) {
+            StateUpdateType stateUpdateType = types[i];
+            bytes memory arg = args[i];
+
+            if (stateUpdateType == StateUpdateType.STORE) {
+                (bytes32 slot, bytes32 value) = abi.decode(arg, (bytes32, bytes32));
+                check(cursor, ranges, i, slot, value);
+                assembly {
+                    sstore(slot, value)
+                }
+            } else if (stateUpdateType == StateUpdateType.CALL) {
+                // Forwards all remaining gas (no stipend cap). In a batched settlement
+                // (e.g. GasKillerSDK.verifyAndUpdateBatch) this is amplified: a
+                // greedy or griefing target in an earlier sub-transition's CALL can consume
+                // enough gas to starve every later sub-transition in the same batch,
+                // reverting the whole (atomic) batch. No partial-state hazard — it's all or
+                // nothing — but it does nullify the batch's cost amortization. See
+                // IGasKillerSDKBatch for the batch-assembly-side note.
+                (address target, uint256 value, bytes memory callargs) = abi.decode(arg, (address, uint256, bytes));
+                _authorize(policy, i, StateUpdateType.CALL, target, value, callargs);
+                bool success;
+                assembly {
+                    success := call(gas(), target, value, add(callargs, 0x20), mload(callargs), 0, 0)
+                }
+                // TODO: this section needs heavy testing
+                if (!success) {
+                    uint256 _returndatasize;
+                    assembly {
+                        _returndatasize := returndatasize()
+                    }
+                    bytes memory revertData = new bytes(_returndatasize);
+                    assembly {
+                        returndatacopy(add(revertData, 0x20), 0, _returndatasize)
+                    }
+                    revert RevertingContext(i, target, revertData, callargs);
+                }
+            } else if (stateUpdateType == StateUpdateType.LOG0) {
+                // `_validateLogArg` checks that `arg` is a canonical, in-bounds encoding before this reads
+                // directly out of its buffer. The `data` length word sits at `base + canonicalOffset`, and
+                // any topics sit inline in the head at `base + 0x20*k`.
+                _validateLogArg(arg, 0x20);
+                assembly {
+                    let dataPtr := add(add(arg, 0x20), 0x20)
+                    log0(add(dataPtr, 0x20), mload(dataPtr))
+                }
+            } else if (stateUpdateType == StateUpdateType.LOG1) {
+                _validateLogArg(arg, 0x40);
+                assembly {
+                    let base := add(arg, 0x20)
+                    let dataPtr := add(base, 0x40)
+                    log1(add(dataPtr, 0x20), mload(dataPtr), mload(add(base, 0x20)))
+                }
+            } else if (stateUpdateType == StateUpdateType.LOG2) {
+                _validateLogArg(arg, 0x60);
+                assembly {
+                    let base := add(arg, 0x20)
+                    let dataPtr := add(base, 0x60)
+                    log2(add(dataPtr, 0x20), mload(dataPtr), mload(add(base, 0x20)), mload(add(base, 0x40)))
+                }
+            } else if (stateUpdateType == StateUpdateType.LOG3) {
+                _validateLogArg(arg, 0x80);
+                assembly {
+                    let base := add(arg, 0x20)
+                    let dataPtr := add(base, 0x80)
+                    log3(
+                        add(dataPtr, 0x20),
+                        mload(dataPtr),
+                        mload(add(base, 0x20)),
+                        mload(add(base, 0x40)),
+                        mload(add(base, 0x60))
+                    )
+                }
+            } else if (stateUpdateType == StateUpdateType.LOG4) {
+                _validateLogArg(arg, 0xa0);
+                assembly {
+                    let base := add(arg, 0x20)
+                    let dataPtr := add(base, 0xa0)
+                    log4(
+                        add(dataPtr, 0x20),
+                        mload(dataPtr),
+                        mload(add(base, 0x20)),
+                        mload(add(base, 0x40)),
+                        mload(add(base, 0x60)),
+                        mload(add(base, 0x80))
+                    )
+                }
+            } else if (stateUpdateType == StateUpdateType.CREATE) {
+                (uint256 value, bytes memory initcode) = abi.decode(arg, (uint256, bytes));
+                _authorize(policy, i, StateUpdateType.CREATE, address(0), value, initcode);
+                address deployed;
+                assembly {
+                    deployed := create(value, add(initcode, 0x20), mload(initcode))
+                }
+                require(deployed != address(0), DeploymentFailed());
+            } else if (stateUpdateType == StateUpdateType.CREATE2) {
+                (bytes32 salt, uint256 value, bytes memory initcode) = abi.decode(arg, (bytes32, uint256, bytes));
+                _authorize(policy, i, StateUpdateType.CREATE2, address(0), value, initcode);
+                address deployed;
+                assembly {
+                    deployed := create2(value, add(initcode, 0x20), mload(initcode), salt)
+                }
+                require(deployed != address(0), DeploymentFailed());
+            } else if (stateUpdateType == StateUpdateType.NESTED) {
+                nested(i, arg, ctx, policy);
+            }
+        }
+        if (ctx.consumed != ctx.children.length) revert UnconsumedWitnesses(ctx.children.length, ctx.consumed);
+    }
+
+    function _rejectNested(uint256, bytes memory, NestedContext memory, CallPolicy memory) private pure {
+        revert NestedOutsideTree();
+    }
+
+    /// @dev The child checks `pendingChild()` on its caller before applying anything, which is
+    ///      what stops a frame from being applied anywhere but this op. The previous value is
+    ///      restored afterwards because a cycle can nest pending children on one contract.
+    ///      A call to an address without code, or to a permissive fallback, also succeeds, so
+    ///      success alone does not show the frame applied; the child must echo its selector.
+    function _runNested(uint256 i, bytes memory arg, NestedContext memory ctx, CallPolicy memory policy) private {
+        if (ctx.root == bytes32(0)) revert NestedOutsideTree();
+        (address target, uint256 value, bytes32 childLeaf) = abi.decode(arg, (address, uint256, bytes32));
+        _authorize(policy, i, StateUpdateType.NESTED, target, value, "");
+        if (ctx.consumed >= ctx.children.length) revert MissingWitness(i);
+        bytes memory callargs =
+            abi.encodeCall(IGasKillerNested.applyNested, (ctx.root, childLeaf, ctx.children[ctx.consumed++]));
+
+        bytes32 previous = _pendingChild();
+        _setPendingChild(childLeaf);
+        bool success;
+        bytes32 ack;
+        assembly {
+            success := call(gas(), target, value, add(callargs, 0x20), mload(callargs), 0, 0)
+            if eq(returndatasize(), 0x20) {
+                returndatacopy(0, 0, 0x20)
+                ack := mload(0)
+            }
+        }
+        _setPendingChild(previous);
+
+        if (!success) {
+            uint256 size;
+            assembly {
+                size := returndatasize()
+            }
+            bytes memory revertData = new bytes(size);
+            assembly {
+                returndatacopy(add(revertData, 0x20), 0, size)
+            }
+            revert RevertingContext(i, target, revertData, callargs);
+        }
+        if (ack != bytes32(IGasKillerNested.applyNested.selector)) revert NestedNotApplied(i, target);
+    }
+
+    /// @notice Validate that `arg` is a canonical, in-bounds ABI encoding of a LOG payload
+    /// @dev Reverts with `MalformedLogPayload` on a truncated head, a non-canonical `data` offset, or a
+    ///      `data` length that runs past the end of `arg`. `canonicalOffset` is the encoding's head size
+    ///      `0x20 * (numTopics + 1)` (0x20 for LOG0, 0x40 for LOG1, ... 0xa0 for LOG4); it is also where the
+    ///      `data` length word lives, and every fixed `bytes32` topic sits within the head before it.
+    /// @param arg The ABI-encoded LOG payload to validate
+    /// @param canonicalOffset The expected offset of the `data` field (equals the encoding's head size)
+    function _validateLogArg(bytes memory arg, uint256 canonicalOffset) private pure {
+        uint256 len = arg.length;
+        // The head (offset word + topics) and the `data` length word must both be readable.
+        if (len < canonicalOffset + 0x20) revert MalformedLogPayload();
+        uint256 off;
+        uint256 dataLen;
+        assembly {
+            let base := add(arg, 0x20)
+            off := mload(base)
+            dataLen := mload(add(base, canonicalOffset))
+        }
+        // Offset must match what abi.encode produces, and the data bytes must fit inside `arg`.
+        // `len >= canonicalOffset + 0x20` above makes the subtraction below safe.
+        if (off != canonicalOffset) revert MalformedLogPayload();
+        if (dataLen > len - canonicalOffset - 0x20) revert MalformedLogPayload();
+    }
+
+    /// @notice Thrown when `types` and `args` arrays have different lengths
+    error InvalidArguments();
+
+    /// @notice Thrown when a program is run with an empty protected-range list. Every settlement
+    ///         protects at least the SDK's own storage, so an empty list means a caller has
+    ///         switched protection off, usually by accident.
+    error NoProtectedRanges();
+
+    /// @notice Thrown when a program's CALL, CREATE, CREATE2 and NESTED ops together would send
+    ///         more than its `CallPolicy.valueCap`
+    /// @param index The zero-based position of the op that passed the cap
+    /// @param total The program's outgoing value including that op
+    /// @param cap The cap
+    error OutgoingValueExceeded(uint256 index, uint256 total, uint256 cap);
+
+    /// @notice Thrown when a LOG operation's payload is not a canonical, in-bounds ABI encoding
+    error MalformedLogPayload();
+
+    /// @notice Thrown when a CALL operation's external call reverts
+    /// @param index The zero-based position of the failing operation in the batch
+    /// @param target The contract address that was called
+    /// @param revertData The raw revert data returned by the failed call
+    /// @param callargs The calldata that was passed to the failed call
+    error RevertingContext(uint256 index, address target, bytes revertData, bytes callargs);
+
+    /// @notice Thrown when a NESTED operation appears in a program settled outside a tree
+    error NestedOutsideTree();
+
+    /// @notice Thrown when a NESTED operation has no witness left to hand its child
+    /// @param index The zero-based position of the NESTED operation in the batch
+    error MissingWitness(uint256 index);
+
+    /// @notice Thrown when a NESTED operation's call succeeds without the child acknowledging it
+    /// @param index The zero-based position of the NESTED operation in the batch
+    /// @param target The address the NESTED operation called
+    error NestedNotApplied(uint256 index, address target);
+
+    /// @notice Thrown when a program finishes with witnesses no NESTED operation consumed
+    error UnconsumedWitnesses(uint256 supplied, uint256 consumed);
+
+    /// @notice Thrown when a CREATE or CREATE2 operation returns address(0)
+    error DeploymentFailed();
+}
+
+// src/GasKillerSDK.sol
+
+/// @title GasKillerSDK
+/// @notice Base contract for Gas Killer targets. Authorises a state transition with a
+///         **single** aggregate Schnorr signature verified against a `SchnorrStakeRegistry`
+///         (constant gas, non-signer subtraction) and applies the signed state updates.
+///
+/// @dev The signed message is `sha256(abi.encode(transitionIndex, address(this),
+///      targetFunction, storageUpdates))` for a transition settled with no ETH, and
+///      `sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates,
+///      value))` for one settled with `value` wei. It is independent of the signature scheme,
+///      so the off-chain digest and the slashing/fraud-proof machinery do not depend on it.
+///
+///      Binding the value is what makes inbound ETH safe: a tracked function that credits
+///      `msg.value` replays as plain `STORE` updates, so without it anyone could settle a
+///      deposit while sending nothing. A zero-value transition keeps the original four-field
+///      encoding, so every zero-value signature is unchanged; the two encodings cannot collide
+///      because their heads differ in length.
+///
+///      Both entrypoints are `guardTransition`-protected (see `TransitionGuard`): a `CALL`
+///      state update runs arbitrary external code mid-transition, so re-entering
+///      `verifyAndUpdate` with the *next* transition's valid signature would otherwise
+///      interleave two signed transitions. The same transient flag is queryable as
+///      `inTransition()` so external readers can reject mid-transition state.
+///
+///      Both entrypoints are also `payable`. The value is part of what the quorum signs, so a
+///      transition settles only with the value it was analyzed with; see the per-function docs.
+///
+///      Nested settlement is opt-in through `GasKillerNestedSDK`, so a consumer that never
+///      nests does not carry its bytecode; a `NESTED` op settled here reverts.
+///
+///      Protected storage: every `STORE` a signed program carries is checked, right before it
+///      executes, against `gasKillerProtectedRanges()`. A write that would change a protected bit reverts
+///      the transition (`StorageGuard.ProtectedSlotWrite`). The SDK always protects its own
+///      storage: the transition counter and the whole ERC-7201 namespace of the configuration
+///      struct (AVS address, registry, stale-block window). Consumers add theirs, such as an `Ownable` owner slot, by
+///      overriding `_protectedRanges()`. A write that leaves protected bits unchanged passes,
+///      which is what keeps the counter copy gas-analyzer puts in every program working.
+abstract contract GasKillerSDK is
+    StateTracker,
+    TransitionGuard,
+    ERC165,
+    IGasKillerSDK,
+    IGasKillerSDKBatch,
+    IGasKillerValueBound
+{
+    /// @dev Lives in the ERC-7201 namespace at `STORAGE_LOCATION`, and signed programs may not
+    ///      change any slot of that namespace (see `_settlementRanges`). Two rules keep every field
+    ///      covered when the struct grows: it must fit in the namespace's 256 slots, and it must
+    ///      hold only value types. A mapping or dynamic array here would store its entries at
+    ///      keccak-derived slots outside the namespace, where they would be unprotected.
+    struct GasKillerSDKStorage {
+        address avsAddress;
+        ISchnorrStakeRegistry registry;
+        uint96 blockStaleMeasure;
+        OutgoingBucket outgoing;
+        TokenLimits tokens;
+    }
+
+    /// @dev The outgoing-value budget of `GasKillerOutgoingRateLimit`, kept here so that it is
+    ///      protected storage: a signed program that could write it could refill its own budget.
+    ///      All zero, and never read, in a contract that doesn't use the extension. One slot.
+    /// @param limit Most wei the budget holds, which is also what refills over one `period`.
+    /// @param available Wei left at `updated`.
+    /// @param period Seconds a full refill takes.
+    /// @param updated Timestamp `available` was last computed at.
+    struct OutgoingBucket {
+        uint96 limit;
+        uint96 available;
+        uint32 period;
+        uint32 updated;
+    }
+
+    /// @dev The per-token budgets of `TokenRateLimit`, kept here for the same reason as
+    ///      `OutgoingBucket`. A fixed array rather than a mapping: a mapping's entries would live
+    ///      at keccak-derived slots outside the protected namespace. All zero, and never read, in a
+    ///      contract that doesn't use per-token limits. 17 slots.
+    /// @param count Tokens in use, the first `count` entries of `buckets`.
+    struct TokenLimits {
+        uint256 count;
+        TokenBucket[8] buckets;
+    }
+
+    /// @dev One token's budget: like `OutgoingBucket`, in two slots.
+    struct TokenBucket {
+        address token;
+        uint32 period;
+        uint32 updated;
+        uint128 limit;
+        uint128 available;
+    }
+
+    // keccak256(abi.encode(uint256(keccak256("gaskiller.SchnorrGasKillerSDK.storage")) - 1)) & ~bytes32(uint256(0xff))
+    bytes32 private constant STORAGE_LOCATION = 0x1d6f9f139320a34a32f3b29eb8638270178e831962a74100c9e8b433f21e1200;
+
+    /// @dev Last slot of the ERC-7201 namespace that starts at `STORAGE_LOCATION`. The formula
+    ///      clears the low byte, so the namespace is the 256-slot block ending here, whatever the
+    ///      struct's current size.
+    uint256 private constant CONFIG_NAMESPACE_END = uint256(STORAGE_LOCATION) | 0xff;
+
+    uint256 private constant DEFAULT_BLOCK_STALE_MEASURE = 300;
+
+    error FutureBlockNumber();
+    error StaleBlockNumber();
+    error InvalidTransitionIndex();
+    error InvalidSignature();
+    error InvalidQuorumSignature();
+    error EmptyBatch();
+    error InsufficientBatchValue(uint256 sent, uint256 required);
+    error BlockStaleMeasureOverflow();
+
+    /// @notice Validates the protected-range list once, at deployment.
+    /// @dev `_protectedRanges` is `pure`, so the list can't depend on anything a consumer's own
+    ///      constructor sets later, and it can't change after deployment. Settlement therefore
+    ///      relies on this check instead of repeating it. A malformed list reverts here with
+    ///      `StorageGuard.InvalidRanges`. Behind a proxy, the implementation's constructor runs it
+    ///      against the same code the proxy executes.
+    constructor() {
+        StorageGuard.validateRanges(_settlementRanges());
+    }
+
+    /// @notice Verify an aggregate Schnorr quorum signature and apply the state updates.
+    /// @dev `msg.value` is bound into the digest, so the transition settles only with exactly
+    ///      the value the task was analyzed with: a deposit cannot be credited without its ETH,
+    ///      and no surplus can be sent. Value moved by `CALL`/`CREATE`/`CREATE2` updates is fixed
+    ///      inside the signed `storageUpdates` and paid out of this contract's balance, which
+    ///      includes `msg.value`; a shortfall reverts the whole transition (`RevertingContext` for
+    ///      a CALL, `DeploymentFailed` for a CREATE/CREATE2).
+    /// @param msgHash             the task digest (recomputed and checked below).
+    /// @param referenceBlockNumber block at which stake/keys are evaluated by the registry.
+    /// @param storageUpdates      ABI-encoded `(StateUpdateType[], bytes[])`.
+    /// @param transitionIndex     expected `stateTransitionCount() - 1`.
+    /// @param targetFunction      selector bound into the digest.
+    /// @param s                   aggregate Schnorr response scalar.
+    /// @param Raddr               aggregate nonce address `address(R)`.
+    /// @param nonSigners          operators that did not sign, strictly ascending.
+    function verifyAndUpdate(
+        bytes32 msgHash,
+        uint32 referenceBlockNumber,
+        bytes calldata storageUpdates,
+        uint256 transitionIndex,
+        bytes4 targetFunction,
+        uint256 s,
+        address Raddr,
+        address[] calldata nonSigners
+    ) external payable guardTransition {
+        _verifyTransition(
+            msgHash,
+            referenceBlockNumber,
+            storageUpdates,
+            transitionIndex,
+            targetFunction,
+            msg.value,
+            s,
+            Raddr,
+            nonSigners
+        );
+        // Inline rather than a helper: a helper isn't inlined and costs ~22 gas per settlement.
+        // Must match `_guardRanges`.
+        StorageGuard.ProtectedRange[] memory ranges;
+        if (!_unsafeDisableStorageGuard()) ranges = _settlementRanges();
+        _stateChangeHandler(storageUpdates, ranges, targetFunction);
+    }
+
+    /// @notice Verify and apply a sequence of independently signed state transitions in
+    ///         one transaction, amortizing the intrinsic and cold-access costs across the
+    ///         batch (sub-transitions after the first verify at warm-access prices).
+    /// @dev Each applied submission is checked exactly as a standalone `verifyAndUpdate`
+    ///      would check it — same digest, same registry verification — so batching changes
+    ///      nothing for the off-chain signing path. Transitions apply in order; the
+    ///      `guardTransition` latch is held across the whole batch, and any failing
+    ///      sub-transition reverts the entire batch.
+    ///
+    ///      A submission whose `transitionIndex` is already settled is SKIPPED (not
+    ///      validated, not applied) rather than reverting the batch: settlement is
+    ///      permissionless, so a third party who lifts one submission from the mempool
+    ///      and settles it standalone could otherwise nullify the whole batch with one
+    ///      cheap front-run. An index can only ever be consumed by a quorum-signed
+    ///      transition for this contract, so a skipped item's transition has already
+    ///      happened. Reverts (`InvalidTransitionIndex`) only on a genuine gap — an index
+    ///      above the next expected one.
+    ///
+    ///      Batch assemblers: a `CALL` state update forwards all remaining gas to its target
+    ///      with no cap (see `StateChangeHandlerLib`). A greedy/griefing target in an early
+    ///      sub-transition can therefore starve every later one in the same batch, reverting
+    ///      the whole (atomic) batch — no partial-state hazard, but it does nullify the
+    ///      amortization this function exists for.
+    ///
+    ///      Each submission's digest binds its own `value`, and `msg.value` must cover the sum
+    ///      over the submissions actually applied (`InsufficientBatchValue` otherwise), so no
+    ///      applied transition is credited ETH the batch did not bring. The check is "covers"
+    ///      rather than "equals" because a skipped submission must not revert the batch. The
+    ///      surplus, such as a front-run item's share, is refunded to `msg.sender` once every
+    ///      update has applied. A sender that can't accept it leaves it in this contract
+    ///      rather than reverting the batch.
+    /// @param submissions The transitions to apply, in order of ascending transition index.
+    function verifyAndUpdateBatch(TaskSubmission[] calldata submissions) external payable guardTransition {
+        uint256 len = submissions.length;
+        require(len != 0, EmptyBatch());
+        // Built once for the whole batch: the list is a compile-time constant, validated at
+        // deployment, so every item would rebuild the same thing. Inline, and must match
+        // `_guardRanges`, as in `verifyAndUpdate`.
+        StorageGuard.ProtectedRange[] memory ranges;
+        if (!_unsafeDisableStorageGuard()) ranges = _settlementRanges();
+        uint256 required;
+        for (uint256 i = 0; i < len; ++i) {
+            TaskSubmission calldata sub = submissions[i];
+            // Already settled (e.g. front-run or redelivered) → skip, don't poison the batch.
+            if (sub.transitionIndex + 1 <= stateTransitionCount()) continue;
+            required += sub.value;
+            _verifyTransition(
+                sub.msgHash,
+                sub.referenceBlockNumber,
+                sub.storageUpdates,
+                sub.transitionIndex,
+                sub.targetFunction,
+                sub.value,
+                sub.s,
+                sub.Raddr,
+                sub.nonSigners
+            );
+            _stateChangeHandler(sub.storageUpdates, ranges, sub.targetFunction);
+        }
+        require(msg.value >= required, InsufficientBatchValue(msg.value, required));
+        if (msg.value > required) {
+            // Under the latch, so the refund can't re-enter settlement. A sender that rejects ETH
+            // keeps the surplus here rather than reverting a batch the skip exists to protect.
+            (bool refunded,) = msg.sender.call{value: msg.value - required}("");
+            refunded;
+        }
+    }
+
+    /// @dev The checks shared by both entrypoints: bumps the transition counter (`trackState`)
+    ///      and verifies the transition, but doesn't apply it. Callers must hold the
+    ///      `guardTransition` latch and apply the program with `_stateChangeHandler` straight
+    ///      after, which keeps the order the same as before: count, check, run.
+    function _verifyTransition(
+        bytes32 msgHash,
+        uint32 referenceBlockNumber,
+        bytes calldata storageUpdates,
+        uint256 transitionIndex,
+        bytes4 targetFunction,
+        uint256 value,
+        uint256 s,
+        address Raddr,
+        address[] calldata nonSigners
+    ) private trackState {
+        require(referenceBlockNumber < block.number, FutureBlockNumber());
+        require((uint256(referenceBlockNumber) + _getBlockStaleMeasure()) >= block.number, StaleBlockNumber());
+
+        require(transitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
+        require(_digest(transitionIndex, targetFunction, storageUpdates, value) == msgHash, InvalidSignature());
+
+        _verifyQuorum(msgHash, s, Raddr, nonSigners, referenceBlockNumber);
+    }
+
+    function _verifyQuorum(
+        bytes32 msgHash,
+        uint256 s,
+        address Raddr,
+        address[] calldata nonSigners,
+        uint32 referenceBlockNumber
+    ) private view {
+        bool ok = _schnorrRegistry().isValidSignature(msgHash, s, Raddr, nonSigners, referenceBlockNumber);
+        require(ok, InvalidQuorumSignature());
+    }
+
+    /// @dev `ranges` is the `_guardRanges()` list, built inline by the entrypoint once per call.
+    ///      The opt-out is dispatched here (and in `GasKillerNestedSDK._runProgram`), never by
+    ///      the list: an opted-out program ignores `ranges`, and a guarded one with an empty list
+    ///      reverts (`NoProtectedRanges`), so the list alone never turns protection off.
+    ///      Every CALL, CREATE, CREATE2 and NESTED goes through `_callPolicy(targetFunction)`.
+    function _stateChangeHandler(
+        bytes calldata storageUpdates,
+        StorageGuard.ProtectedRange[] memory ranges,
+        bytes4 targetFunction
+    ) internal {
+        (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
+        CallPolicy memory policy = _callPolicy(targetFunction);
+        _beforeProgram(targetFunction);
+        if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args, policy);
+        else StateChangeHandlerLib._runStateUpdates(types, args, ranges, policy);
+        _afterProgram(targetFunction);
+    }
+
+    /// @notice Override to act right before a signed program runs, after it was verified.
+    ///         Does nothing by default.
+    /// @dev Paired with `_afterProgram`. Programs can nest on one contract (a nested tree can
+    ///      re-enter it), so per-program state should be kept per depth, for example in
+    ///      transient storage, as `TokenRateLimit` does.
+    /// @param targetFunction As for `_authorizeCall`: zero in a nested callee's frame.
+    function _beforeProgram(bytes4 targetFunction) internal virtual {}
+
+    /// @notice Override to act right after a signed program ran; revert to reject it. Does
+    ///         nothing by default.
+    /// @param targetFunction As for `_authorizeCall`: zero in a nested callee's frame.
+    function _afterProgram(bytes4 targetFunction) internal virtual {}
+
+    /// @dev The policy a program for `targetFunction` runs under: `_maxOutgoingValue`'s cap and
+    ///      `_authorizeCall`. Fresh per program, so each transition of a batch has its own cap.
+    function _callPolicy(bytes4 targetFunction) internal view returns (CallPolicy memory) {
+        return CallPolicy(targetFunction, _maxOutgoingValue(targetFunction), 0, _authorizeCall);
+    }
+
+    /// @notice Override to restrict what a signed program may do with this contract's authority.
+    ///         Called before every `CALL`, `CREATE`, `CREATE2` and `NESTED` op of a program;
+    ///         revert to reject the op, and with it the whole transition. Allows everything by
+    ///         default.
+    /// @dev `StorageGuard` only checks `STORE`s. A `CALL` runs real code as this contract, so
+    ///      without a policy a quorum that signs a malicious program can, for example:
+    ///      - call this contract's own functions gated on `msg.sender == address(this)`;
+    ///      - transfer or approve tokens this contract holds;
+    ///      - send this contract's ETH through a `CALL`, `CREATE`, `CREATE2` or `NESTED` value.
+    ///
+    ///      A signed program doesn't carry the user's arguments or `msg.sender`, and honest
+    ///      programs often call targets only known at run time, so the policy is code rather than
+    ///      a list: check what the tracked functions can legitimately do. The hook is not `view`,
+    ///      so it can keep state, such as a rate limit. For example, to reject self-calls (which
+    ///      gas-analyzer does emit for a tracked function that calls `this.foo()`):
+    ///      ```
+    ///      function _authorizeCall(bytes4, uint256 index, StateUpdateType kind, address target, uint256, bytes memory)
+    ///          internal override
+    ///      {
+    ///          if (kind == StateUpdateType.CALL && target == address(this)) revert SelfCall(index);
+    ///      }
+    ///      ```
+    ///      Per-program value totals are better capped with `_maxOutgoingValue`, which runs first.
+    /// @param targetFunction The selector the transition was signed for; zero in a nested
+    ///        callee's frame (`applyNested`), which the tree binds by calldata hash only.
+    /// @param index The op's position in the program.
+    /// @param kind `CALL`, `CREATE`, `CREATE2` or `NESTED`.
+    /// @param target The callee; zero for `CREATE`/`CREATE2`.
+    /// @param value Wei the op sends.
+    /// @param data The calldata of a `CALL`, the initcode of a `CREATE`/`CREATE2`, empty for a
+    ///        `NESTED` op (the callee checks its own signed frame).
+    function _authorizeCall(
+        bytes4 targetFunction,
+        uint256 index,
+        StateUpdateType kind,
+        address target,
+        uint256 value,
+        bytes memory data
+    ) internal virtual {}
+
+    /// @notice Override to cap the wei one signed program may send out of this contract, summed
+    ///         over its `CALL`, `CREATE`, `CREATE2` and `NESTED` ops. A program that would send
+    ///         more reverts with `StateChangeHandlerLib.OutgoingValueExceeded`. Unlimited by
+    ///         default.
+    /// @dev Read once per program, before it runs. The total counts what the program sends,
+    ///      whatever `msg.value` brought in. Each item of a batch, and each frame of a nested
+    ///      tree, is capped on its own.
+    /// @param targetFunction As for `_authorizeCall`: zero in a nested callee's frame.
+    function _maxOutgoingValue(bytes4 targetFunction) internal view virtual returns (uint256) {
+        targetFunction;
+        return type(uint256).max;
+    }
+
+    /// @notice The storage ranges a signed program may not change: the SDK's own slots merged
+    ///         with the consumer's `_protectedRanges()`, in ascending order. Empty when the
+    ///         consumer has opted out of the check (`_unsafeDisableStorageGuard`); a guarded
+    ///         contract always lists at least the SDK's two ranges.
+    /// @dev A compile-time constant of this contract's code, validated once by the constructor
+    ///      (see `constructor`), so it can't be malformed once deployed. Prefixed like no other
+    ///      SDK getter because a generic `protectedRanges` could already exist in a consumer.
+    function gasKillerProtectedRanges() external pure returns (StorageGuard.ProtectedRange[] memory) {
+        return _guardRanges();
+    }
+
+    /// @dev The list settlement checks against: `_settlementRanges()`, or empty, without building
+    ///      it, when the consumer has opted out. The two settlement entry points build the same
+    ///      list inline, for gas. Only the list; whether STOREs are checked is decided by
+    ///      `_stateChangeHandler`.
+    function _guardRanges() private pure returns (StorageGuard.ProtectedRange[] memory ranges) {
+        if (!_unsafeDisableStorageGuard()) ranges = _settlementRanges();
+    }
+
+    /// @notice **Unsafe.** Override to return true to stop settlement checking signed STOREs
+    ///         against protected storage. Saves about 1,400 gas per call, 500 more per declared
+    ///         range, and about 280 per STORE (see `bench/SettlementGas.t.sol`).
+    /// @dev With the check off, a quorum that signs a malicious program can overwrite any slot of
+    ///      this contract: an owner, an upgrade slot, the transition counter (replaying or
+    ///      skipping transitions) and the SDK's own configuration, including the registry that
+    ///      verifies signatures. Opt out only if the contract's correctness already rests on
+    ///      trusting the quorum completely, for example one with no owner, no upgrade path and
+    ///      nothing else a rewrite could take over.
+    ///
+    ///      The function is `pure`, so the choice is fixed in the contract's code: no signed
+    ///      program, owner or setter can switch it at runtime. It applies to `verifyAndUpdate`,
+    ///      `verifyAndUpdateBatch` and nested settlement alike, and `gasKillerProtectedRanges`
+    ///      returns an empty list so off-chain tooling can see it. `_protectedRanges` is ignored
+    ///      while it returns true, though the constructor still validates it.
+    function _unsafeDisableStorageGuard() internal pure virtual returns (bool) {
+        return false;
+    }
+
+    /// @notice Storage the consumer wants protected from signed programs. Override to add slots.
+    /// @dev Return inclusive `[start, end]` ranges in strictly ascending order, not overlapping
+    ///      each other or the SDK's own slots (see `gasKillerProtectedRanges`). Use `StorageGuard.FULL` to
+    ///      protect whole slots, or a narrower mask on a single slot to protect part of a packed
+    ///      slot. The function is `pure`, so the list is a constant of the contract's code: it
+    ///      can't read storage or immutables, and the constructor validates it once, so a
+    ///      malformed list makes deployment revert with `StorageGuard.InvalidRanges`. For example:
+    ///      ```
+    ///      function _protectedRanges() internal pure override returns (StorageGuard.ProtectedRange[] memory r) {
+    ///          r = new StorageGuard.ProtectedRange[](1);
+    ///          r[0] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL); // Ownable._owner
+    ///      }
+    ///      ```
+    function _protectedRanges() internal pure virtual returns (StorageGuard.ProtectedRange[] memory) {
+        return new StorageGuard.ProtectedRange[](0);
+    }
+
+    /// @dev The list every program is checked against: the consumer's ranges with the SDK's two
+    ///      fixed ranges merged in by start. Not virtual, so a consumer cannot drop the SDK's own
+    ///      protection. The constructor validates the result once, so a consumer list that is
+    ///      unsorted or collides with an SDK range makes deployment revert instead of failing open.
+    ///      Settlement doesn't re-validate: the list is `pure`, so it is the one that was checked.
+    ///
+    ///      The SDK ranges are constants and the config namespace sits below the counter, so the
+    ///      merge is three copy passes split at their starts. Consumer entries keep their relative
+    ///      order, so a consumer list that descends or overlaps still does after the merge and
+    ///      still fails validation. Each pass compares its position with the end before reading.
+    function _settlementRanges() internal pure returns (StorageGuard.ProtectedRange[] memory out) {
+        StorageGuard.ProtectedRange[] memory consumer = _protectedRanges();
+        // The whole namespace, not the struct's current two slots, so a field added later is
+        // covered without anyone remembering to widen this.
+        StorageGuard.ProtectedRange memory config =
+            StorageGuard.ProtectedRange(uint256(STORAGE_LOCATION), CONFIG_NAMESPACE_END, StorageGuard.FULL);
+        StorageGuard.ProtectedRange memory counter = StorageGuard.ProtectedRange(
+            uint256(STATE_TRACKER_STORAGE_LOCATION), uint256(STATE_TRACKER_STORAGE_LOCATION), StorageGuard.FULL
+        );
+        // Only the array of pointers: `new ProtectedRange[](n)` would also allocate and zero a
+        // struct behind every slot, and the merge below overwrites every pointer.
+        uint256 outLength = consumer.length + 2;
+        assembly ("memory-safe") {
+            out := mload(0x40)
+            mstore(out, outLength)
+            mstore(0x40, add(add(out, 0x20), shl(5, outLength)))
+        }
+        assembly ("memory-safe") {
+            let src := add(consumer, 0x20)
+            let end := add(src, shl(5, mload(consumer)))
+            let dst := add(out, 0x20)
+            // Consumer entries starting below the config namespace, then the namespace.
+            for {} lt(src, end) {} {
+                let r := mload(src)
+                if iszero(lt(mload(r), mload(config))) { break }
+                mstore(dst, r)
+                src := add(src, 0x20)
+                dst := add(dst, 0x20)
+            }
+            mstore(dst, config)
+            dst := add(dst, 0x20)
+            // Entries starting below the counter, then the counter, then the rest.
+            for {} lt(src, end) {} {
+                let r := mload(src)
+                if iszero(lt(mload(r), mload(counter))) { break }
+                mstore(dst, r)
+                src := add(src, 0x20)
+                dst := add(dst, 0x20)
+            }
+            mstore(dst, counter)
+            dst := add(dst, 0x20)
+            for {} lt(src, end) {} {
+                mstore(dst, mload(src))
+                src := add(src, 0x20)
+                dst := add(dst, 0x20)
+            }
+        }
+    }
+
+    /// @notice Query if a contract implements an interface
+    /// @dev Supports ERC-165, IGasKillerSDK detection (the router's preflight
+    ///      probes the schnorr `verifyAndUpdate` selector before submitting), and the
+    ///      IGasKillerSDKBatch batching/latch extension. Defers to `super` so a
+    ///      contract inheriting both this SDK and another OpenZeppelin ERC-165 module reports
+    ///      the union of both ID sets.
+    /// @param interfaceId The interface identifier, as specified in ERC-165
+    /// @return `true` if the contract implements `interfaceId` and `false` otherwise
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
+        return interfaceId == type(IGasKillerSDK).interfaceId || interfaceId == type(IGasKillerSDKBatch).interfaceId
+            || interfaceId == type(IGasKillerValueBound).interfaceId || super.supportsInterface(interfaceId);
+    }
+
+    /// @notice Compute the expected message hash for a transition settled with no ETH
+    /// @dev Exact mirror of the ECDSA `GasKillerSDK.getMessageHash` — the digest is
+    ///      scheme-agnostic, so off-chain parity checks work unchanged.
+    /// @param transitionIndex The transition index
+    /// @param targetFunction The target function selector
+    /// @param storageUpdates The ABI-encoded storage updates
+    /// @return The expected SHA-256 hash
+    function getMessageHash(uint256 transitionIndex, bytes4 targetFunction, bytes calldata storageUpdates)
+        external
+        view
+        returns (bytes32)
+    {
+        return _digest(transitionIndex, targetFunction, storageUpdates, 0);
+    }
+
+    /// @notice Compute the expected message hash for a transition settled with `value` wei
+    /// @dev Named apart from `getMessageHash` because an overload would rename the generated
+    ///      off-chain binding of the existing function.
+    /// @param transitionIndex The transition index
+    /// @param targetFunction The target function selector
+    /// @param storageUpdates The ABI-encoded storage updates
+    /// @param value The `msg.value` the transition settles with
+    /// @return The expected SHA-256 hash
+    function getMessageHashWithValue(
+        uint256 transitionIndex,
+        bytes4 targetFunction,
+        bytes calldata storageUpdates,
+        uint256 value
+    ) external view returns (bytes32) {
+        return _digest(transitionIndex, targetFunction, storageUpdates, value);
+    }
+
+    /// @dev Mirrored by `NestedFrames.rootLeaf`, which must stay byte-identical.
+    function _digest(uint256 transitionIndex, bytes4 targetFunction, bytes calldata storageUpdates, uint256 value)
+        private
+        view
+        returns (bytes32)
+    {
+        if (value == 0) return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
+        return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates, value));
+    }
+
+    /// @inheritdoc TransitionGuard
+    function inTransition() public view override(TransitionGuard, IGasKillerSDKBatch) returns (bool locked) {
+        return TransitionGuard.inTransition();
+    }
+
+    function schnorrRegistry() external view returns (address) {
+        return address(_schnorrRegistry());
+    }
+
+    function avsAddress() external view returns (address) {
+        return _sto().avsAddress;
+    }
+
+    function blockStaleMeasure() external view returns (uint256) {
+        return _getBlockStaleMeasure();
+    }
+
+    /// @notice Sets the AVS service manager this contract is scoped to.
+    /// @dev **Do not call from a `trackState` function.** The config struct is protected storage
+    ///      (see `gasKillerProtectedRanges`), so a settled program may not change it. A tracked function
+    ///      that changes this value carries that write in its program, and settlement rejects it
+    ///      every time with `StorageGuard.ProtectedSlotWrite`: the transition can never settle.
+    ///      Call it from the constructor, an initializer, or an admin function that is not
+    ///      `trackState`, all of which run natively and are never settled. Storing the value
+    ///      already there changes nothing and passes.
+    function _setAvsAddress(address _avsAddress) internal {
+        _sto().avsAddress = _avsAddress;
+    }
+
+    /// @notice Sets the registry that verifies quorum signatures for this contract.
+    /// @dev **Do not call from a `trackState` function.** The config struct is protected storage
+    ///      (see `gasKillerProtectedRanges`), so a settled program may not change it. A tracked function
+    ///      that changes this value carries that write in its program, and settlement rejects it
+    ///      every time with `StorageGuard.ProtectedSlotWrite`: the transition can never settle.
+    ///      Call it from the constructor, an initializer, or an admin function that is not
+    ///      `trackState`, all of which run natively and are never settled. Storing the value
+    ///      already there changes nothing and passes.
+    function _setSchnorrRegistry(address _registry) internal {
+        _sto().registry = ISchnorrStakeRegistry(_registry);
+    }
+
+    function _schnorrRegistry() internal view returns (ISchnorrStakeRegistry) {
+        return _sto().registry;
+    }
+
+    /// @notice Sets how many blocks old a settlement's reference block may be (0 means the
+    ///         default of 300).
+    /// @dev **Do not call from a `trackState` function.** The config struct is protected storage
+    ///      (see `gasKillerProtectedRanges`), so a settled program may not change it. A tracked function
+    ///      that changes this value carries that write in its program, and settlement rejects it
+    ///      every time with `StorageGuard.ProtectedSlotWrite`: the transition can never settle.
+    ///      Call it from the constructor, an initializer, or an admin function that is not
+    ///      `trackState`, all of which run natively and are never settled. Storing the value
+    ///      already there changes nothing and passes.
+    function _setBlockStaleMeasure(uint256 _blockStaleMeasure) internal {
+        require(_blockStaleMeasure <= type(uint96).max, BlockStaleMeasureOverflow());
+        _sto().blockStaleMeasure = uint96(_blockStaleMeasure);
+    }
+
+    function _getBlockStaleMeasure() internal view returns (uint256) {
+        uint256 v = _sto().blockStaleMeasure;
+        return v == 0 ? DEFAULT_BLOCK_STALE_MEASURE : v;
+    }
+
+    /// @dev Storage of `GasKillerOutgoingRateLimit`'s budget. Not for other use.
+    function _outgoingBucket() internal view returns (OutgoingBucket storage) {
+        return _sto().outgoing;
+    }
+
+    /// @dev Storage of `TokenRateLimit`'s budgets. Not for other use.
+    function _tokenLimits() internal view returns (TokenLimits storage) {
+        return _sto().tokens;
+    }
+
+    function _sto() private pure returns (GasKillerSDKStorage storage $) {
+        assembly {
+            $.slot := STORAGE_LOCATION
+        }
+    }
+}
+
+// src/libraries/TokenRateLimit.sol
+
+/// @title TokenRateLimit
+/// @notice Per-token rate limits on the ERC-20 tokens signed programs move out of a `GasKillerSDK`
+///         contract: for each listed token, at most `limit` per `period`, refilling continuously,
+///         like `OutgoingRateLimit` for ETH. Up to `MAX_TOKENS` tokens; unlisted tokens are not
+///         limited.
+/// @dev Measured, not decoded. A token can leave through `transfer`, through `transferFrom` by a
+///      contract holding an allowance (a router pulling during a signed `CALL`), or through
+///      anything else the token implements, so the library reads `balanceOf(this)` for every
+///      listed token right before the program's first op that runs code (`beforeOp`, from
+///      `_authorizeCall`) and again when the program ends (`endProgram`), and charges the net
+///      decrease. A program that runs no code can't move tokens and reads nothing.
+///
+///      An approval moves nothing until it is used, possibly after the program. So `beforeOp`
+///      also records every `approve(spender, amount)` and `increaseAllowance(spender, amount)`
+///      call to a listed token, with the spender's allowance before it, and `endProgram` charges
+///      any allowance left above that. Approving a router that then pulls the tokens is charged
+///      once, through the balance; an approval left standing is charged in full, so an unlimited
+///      one always reverts. Other ways to grant an allowance aren't seen: another selector
+///      (`approveAndCall`), or an allowance system outside the token, such as Permit2. Reject
+///      those in `_authorizeCall`.
+///
+///      Wire it up with `begin` in `_beforeProgram`, `beforeOp` in `_authorizeCall` and
+///      `endProgram` in `_afterProgram`; the drop-ins in `src/extensions/` do. Programs can nest on
+///      one contract, so the per-program state is kept in transient storage per depth. A
+///      program's charge is its net decrease, tokens it receives count against those it sends,
+///      and a re-entered frame's decrease is charged both to itself and to the frame around it.
+///
+///      The budgets live in the SDK's protected config namespace (`GasKillerSDK._tokenLimits()`),
+///      so a signed program can't refill them with a `STORE`. All of the contract's programs
+///      share them. Only signed programs are charged: the contract's own functions, called
+///      natively, are not.
+library TokenRateLimit {
+    /// @notice A program's net outflow of `token`, with allowances it left standing, exceeds the
+    ///         token's budget.
+    error TokenRateLimitExceeded(address token, uint256 amount, uint256 available);
+
+    /// @notice A zero token, a limit above `type(uint128).max`, or a period of zero or above
+    ///         `type(uint32).max`.
+    error InvalidTokenRateLimit();
+
+    /// @notice All `MAX_TOKENS` entries are in use.
+    error TooManyRateLimitedTokens();
+
+    event TokenRateLimitSet(address indexed token, uint256 limit, uint256 period);
+    event TokenRateLimitCleared(address indexed token);
+
+    /// @notice The most tokens one contract can limit; the length of `TokenLimits.buckets`.
+    uint256 internal constant MAX_TOKENS = 8;
+
+    bytes4 private constant _APPROVE = IERC20.approve.selector;
+    bytes4 private constant _INCREASE_ALLOWANCE = bytes4(keccak256("increaseAllowance(address,uint256)"));
+
+    /// @dev Transient storage. `_DEPTH` holds the depth of the running program, and each depth
+    ///      has a region at `_DEPTH + (depth << 64)`:
+    ///      - word 0, the head: bit 0 set once the snapshot is taken, bits 1-8 the number of
+    ///        tokens in it, bits 16 and up the number of approvals recorded;
+    ///      - three words per snapshotted token i, from word `1 + 3i`: the token, its balance at
+    ///        the snapshot, and the allowance increases charged to it so far;
+    ///      - three words per approval j, from word `_APPROVALS + 3j`: the token's index in the
+    ///        snapshot, the spender, and the spender's allowance before the approval.
+    ///      `endProgram` zeroes the head and every charge word, so the region is clean for the next
+    ///      program at that depth.
+    ///      `_DEPTH` is keccak256("gaskiller.TokenRateLimit.depth"), written out for assembly.
+    bytes32 private constant _DEPTH = 0x4df36f89fc12c0e682f8b2d99add7fca126f9125095d9173ca32d3ee48882030;
+
+    uint256 private constant _APPROVALS = 1 + 3 * MAX_TOKENS;
+
+    // ------------------------------------------------------------------ configuration
+
+    /// @notice Limits `token` to `limit` per `period` and fills its budget, adding it to the list
+    ///         or updating it.
+    /// @dev **Do not call from a `trackState` function**: the budgets are protected storage, so a
+    ///      program carrying the write can never settle. Call it from a constructor, an
+    ///      initializer or an admin function that is not `trackState`.
+    function set(GasKillerSDK.TokenLimits storage t, address token, uint256 limit, uint256 period) internal {
+        require(
+            token != address(0) && limit <= type(uint128).max && period != 0 && period <= type(uint32).max,
+            InvalidTokenRateLimit()
+        );
+        uint256 n = t.count;
+        uint256 i = _find(t, token, n);
+        if (i == n) {
+            require(n < MAX_TOKENS, TooManyRateLimitedTokens());
+            t.count = n + 1;
+        }
+        t.buckets[i] =
+            GasKillerSDK.TokenBucket(token, uint32(period), uint32(block.timestamp), uint128(limit), uint128(limit));
+        emit TokenRateLimitSet(token, limit, period);
+    }
+
+    /// @notice Stops limiting `token`. Same rule as `set`: never from a `trackState` function.
+    function clear(GasKillerSDK.TokenLimits storage t, address token) internal {
+        uint256 n = t.count;
+        uint256 i = _find(t, token, n);
+        if (i == n) return;
+        uint256 last = n - 1;
+        if (i != last) t.buckets[i] = t.buckets[last];
+        delete t.buckets[last];
+        t.count = last;
+        emit TokenRateLimitCleared(token);
+    }
+
+    /// @notice What `token`'s budget holds now, its limit and its period. All zero for a token
+    ///         that isn't limited.
+    function allowance(GasKillerSDK.TokenLimits storage t, address token)
+        internal
+        view
+        returns (uint256 available, uint256 limit, uint256 period)
+    {
+        uint256 i = _find(t, token, t.count);
+        if (i == t.count) return (0, 0, 0);
+        GasKillerSDK.TokenBucket memory b = t.buckets[i];
+        return (_refilled(b), b.limit, b.period);
+    }
+
+    /// @notice Whether `token` is limited.
+    function isLimited(GasKillerSDK.TokenLimits storage t, address token) internal view returns (bool) {
+        uint256 n = t.count;
+        return _find(t, token, n) != n;
+    }
+
+    // ------------------------------------------------------------------ settlement
+
+    /// @notice Starts a program. Call from `_beforeProgram`.
+    function begin() internal {
+        assembly ("memory-safe") {
+            tstore(_DEPTH, add(tload(_DEPTH), 1))
+        }
+    }
+
+    /// @notice Call from `_authorizeCall`, before every op that runs code. Takes the snapshot on
+    ///         the program's first such op and records approvals of listed tokens.
+    function beforeOp(GasKillerSDK.TokenLimits storage t, StateUpdateType kind, address target, bytes memory data)
+        internal
+    {
+        uint256 r = _region();
+        uint256 head = _tload(r);
+        if (head & 1 == 0) {
+            uint256 count = t.count;
+            for (uint256 i = 0; i < count; ++i) {
+                address token = t.buckets[i].token;
+                _tstore(r + 1 + 3 * i, uint160(token));
+                _tstore(r + 2 + 3 * i, IERC20(token).balanceOf(address(this)));
+            }
+            head = 1 | (count << 1);
+            _tstore(r, head);
+        }
+        if (kind != StateUpdateType.CALL || data.length < 0x44) return;
+        bytes4 selector = bytes4(data);
+        if (selector != _APPROVE && selector != _INCREASE_ALLOWANCE) return;
+        uint256 n = (head >> 1) & 0xff;
+        uint256 index;
+        while (index < n && _tload(r + 1 + 3 * index) != uint160(target)) ++index;
+        if (index == n) return;
+        address spender;
+        assembly ("memory-safe") {
+            spender := and(mload(add(data, 0x24)), 0xffffffffffffffffffffffffffffffffffffffff)
+        }
+        uint256 slot = r + _APPROVALS + 3 * (head >> 16);
+        _tstore(slot, index);
+        _tstore(slot + 1, uint160(spender));
+        _tstore(slot + 2, IERC20(target).allowance(address(this), spender));
+        _tstore(r, head + (1 << 16));
+    }
+
+    /// @notice Ends a program: charges each listed token's net outflow, plus allowances left
+    ///         standing, and reverts with `TokenRateLimitExceeded` if a budget can't cover it. Call
+    ///         from `_afterProgram`.
+    function endProgram(GasKillerSDK.TokenLimits storage t) internal {
+        uint256 r = _region();
+        uint256 head = _tload(r);
+        // `head == 1`: a snapshot of no tokens, so nothing to charge.
+        if (head > 1) {
+            // Allowances left above where they were, charged to their token's charge word.
+            uint256 end = r + _APPROVALS + 3 * (head >> 16);
+            for (uint256 slot = r + _APPROVALS; slot < end; slot += 3) {
+                uint256 at = r + 1 + 3 * _tload(slot);
+                address spender = address(uint160(_tload(slot + 1)));
+                uint256 left = IERC20(address(uint160(_tload(at)))).allowance(address(this), spender);
+                uint256 prior = _tload(slot + 2);
+                if (left > prior) _tstore(at + 2, _add(_tload(at + 2), left - prior));
+            }
+            // Net outflow plus those charges, per token.
+            uint256 n = (head >> 1) & 0xff;
+            for (uint256 at = r + 1; at < r + 1 + 3 * n; at += 3) {
+                address token = address(uint160(_tload(at)));
+                uint256 before = _tload(at + 1);
+                uint256 balance = IERC20(token).balanceOf(address(this));
+                uint256 charge = _tload(at + 2);
+                if (balance < before) charge = _add(charge, before - balance);
+                if (charge != 0) {
+                    _spend(t, token, charge);
+                    _tstore(at + 2, 0);
+                }
+            }
+        }
+        if (head != 0) _tstore(r, 0);
+        assembly ("memory-safe") {
+            tstore(_DEPTH, sub(tload(_DEPTH), 1))
+        }
+    }
+
+    /// @dev Saturating add: an unlimited allowance stays the largest charge.
+    function _add(uint256 a, uint256 b) private pure returns (uint256) {
+        unchecked {
+            uint256 c = a + b;
+            return c < a ? type(uint256).max : c;
+        }
+    }
+
+    // ------------------------------------------------------------------ internals
+
+    /// @dev Spends `amount` from `token`'s budget. A token cleared mid-program is skipped.
+    function _spend(GasKillerSDK.TokenLimits storage t, address token, uint256 amount) private {
+        uint256 n = t.count;
+        uint256 i = _find(t, token, n);
+        if (i == n) return;
+        GasKillerSDK.TokenBucket storage s = t.buckets[i];
+        GasKillerSDK.TokenBucket memory b = s;
+        uint256 left = _refilled(b);
+        if (amount > left) revert TokenRateLimitExceeded(token, amount, left);
+        s.available = uint128(left - amount);
+        s.updated = uint32(block.timestamp);
+    }
+
+    function _find(GasKillerSDK.TokenLimits storage t, address token, uint256 n) private view returns (uint256 i) {
+        for (; i < n; ++i) {
+            if (t.buckets[i].token == token) return i;
+        }
+    }
+
+    /// @dev As `OutgoingRateLimit._refilled`, with 128-bit amounts.
+    function _refilled(GasKillerSDK.TokenBucket memory b) private view returns (uint256 available) {
+        unchecked {
+            uint256 elapsed = uint32(block.timestamp) - uint256(b.updated);
+            uint256 limit = b.limit;
+            available = uint256(b.available) + (elapsed >= b.period ? limit : elapsed * limit / b.period);
+            if (available > limit) available = limit;
+        }
+    }
+
+    /// @dev `_DEPTH + depth << 64`: an add and a shift rather than a hash, since it runs on every
+    ///      op. Regions are 2^64 words apart, far more than one program can use.
+    function _region() private view returns (uint256 r) {
+        assembly ("memory-safe") {
+            r := add(_DEPTH, shl(64, tload(_DEPTH)))
+        }
+    }
+
+    function _tload(uint256 slot) private view returns (uint256 v) {
+        assembly ("memory-safe") {
+            v := tload(slot)
+        }
+    }
+
+    function _tstore(uint256 slot, uint256 v) private {
+        assembly ("memory-safe") {
+            tstore(slot, v)
+        }
+    }
+}

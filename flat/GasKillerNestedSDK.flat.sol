@@ -1067,6 +1067,29 @@ struct NestedContext {
     uint256 consumed;
 }
 
+/// @notice What a program may send out of its contract. Checked before every op that runs other
+///         code with the contract's authority or moves its ETH: `CALL`, `CREATE`, `CREATE2` and
+///         `NESTED`.
+/// @dev `StorageGuard` only sees `STORE`s. A signed `CALL` runs real code as the consumer, so a
+///      malicious quorum could otherwise spend anything the consumer holds or controls elsewhere.
+///      Before each such op, `_run` adds its value to `sent`, reverts with
+///      `OutgoingValueExceeded` once the total passes `valueCap`, and then calls `authorize`,
+///      which reverts to reject the op.
+/// @param targetFunction The selector the transition was signed for, handed to `authorize`.
+///        Zero in a nested callee's frame, which the tree binds by calldata hash only.
+/// @param valueCap The most wei the program's ops may send in total.
+/// @param sent Wei sent so far by the program's ops. Start it at zero.
+/// @param authorize Called as `(targetFunction, index, kind, target, value, data)`. For a
+///        `CALL`, `data` is the calldata. For `CREATE`/`CREATE2` it is the initcode, with a zero
+///        `target`, since the address isn't known before the deployment. For `NESTED`, `data` is
+///        empty: the callee applies and checks its own signed frame.
+struct CallPolicy {
+    bytes4 targetFunction;
+    uint256 valueCap;
+    uint256 sent;
+    function(bytes4, uint256, StateUpdateType, address, uint256, bytes memory) authorize;
+}
+
 /// @title StateChangeHandlerLib
 /// @notice Library for decoding and executing batched state update operations
 /// @dev Processes ABI-encoded arrays of typed state updates; supports STORE, CALL, LOG0-LOG4, CREATE, CREATE2 and NESTED
@@ -1092,15 +1115,18 @@ library StateChangeHandlerLib {
     ///      `NoProtectedRanges` rather than running unchecked; the only unchecked path is the
     ///      explicitly named `_runStateUpdatesUnguarded`. Inside a `GasKillerSDK` contract, pass
     ///      `_settlementRanges()`, which always includes the SDK's own storage and was validated
-    ///      at deployment. Any other list must pass `StorageGuard.validateRanges` first.
+    ///      at deployment. Any other list must pass `StorageGuard.validateRanges` first. Every
+    ///      CALL, CREATE, CREATE2 and NESTED is checked against `policy` (see `CallPolicy`); pass
+    ///      `_unrestrictedCalls()` for none.
     function _runStateUpdates(
         StateUpdateType[] memory types,
         bytes[] memory args,
-        StorageGuard.ProtectedRange[] memory ranges
+        StorageGuard.ProtectedRange[] memory ranges,
+        CallPolicy memory policy
     ) internal {
         require(ranges.length != 0, NoProtectedRanges());
         NestedContext memory none;
-        _run(types, args, ranges, StorageGuard.advance, none, _rejectNested);
+        _run(types, args, ranges, StorageGuard.advance, policy, none, _rejectNested);
     }
 
     /// @dev Runs a program inside the tree in `ctx`, checking every STORE against `ranges`. As
@@ -1109,10 +1135,11 @@ library StateChangeHandlerLib {
         StateUpdateType[] memory types,
         bytes[] memory args,
         StorageGuard.ProtectedRange[] memory ranges,
+        CallPolicy memory policy,
         NestedContext memory ctx
     ) internal {
         require(ranges.length != 0, NoProtectedRanges());
-        _run(types, args, ranges, StorageGuard.advance, ctx, _runNested);
+        _run(types, args, ranges, StorageGuard.advance, policy, ctx, _runNested);
     }
 
     /// @dev Runs a program outside any tree **without checking any STORE**: a signed program can
@@ -1121,19 +1148,50 @@ library StateChangeHandlerLib {
     ///      `GasKillerSDK._unsafeDisableStorageGuard`. A separate, explicitly named entry point:
     ///      the guarded ones reject an empty list, so no list a caller builds can turn protection
     ///      off.
-    function _runStateUpdatesUnguarded(StateUpdateType[] memory types, bytes[] memory args) internal {
+    ///      `policy` still applies: the opt-out covers STOREs only.
+    function _runStateUpdatesUnguarded(StateUpdateType[] memory types, bytes[] memory args, CallPolicy memory policy)
+        internal
+    {
         NestedContext memory none;
         StorageGuard.ProtectedRange[] memory noRanges;
-        _run(types, args, noRanges, _skipCheck, none, _rejectNested);
+        _run(types, args, noRanges, _skipCheck, policy, none, _rejectNested);
     }
 
     /// @dev Runs a program inside the tree in `ctx` without checking any STORE. As above, only
     ///      for a consumer that has opted out.
-    function _runStateUpdatesUnguarded(StateUpdateType[] memory types, bytes[] memory args, NestedContext memory ctx)
-        internal
-    {
+    function _runStateUpdatesUnguarded(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        CallPolicy memory policy,
+        NestedContext memory ctx
+    ) internal {
         StorageGuard.ProtectedRange[] memory noRanges;
-        _run(types, args, noRanges, _skipCheck, ctx, _runNested);
+        _run(types, args, noRanges, _skipCheck, policy, ctx, _runNested);
+    }
+
+    /// @dev A policy that allows every op and any total value, for callers outside a
+    ///      `GasKillerSDK` contract. `targetFunction` is zero.
+    function _unrestrictedCalls() internal pure returns (CallPolicy memory) {
+        return CallPolicy(bytes4(0), type(uint256).max, 0, _allowCall);
+    }
+
+    function _allowCall(bytes4, uint256, StateUpdateType, address, uint256, bytes memory) private pure {}
+
+    /// @dev Counts `value` against the policy's cap, then hands the op to its `authorize`.
+    function _authorize(
+        CallPolicy memory policy,
+        uint256 index,
+        StateUpdateType kind,
+        address target,
+        uint256 value,
+        bytes memory data
+    ) private {
+        if (value != 0) {
+            uint256 sent = policy.sent + value;
+            if (sent > policy.valueCap) revert OutgoingValueExceeded(index, sent, policy.valueCap);
+            policy.sent = sent;
+        }
+        policy.authorize(policy.targetFunction, index, kind, target, value, data);
     }
 
     /// @dev The STORE check of an unguarded run: none.
@@ -1163,6 +1221,8 @@ library StateChangeHandlerLib {
     /// @param check The STORE check: `StorageGuard.advance`, or `_skipCheck` (which ignores
     ///        `ranges`) from `_runStateUpdatesUnguarded`. A function pointer rather than a flag,
     ///        so neither path pays a per-write branch for the other.
+    /// @param policy Checked before every CALL, CREATE, CREATE2 and NESTED, before it runs (see
+    ///        `CallPolicy`). `policy.sent` accumulates across the program.
     /// @param ctx The tree this program runs inside; a zero root rejects every NESTED op
     /// @param nested The NESTED handler: `_runNested` inside a tree, `_rejectNested` outside one
     /// @dev types and args arrays must be equal length, with args[i] containing the encoded parameters for types[i]
@@ -1172,13 +1232,15 @@ library StateChangeHandlerLib {
         StorageGuard.ProtectedRange[] memory ranges,
         function(StorageGuard.Cursor memory, StorageGuard.ProtectedRange[] memory, uint256, bytes32, bytes32)
             view check,
+        CallPolicy memory policy,
         NestedContext memory ctx,
-        function(uint256, bytes memory, NestedContext memory) nested
+        function(uint256, bytes memory, NestedContext memory, CallPolicy memory) nested
     ) private {
-        uint256 length = types.length;
-        require(length == args.length, InvalidArguments());
+        require(types.length == args.length, InvalidArguments());
         StorageGuard.Cursor memory cursor;
-        for (uint256 i = 0; i < length; ++i) {
+        // `types.length` is re-read rather than held in a local: with `policy` the STORE branch
+        // would otherwise be one slot past the stack limit.
+        for (uint256 i = 0; i < types.length; ++i) {
             StateUpdateType stateUpdateType = types[i];
             bytes memory arg = args[i];
 
@@ -1197,6 +1259,7 @@ library StateChangeHandlerLib {
                 // nothing — but it does nullify the batch's cost amortization. See
                 // IGasKillerSDKBatch for the batch-assembly-side note.
                 (address target, uint256 value, bytes memory callargs) = abi.decode(arg, (address, uint256, bytes));
+                _authorize(policy, i, StateUpdateType.CALL, target, value, callargs);
                 bool success;
                 assembly {
                     success := call(gas(), target, value, add(callargs, 0x20), mload(callargs), 0, 0)
@@ -1265,6 +1328,7 @@ library StateChangeHandlerLib {
                 }
             } else if (stateUpdateType == StateUpdateType.CREATE) {
                 (uint256 value, bytes memory initcode) = abi.decode(arg, (uint256, bytes));
+                _authorize(policy, i, StateUpdateType.CREATE, address(0), value, initcode);
                 address deployed;
                 assembly {
                     deployed := create(value, add(initcode, 0x20), mload(initcode))
@@ -1272,19 +1336,20 @@ library StateChangeHandlerLib {
                 require(deployed != address(0), DeploymentFailed());
             } else if (stateUpdateType == StateUpdateType.CREATE2) {
                 (bytes32 salt, uint256 value, bytes memory initcode) = abi.decode(arg, (bytes32, uint256, bytes));
+                _authorize(policy, i, StateUpdateType.CREATE2, address(0), value, initcode);
                 address deployed;
                 assembly {
                     deployed := create2(value, add(initcode, 0x20), mload(initcode), salt)
                 }
                 require(deployed != address(0), DeploymentFailed());
             } else if (stateUpdateType == StateUpdateType.NESTED) {
-                nested(i, arg, ctx);
+                nested(i, arg, ctx, policy);
             }
         }
         if (ctx.consumed != ctx.children.length) revert UnconsumedWitnesses(ctx.children.length, ctx.consumed);
     }
 
-    function _rejectNested(uint256, bytes memory, NestedContext memory) private pure {
+    function _rejectNested(uint256, bytes memory, NestedContext memory, CallPolicy memory) private pure {
         revert NestedOutsideTree();
     }
 
@@ -1293,9 +1358,10 @@ library StateChangeHandlerLib {
     ///      restored afterwards because a cycle can nest pending children on one contract.
     ///      A call to an address without code, or to a permissive fallback, also succeeds, so
     ///      success alone does not show the frame applied; the child must echo its selector.
-    function _runNested(uint256 i, bytes memory arg, NestedContext memory ctx) private {
+    function _runNested(uint256 i, bytes memory arg, NestedContext memory ctx, CallPolicy memory policy) private {
         if (ctx.root == bytes32(0)) revert NestedOutsideTree();
         (address target, uint256 value, bytes32 childLeaf) = abi.decode(arg, (address, uint256, bytes32));
+        _authorize(policy, i, StateUpdateType.NESTED, target, value, "");
         if (ctx.consumed >= ctx.children.length) revert MissingWitness(i);
         bytes memory callargs =
             abi.encodeCall(IGasKillerNested.applyNested, (ctx.root, childLeaf, ctx.children[ctx.consumed++]));
@@ -1358,6 +1424,13 @@ library StateChangeHandlerLib {
     ///         protects at least the SDK's own storage, so an empty list means a caller has
     ///         switched protection off, usually by accident.
     error NoProtectedRanges();
+
+    /// @notice Thrown when a program's CALL, CREATE, CREATE2 and NESTED ops together would send
+    ///         more than its `CallPolicy.valueCap`
+    /// @param index The zero-based position of the op that passed the cap
+    /// @param total The program's outgoing value including that op
+    /// @param cap The cap
+    error OutgoingValueExceeded(uint256 index, uint256 total, uint256 cap);
 
     /// @notice Thrown when a LOG operation's payload is not a canonical, in-bounds ABI encoding
     error MalformedLogPayload();
@@ -1443,6 +1516,41 @@ abstract contract GasKillerSDK is
         address avsAddress;
         ISchnorrStakeRegistry registry;
         uint96 blockStaleMeasure;
+        OutgoingBucket outgoing;
+        TokenLimits tokens;
+    }
+
+    /// @dev The outgoing-value budget of `GasKillerOutgoingRateLimit`, kept here so that it is
+    ///      protected storage: a signed program that could write it could refill its own budget.
+    ///      All zero, and never read, in a contract that doesn't use the extension. One slot.
+    /// @param limit Most wei the budget holds, which is also what refills over one `period`.
+    /// @param available Wei left at `updated`.
+    /// @param period Seconds a full refill takes.
+    /// @param updated Timestamp `available` was last computed at.
+    struct OutgoingBucket {
+        uint96 limit;
+        uint96 available;
+        uint32 period;
+        uint32 updated;
+    }
+
+    /// @dev The per-token budgets of `TokenRateLimit`, kept here for the same reason as
+    ///      `OutgoingBucket`. A fixed array rather than a mapping: a mapping's entries would live
+    ///      at keccak-derived slots outside the protected namespace. All zero, and never read, in a
+    ///      contract that doesn't use per-token limits. 17 slots.
+    /// @param count Tokens in use, the first `count` entries of `buckets`.
+    struct TokenLimits {
+        uint256 count;
+        TokenBucket[8] buckets;
+    }
+
+    /// @dev One token's budget: like `OutgoingBucket`, in two slots.
+    struct TokenBucket {
+        address token;
+        uint32 period;
+        uint32 updated;
+        uint128 limit;
+        uint128 available;
     }
 
     // keccak256(abi.encode(uint256(keccak256("gaskiller.SchnorrGasKillerSDK.storage")) - 1)) & ~bytes32(uint256(0xff))
@@ -1514,7 +1622,7 @@ abstract contract GasKillerSDK is
         // Must match `_guardRanges`.
         StorageGuard.ProtectedRange[] memory ranges;
         if (!_unsafeDisableStorageGuard()) ranges = _settlementRanges();
-        _stateChangeHandler(storageUpdates, ranges);
+        _stateChangeHandler(storageUpdates, ranges, targetFunction);
     }
 
     /// @notice Verify and apply a sequence of independently signed state transitions in
@@ -1574,7 +1682,7 @@ abstract contract GasKillerSDK is
                 sub.Raddr,
                 sub.nonSigners
             );
-            _stateChangeHandler(sub.storageUpdates, ranges);
+            _stateChangeHandler(sub.storageUpdates, ranges, sub.targetFunction);
         }
         require(msg.value >= required, InsufficientBatchValue(msg.value, required));
         if (msg.value > required) {
@@ -1624,10 +1732,90 @@ abstract contract GasKillerSDK is
     ///      The opt-out is dispatched here (and in `GasKillerNestedSDK._runProgram`), never by
     ///      the list: an opted-out program ignores `ranges`, and a guarded one with an empty list
     ///      reverts (`NoProtectedRanges`), so the list alone never turns protection off.
-    function _stateChangeHandler(bytes calldata storageUpdates, StorageGuard.ProtectedRange[] memory ranges) internal {
+    ///      Every CALL, CREATE, CREATE2 and NESTED goes through `_callPolicy(targetFunction)`.
+    function _stateChangeHandler(
+        bytes calldata storageUpdates,
+        StorageGuard.ProtectedRange[] memory ranges,
+        bytes4 targetFunction
+    ) internal {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args);
-        else StateChangeHandlerLib._runStateUpdates(types, args, ranges);
+        CallPolicy memory policy = _callPolicy(targetFunction);
+        _beforeProgram(targetFunction);
+        if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args, policy);
+        else StateChangeHandlerLib._runStateUpdates(types, args, ranges, policy);
+        _afterProgram(targetFunction);
+    }
+
+    /// @notice Override to act right before a signed program runs, after it was verified.
+    ///         Does nothing by default.
+    /// @dev Paired with `_afterProgram`. Programs can nest on one contract (a nested tree can
+    ///      re-enter it), so per-program state should be kept per depth, for example in
+    ///      transient storage, as `TokenRateLimit` does.
+    /// @param targetFunction As for `_authorizeCall`: zero in a nested callee's frame.
+    function _beforeProgram(bytes4 targetFunction) internal virtual {}
+
+    /// @notice Override to act right after a signed program ran; revert to reject it. Does
+    ///         nothing by default.
+    /// @param targetFunction As for `_authorizeCall`: zero in a nested callee's frame.
+    function _afterProgram(bytes4 targetFunction) internal virtual {}
+
+    /// @dev The policy a program for `targetFunction` runs under: `_maxOutgoingValue`'s cap and
+    ///      `_authorizeCall`. Fresh per program, so each transition of a batch has its own cap.
+    function _callPolicy(bytes4 targetFunction) internal view returns (CallPolicy memory) {
+        return CallPolicy(targetFunction, _maxOutgoingValue(targetFunction), 0, _authorizeCall);
+    }
+
+    /// @notice Override to restrict what a signed program may do with this contract's authority.
+    ///         Called before every `CALL`, `CREATE`, `CREATE2` and `NESTED` op of a program;
+    ///         revert to reject the op, and with it the whole transition. Allows everything by
+    ///         default.
+    /// @dev `StorageGuard` only checks `STORE`s. A `CALL` runs real code as this contract, so
+    ///      without a policy a quorum that signs a malicious program can, for example:
+    ///      - call this contract's own functions gated on `msg.sender == address(this)`;
+    ///      - transfer or approve tokens this contract holds;
+    ///      - send this contract's ETH through a `CALL`, `CREATE`, `CREATE2` or `NESTED` value.
+    ///
+    ///      A signed program doesn't carry the user's arguments or `msg.sender`, and honest
+    ///      programs often call targets only known at run time, so the policy is code rather than
+    ///      a list: check what the tracked functions can legitimately do. The hook is not `view`,
+    ///      so it can keep state, such as a rate limit. For example, to reject self-calls (which
+    ///      gas-analyzer does emit for a tracked function that calls `this.foo()`):
+    ///      ```
+    ///      function _authorizeCall(bytes4, uint256 index, StateUpdateType kind, address target, uint256, bytes memory)
+    ///          internal override
+    ///      {
+    ///          if (kind == StateUpdateType.CALL && target == address(this)) revert SelfCall(index);
+    ///      }
+    ///      ```
+    ///      Per-program value totals are better capped with `_maxOutgoingValue`, which runs first.
+    /// @param targetFunction The selector the transition was signed for; zero in a nested
+    ///        callee's frame (`applyNested`), which the tree binds by calldata hash only.
+    /// @param index The op's position in the program.
+    /// @param kind `CALL`, `CREATE`, `CREATE2` or `NESTED`.
+    /// @param target The callee; zero for `CREATE`/`CREATE2`.
+    /// @param value Wei the op sends.
+    /// @param data The calldata of a `CALL`, the initcode of a `CREATE`/`CREATE2`, empty for a
+    ///        `NESTED` op (the callee checks its own signed frame).
+    function _authorizeCall(
+        bytes4 targetFunction,
+        uint256 index,
+        StateUpdateType kind,
+        address target,
+        uint256 value,
+        bytes memory data
+    ) internal virtual {}
+
+    /// @notice Override to cap the wei one signed program may send out of this contract, summed
+    ///         over its `CALL`, `CREATE`, `CREATE2` and `NESTED` ops. A program that would send
+    ///         more reverts with `StateChangeHandlerLib.OutgoingValueExceeded`. Unlimited by
+    ///         default.
+    /// @dev Read once per program, before it runs. The total counts what the program sends,
+    ///      whatever `msg.value` brought in. Each item of a batch, and each frame of a nested
+    ///      tree, is capped on its own.
+    /// @param targetFunction As for `_authorizeCall`: zero in a nested callee's frame.
+    function _maxOutgoingValue(bytes4 targetFunction) internal view virtual returns (uint256) {
+        targetFunction;
+        return type(uint256).max;
     }
 
     /// @notice The storage ranges a signed program may not change: the SDK's own slots merged
@@ -1863,6 +2051,16 @@ abstract contract GasKillerSDK is
         return v == 0 ? DEFAULT_BLOCK_STALE_MEASURE : v;
     }
 
+    /// @dev Storage of `GasKillerOutgoingRateLimit`'s budget. Not for other use.
+    function _outgoingBucket() internal view returns (OutgoingBucket storage) {
+        return _sto().outgoing;
+    }
+
+    /// @dev Storage of `TokenRateLimit`'s budgets. Not for other use.
+    function _tokenLimits() internal view returns (TokenLimits storage) {
+        return _sto().tokens;
+    }
+
     function _sto() private pure returns (GasKillerSDKStorage storage $) {
         assembly {
             $.slot := STORAGE_LOCATION
@@ -1940,7 +2138,9 @@ abstract contract GasKillerNestedSDK is GasKillerSDK, IGasKillerNested {
             .verifyAndApprove(
                 submission.root, address(this), submission.expiryBlock, submission.expiryProof, submission.sig
             );
-        _runProgram(submission.storageUpdates, NestedContext(submission.root, submission.children, 0));
+        _runProgram(
+            submission.storageUpdates, submission.targetFunction, NestedContext(submission.root, submission.children, 0)
+        );
     }
 
     function _applyFrame(bytes32 root, bytes32 expectedLeaf, bytes calldata encodedWitness) private trackState {
@@ -1956,13 +2156,17 @@ abstract contract GasKillerNestedSDK is GasKillerSDK, IGasKillerNested {
         require(leaf == expectedLeaf, LeafMismatch(expectedLeaf, leaf));
         require(IGasKillerNested(msg.sender).pendingChild() == leaf, NotPendingChild(msg.sender, leaf));
         require(NestedFrames.isMember(witness.proof, root, leaf), NotTreeMember(leaf));
-        _runProgram(witness.storageUpdates, NestedContext(root, witness.children, 0));
+        // The tree binds a callee's call by calldata hash only, so there's no selector to hand on.
+        _runProgram(witness.storageUpdates, bytes4(0), NestedContext(root, witness.children, 0));
     }
 
-    function _runProgram(bytes memory storageUpdates, NestedContext memory ctx) private {
+    function _runProgram(bytes memory storageUpdates, bytes4 targetFunction, NestedContext memory ctx) private {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args, ctx);
-        else StateChangeHandlerLib._runStateUpdates(types, args, _settlementRanges(), ctx);
+        CallPolicy memory policy = _callPolicy(targetFunction);
+        _beforeProgram(targetFunction);
+        if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args, policy, ctx);
+        else StateChangeHandlerLib._runStateUpdates(types, args, _settlementRanges(), policy, ctx);
+        _afterProgram(targetFunction);
     }
 
     /// @dev Nested settlement reverts against a registry without `ISchnorrApprovalRegistry`, and
