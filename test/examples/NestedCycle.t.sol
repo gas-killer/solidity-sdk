@@ -38,6 +38,52 @@ contract UnguardedCycleRelay is CycleRelay {
     }
 }
 
+/// One op a call-policy hook saw, recorded by the contracts below.
+struct SeenOp {
+    bytes4 targetFunction;
+    uint256 index;
+    StateUpdateType kind;
+    address target;
+}
+
+/// A root that records what its call-policy hook sees in each of its frames.
+contract RecordingCycleRoot is CycleRoot {
+    SeenOp[] internal _seen;
+
+    constructor(address avs, address registry, CycleRelay relay_, uint256 rounds)
+        CycleRoot(avs, registry, relay_, rounds)
+    {}
+
+    function seen() external view returns (SeenOp[] memory) {
+        return _seen;
+    }
+
+    function _authorizeCall(bytes4 fn, uint256 index, StateUpdateType kind, address target, uint256, bytes memory)
+        internal
+        override
+    {
+        _seen.push(SeenOp(fn, index, kind, target));
+    }
+}
+
+/// A relay that records what its call-policy hook sees.
+contract RecordingCycleRelay is CycleRelay {
+    SeenOp[] internal _seen;
+
+    constructor(address avs, address registry) CycleRelay(avs, registry) {}
+
+    function seen() external view returns (SeenOp[] memory) {
+        return _seen;
+    }
+
+    function _authorizeCall(bytes4 fn, uint256 index, StateUpdateType kind, address target, uint256, bytes memory)
+        internal
+        override
+    {
+        _seen.push(SeenOp(fn, index, kind, target));
+    }
+}
+
 /// @notice End to end: `CycleRoot.start` → `CycleRelay.relay` → `CycleRoot.finish` settled as
 ///         one tree in which the root contract applies two frames, the second while the first
 ///         is still applying.
@@ -159,6 +205,33 @@ contract NestedCycleTest is Test {
         TreeSubmission memory sub = _toSubmission(frames.build(expiryBlock));
         vm.expectRevert(abi.encodeWithSelector(StorageGuard.ProtectedSlotWrite.selector, 0, TRACKER_SLOT));
         root.verifyAndUpdateTree(sub);
+    }
+
+    /// Each frame runs its own contract's call policy. The root frame hands it the signed
+    /// selector; a callee's frame, which the tree binds by calldata hash only, hands it zero.
+    function test_eachFrameRunsItsOwnCallPolicy() public {
+        RecordingCycleRelay recordingRelay = new RecordingCycleRelay(address(0xA75), address(registry));
+        RecordingCycleRoot recordingRoot =
+            new RecordingCycleRoot(address(0xA75), address(registry), recordingRelay, ROUNDS);
+        recordingRelay.setRoot(recordingRoot);
+        (relay, root) = (recordingRelay, recordingRoot);
+
+        root.verifyAndUpdateTree(_submission(1));
+
+        SeenOp[] memory r = recordingRoot.seen();
+        assertEq(r.length, 2, "root: its NESTED op, then the re-entered frame's CALL");
+        _assertSeen(r[0], CycleRoot.start.selector, 2, StateUpdateType.NESTED, address(relay));
+        _assertSeen(r[1], bytes4(0), 1, StateUpdateType.CALL, address(observer));
+        SeenOp[] memory m = recordingRelay.seen();
+        assertEq(m.length, 1, "relay: its NESTED op");
+        _assertSeen(m[0], bytes4(0), 2, StateUpdateType.NESTED, address(root));
+    }
+
+    function _assertSeen(SeenOp memory s, bytes4 fn, uint256 index, StateUpdateType kind, address target) private pure {
+        assertEq(s.targetFunction, fn, "targetFunction");
+        assertEq(s.index, index, "index");
+        assertEq(uint8(s.kind), uint8(kind), "kind");
+        assertEq(s.target, target, "target");
     }
 
     function _contains(bytes memory haystack, bytes memory needle) private pure returns (bool) {

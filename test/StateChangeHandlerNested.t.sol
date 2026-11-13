@@ -17,7 +17,7 @@ contract HandlerHarness {
     }
 
     function runPlain(StateUpdateType[] memory types, bytes[] memory args) external payable {
-        StateChangeHandlerLib._runStateUpdates(types, args, _ranges());
+        StateChangeHandlerLib._runStateUpdates(types, args, _ranges(), StateChangeHandlerLib._unrestrictedCalls());
     }
 
     function runWithRanges(
@@ -25,7 +25,7 @@ contract HandlerHarness {
         bytes[] memory args,
         StorageGuard.ProtectedRange[] memory ranges
     ) external {
-        StateChangeHandlerLib._runStateUpdates(types, args, ranges);
+        StateChangeHandlerLib._runStateUpdates(types, args, ranges, StateChangeHandlerLib._unrestrictedCalls());
     }
 
     function runPrevalidated(
@@ -33,7 +33,9 @@ contract HandlerHarness {
         bytes[] memory args,
         StorageGuard.ProtectedRange[] memory ranges
     ) external {
-        StateChangeHandlerLib._runStateUpdatesPrevalidated(types, args, ranges);
+        StateChangeHandlerLib._runStateUpdatesPrevalidated(
+            types, args, ranges, StateChangeHandlerLib._unrestrictedCalls()
+        );
     }
 
     function runInTreeWithRanges(
@@ -42,7 +44,11 @@ contract HandlerHarness {
         StorageGuard.ProtectedRange[] memory ranges
     ) external {
         StateChangeHandlerLib._runStateUpdates(
-            types, args, ranges, NestedContext(bytes32(uint256(1)), new bytes[](0), 0)
+            types,
+            args,
+            ranges,
+            StateChangeHandlerLib._unrestrictedCalls(),
+            NestedContext(bytes32(uint256(1)), new bytes[](0), 0)
         );
     }
 
@@ -50,7 +56,9 @@ contract HandlerHarness {
         external
         payable
     {
-        StateChangeHandlerLib._runStateUpdates(types, args, _ranges(), NestedContext(root, children, 0));
+        StateChangeHandlerLib._runStateUpdates(
+            types, args, _ranges(), StateChangeHandlerLib._unrestrictedCalls(), NestedContext(root, children, 0)
+        );
     }
 
     function pendingChild() external view returns (bytes32) {
