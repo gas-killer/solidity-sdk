@@ -82,6 +82,18 @@ contract LayoutProbe is GasKillerSDK {
         _setAvsAddress(address(type(uint160).max));
         _setSchnorrRegistry(address(type(uint160).max));
         _setBlockStaleMeasure(type(uint96).max);
+        // `GasKillerOutgoingRateLimit`'s budget, which has no setter that fills every bit.
+        _outgoingBucket().limit = type(uint96).max;
+        _outgoingBucket().available = type(uint96).max;
+        _outgoingBucket().period = type(uint32).max;
+        _outgoingBucket().updated = type(uint32).max;
+        // `TokenRateLimit`'s budgets.
+        _tokenLimits().count = type(uint256).max;
+        for (uint256 i = 0; i < 8; ++i) {
+            _tokenLimits().buckets[i] = GasKillerSDK.TokenBucket(
+                address(type(uint160).max), type(uint32).max, type(uint32).max, type(uint128).max, type(uint128).max
+            );
+        }
     }
 }
 
@@ -286,7 +298,7 @@ contract GasKillerSDKProtectedStorageTest is Test {
         }
         // Tripwire, not protection: when the struct grows, add the new field's setter to
         // `LayoutProbe.fill` and update this count, so the check above covers it.
-        assertEq(used, 2, "config struct changed: add its setter to LayoutProbe.fill and update this count");
+        assertEq(used, 20, "config struct changed: add its setter to LayoutProbe.fill and update this count");
         // Nothing below the namespace either.
         assertEq(vm.load(address(probe), bytes32(uint256(SDK_STORAGE) - 1)), bytes32(0));
     }
