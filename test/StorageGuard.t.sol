@@ -102,7 +102,7 @@ contract StorageGuardHarness is StateTracker {
         if (perWrite) StorageGuardVariants.checkProgramEach(types, args, ranges);
         else StorageGuardVariants.checkProgram(types, args, ranges);
         // The real settlement run, guarded inline by the same list.
-        StateChangeHandlerLib._runStateUpdates(types, args, ranges);
+        StateChangeHandlerLib._runStateUpdates(types, args, ranges, StateChangeHandlerLib._unrestrictedCalls());
     }
 
     function programEach(bytes memory storageUpdates, StorageGuard.ProtectedRange[] memory ranges) external view {

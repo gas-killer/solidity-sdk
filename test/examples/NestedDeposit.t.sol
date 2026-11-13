@@ -4,6 +4,7 @@ pragma solidity ^0.8.29;
 import {Test, Vm} from "forge-std/Test.sol";
 import {SchnorrStakeRegistry} from "../../src/SchnorrStakeRegistry.sol";
 import {StateChangeHandlerLib, StateUpdateType} from "../../src/StateChangeHandlerLib.sol";
+import {OutgoingRateLimit} from "../../src/libraries/OutgoingRateLimit.sol";
 import {IGasKillerNested, TreeSubmission} from "../../src/interface/IGasKillerNested.sol";
 import {QuorumSignature} from "../../src/interface/ISchnorrApprovalRegistry.sol";
 import {DepositGateway} from "../../src/examples/nested-deposit/DepositGateway.sol";
@@ -11,6 +12,34 @@ import {DepositVault} from "../../src/examples/nested-deposit/DepositVault.sol";
 import {HashChain} from "../../src/examples/HashChain.sol";
 import {SchnorrSigner} from "../utils/SchnorrSigner.sol";
 import {NestedTreeBuilder} from "../utils/NestedTreeBuilder.sol";
+
+/// A gateway that may forward at most half a deposit per program.
+contract CappedGateway is DepositGateway {
+    constructor(address avs, address registry, uint256 rounds) DepositGateway(avs, registry, rounds) {}
+
+    function _maxOutgoingValue(bytes4) internal pure override returns (uint256) {
+        return 0.5 ether;
+    }
+}
+
+/// A gateway that may forward at most 1.5 deposits a day. It already inherits an SDK base
+/// (`DepositGateway`), so it adds the limit through the library.
+contract RateLimitedGateway is DepositGateway {
+    constructor(address avs, address registry, uint256 rounds) DepositGateway(avs, registry, rounds) {
+        OutgoingRateLimit.set(_outgoingBucket(), 1.5 ether, 1 days);
+    }
+
+    function available() external view returns (uint256 a) {
+        (a,,) = OutgoingRateLimit.allowance(_outgoingBucket());
+    }
+
+    function _authorizeCall(bytes4, uint256 index, StateUpdateType, address, uint256 value, bytes memory)
+        internal
+        override
+    {
+        OutgoingRateLimit.spend(_outgoingBucket(), index, value);
+    }
+}
 
 /// @notice End to end: a `deposit` whose ETH the gateway forwards to the vault, settled as one
 ///         tree in which the `NESTED` op carries the value into the vault's frame.
@@ -98,6 +127,37 @@ contract NestedDepositTest is Test {
         vm.expectPartialRevert(IGasKillerNested.NotTreeMember.selector);
         gateway.verifyAndUpdateTree(sub);
         assertEq(vault.balances(account), 0);
+    }
+
+    /// The value a `NESTED` op forwards counts against the parent's cap.
+    function test_nestedValueCountsAgainstTheParentsCap() public {
+        gateway = new CappedGateway(address(0xA75), address(registry), ROUNDS);
+        vault = gateway.vault();
+        TreeSubmission memory sub = _submission(DEPOSIT, DEPOSIT, DEPOSIT);
+        vm.expectRevert(
+            abi.encodeWithSelector(StateChangeHandlerLib.OutgoingValueExceeded.selector, 2, DEPOSIT, 0.5 ether)
+        );
+        gateway.verifyAndUpdateTree{value: DEPOSIT}(sub);
+        assertEq(vault.balances(account), 0);
+    }
+
+    /// The value a `NESTED` op forwards spends the rate-limited parent's budget.
+    function test_nestedValueSpendsTheRateLimit() public {
+        RateLimitedGateway limited = new RateLimitedGateway(address(0xA75), address(registry), ROUNDS);
+        (gateway, vault) = (limited, limited.vault());
+        gateway.verifyAndUpdateTree{value: DEPOSIT}(_submission(DEPOSIT, DEPOSIT, DEPOSIT));
+        assertEq(vault.balances(account), DEPOSIT);
+        assertEq(limited.available(), 0.5 ether);
+    }
+
+    function test_nestedValuePastTheRateLimitReverts() public {
+        RateLimitedGateway limited = new RateLimitedGateway(address(0xA75), address(registry), ROUNDS);
+        (gateway, vault) = (limited, limited.vault());
+        TreeSubmission memory sub = _submission(2 ether, 2 ether, 2 ether);
+        vm.expectRevert(
+            abi.encodeWithSelector(OutgoingRateLimit.OutgoingRateLimitExceeded.selector, 2, 2 ether, 1.5 ether)
+        );
+        gateway.verifyAndUpdateTree{value: 2 ether}(sub);
     }
 
     function test_onlyTheGatewayDeposits() public {

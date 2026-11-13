@@ -3,7 +3,7 @@ pragma solidity ^0.8.27;
 
 import {ERC165Checker} from "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
 import {GasKillerSDK} from "./GasKillerSDK.sol";
-import {StateChangeHandlerLib, StateUpdateType, NestedContext} from "./StateChangeHandlerLib.sol";
+import {StateChangeHandlerLib, StateUpdateType, NestedContext, CallPolicy} from "./StateChangeHandlerLib.sol";
 import {ISchnorrApprovalRegistry} from "./interface/ISchnorrApprovalRegistry.sol";
 import {IGasKillerNested, TreeSubmission} from "./interface/IGasKillerNested.sol";
 import {NestedFrames} from "./libraries/NestedFrames.sol";
@@ -76,7 +76,9 @@ abstract contract GasKillerNestedSDK is GasKillerSDK, IGasKillerNested {
             .verifyAndApprove(
                 submission.root, address(this), submission.expiryBlock, submission.expiryProof, submission.sig
             );
-        _runProgram(submission.storageUpdates, NestedContext(submission.root, submission.children, 0));
+        _runProgram(
+            submission.storageUpdates, submission.targetFunction, NestedContext(submission.root, submission.children, 0)
+        );
     }
 
     function _applyFrame(bytes32 root, bytes32 expectedLeaf, bytes calldata encodedWitness) private trackState {
@@ -92,13 +94,17 @@ abstract contract GasKillerNestedSDK is GasKillerSDK, IGasKillerNested {
         require(leaf == expectedLeaf, LeafMismatch(expectedLeaf, leaf));
         require(IGasKillerNested(msg.sender).pendingChild() == leaf, NotPendingChild(msg.sender, leaf));
         require(NestedFrames.isMember(witness.proof, root, leaf), NotTreeMember(leaf));
-        _runProgram(witness.storageUpdates, NestedContext(root, witness.children, 0));
+        // The tree binds a callee's call by calldata hash only, so there's no selector to hand on.
+        _runProgram(witness.storageUpdates, bytes4(0), NestedContext(root, witness.children, 0));
     }
 
-    function _runProgram(bytes memory storageUpdates, NestedContext memory ctx) private {
+    function _runProgram(bytes memory storageUpdates, bytes4 targetFunction, NestedContext memory ctx) private {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args, ctx);
-        else StateChangeHandlerLib._runStateUpdates(types, args, _settlementRanges(), ctx);
+        CallPolicy memory policy = _callPolicy(targetFunction);
+        _beforeProgram(targetFunction);
+        if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args, policy, ctx);
+        else StateChangeHandlerLib._runStateUpdates(types, args, _settlementRanges(), policy, ctx);
+        _afterProgram(targetFunction);
     }
 
     /// @dev Nested settlement reverts against a registry without `ISchnorrApprovalRegistry`, and
