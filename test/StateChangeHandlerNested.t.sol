@@ -28,6 +28,14 @@ contract HandlerHarness {
         StateChangeHandlerLib._runStateUpdates(types, args, ranges);
     }
 
+    function runPrevalidated(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges
+    ) external {
+        StateChangeHandlerLib._runStateUpdatesPrevalidated(types, args, ranges);
+    }
+
     function runInTreeWithRanges(
         StateUpdateType[] memory types,
         bytes[] memory args,
@@ -123,17 +131,35 @@ contract StateChangeHandlerNestedTest is Test {
         parent.runInTreeWithRanges(types, args, one);
     }
 
-    /// @notice Pins the documented precondition: the handler doesn't re-validate its list (the SDK
-    ///         validates at deployment), so a direct caller's malformed list fails open. If this
-    ///         starts reverting, update `_run`'s NatSpec.
-    function test_handlerTrustsTheCallerToValidate() public {
-        StorageGuard.ProtectedRange[] memory descending = new StorageGuard.ProtectedRange[](2);
-        descending[0] = StorageGuard.ProtectedRange(9, 9, StorageGuard.FULL);
-        descending[1] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL);
-        StateUpdateType[] memory types = new StateUpdateType[](1);
-        bytes[] memory args = new bytes[](1);
+    function _descending()
+        internal
+        pure
+        returns (StateUpdateType[] memory types, bytes[] memory args, StorageGuard.ProtectedRange[] memory r)
+    {
+        r = new StorageGuard.ProtectedRange[](2);
+        r[0] = StorageGuard.ProtectedRange(9, 9, StorageGuard.FULL);
+        r[1] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL);
+        types = new StateUpdateType[](1);
+        args = new bytes[](1);
         args[0] = abi.encode(bytes32(0), bytes32(uint256(1)));
-        parent.runWithRanges(types, args, descending);
+    }
+
+    /// @notice A direct caller's malformed list reverts instead of failing open, in and out of a
+    ///         tree.
+    function test_handlerValidatesTheList() public {
+        (StateUpdateType[] memory types, bytes[] memory args, StorageGuard.ProtectedRange[] memory r) = _descending();
+        vm.expectRevert(StorageGuard.InvalidRanges.selector);
+        parent.runWithRanges(types, args, r);
+        vm.expectRevert(StorageGuard.InvalidRanges.selector);
+        parent.runInTreeWithRanges(types, args, r);
+    }
+
+    /// @notice Pins the documented precondition of the prevalidated entry point the SDK uses: it
+    ///         doesn't re-validate, so a malformed list fails open. If this starts reverting,
+    ///         update its NatSpec.
+    function test_prevalidatedHandlerTrustsTheCaller() public {
+        (StateUpdateType[] memory types, bytes[] memory args, StorageGuard.ProtectedRange[] memory r) = _descending();
+        parent.runPrevalidated(types, args, r);
         assertEq(vm.load(address(parent), bytes32(0)), bytes32(uint256(1)), "slot 0 was written");
     }
 
