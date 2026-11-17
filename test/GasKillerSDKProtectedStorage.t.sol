@@ -97,6 +97,30 @@ contract TunableConsumer is GasKillerSDK {
     }
 }
 
+/// A consumer whose tracked function can be re-entered through an external contract, so one
+/// native transaction bumps its counter twice.
+contract ReentrantVault is GasKillerSDK {
+    uint256 public hits; // slot 0
+
+    constructor(address registry) {
+        _setSchnorrRegistry(registry);
+    }
+
+    function poke() external trackState {
+        hits += 1;
+    }
+}
+
+/// The external contract a tracked function calls, which calls back into the vault's other
+/// tracked function, or does nothing.
+contract Poker {
+    function poke(ReentrantVault v) external {
+        v.poke();
+    }
+
+    function noop() external {}
+}
+
 /// Re-declares the transition counter, which the SDK already protects.
 contract OverlappingConsumer is GasKillerSDK {
     function _protectedRanges() internal pure override returns (StorageGuard.ProtectedRange[] memory r) {
@@ -429,6 +453,52 @@ contract GasKillerSDKProtectedStorageTest is Test {
         assertEq(open.owner(), ATTACKER);
         assertEq(open.nonce(), 1);
         assertEq(open.stateTransitionCount(), 2);
+    }
+
+    // ---------------------------------------------------------------- re-entered tracked functions
+
+    /// @dev A tracked function whose CALL re-enters another tracked function on the same contract,
+    ///      so the counter goes N -> N+2 natively. gas-analyzer's canonical extraction emits the
+    ///      counter as it stands before the CALL (N+1) and re-asserts it in the final slice (N+2),
+    ///      after the CALL's native replay has bumped it. Both writes leave the counter unchanged.
+    function _reentrantProgram(ReentrantVault v, Poker poker, bytes memory callData, bool finalSlice)
+        internal
+        view
+        returns (Program memory p)
+    {
+        uint256 n = v.stateTransitionCount();
+        p = _program(4);
+        _store(p, TRACKER_SLOT, bytes32(n + 1)); // slice before the CALL
+        _call(p, address(poker), callData);
+        if (finalSlice) {
+            _store(p, bytes32(0), bytes32(v.hits() + 1)); // hits, written by the re-entered poke()
+            _store(p, TRACKER_SLOT, bytes32(n + 2));
+        }
+    }
+
+    function test_reenteredTrackedFunctionSettles() public {
+        ReentrantVault v = new ReentrantVault(address(registry));
+        Poker poker = new Poker();
+        bytes memory poke = abi.encodeCall(Poker.poke, (v));
+
+        _settle(v, _reentrantProgram(v, poker, poke, true));
+        assertEq(v.stateTransitionCount(), 2, "the settlement's bump plus the re-entered one");
+        assertEq(v.hits(), 1);
+
+        // The journal-order extraction emits no final slice; it settles too.
+        _settle(v, _reentrantProgram(v, poker, poke, false));
+        assertEq(v.stateTransitionCount(), 4);
+        assertEq(v.hits(), 2);
+    }
+
+    /// @dev If the CALL's replay diverges from the simulation and doesn't re-enter, the final
+    ///      slice's counter value is one the contract never reached, and the write is rejected
+    ///      instead of skipping a transition index.
+    function test_reassertedCounterTheReplayDidNotReachIsRejected() public {
+        ReentrantVault v = new ReentrantVault(address(registry));
+        Poker poker = new Poker();
+        Program memory p = _reentrantProgram(v, poker, abi.encodeCall(Poker.noop, ()), true);
+        _settle(v, p, _rejection(3, TRACKER_SLOT));
     }
 
     // ---------------------------------------------------------------- batches
