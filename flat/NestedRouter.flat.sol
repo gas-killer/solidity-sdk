@@ -1110,12 +1110,39 @@ library StateChangeHandlerLib {
 
     /// @dev Runs a program outside any tree, rejecting every NESTED op. Dispatching NESTED
     ///      through a function pointer keeps `_runNested` out of consumers that never nest.
-    ///      Every STORE is checked against `ranges` (see `_run`). An empty list reverts with
-    ///      `NoProtectedRanges` rather than running unchecked; the only unchecked path is the
-    ///      explicitly named `_runStateUpdatesUnguarded`. Inside a `GasKillerSDK` contract, pass
-    ///      `_settlementRanges()`, which always includes the SDK's own storage and was validated
-    ///      at deployment. Any other list must pass `StorageGuard.validateRanges` first.
+    ///      Every STORE is checked against `ranges` (see `_run`). The list is validated first
+    ///      (`StorageGuard.InvalidRanges`), so a malformed one reverts rather than failing open,
+    ///      and an empty one reverts with `NoProtectedRanges` rather than running unchecked; the
+    ///      only unchecked path is the explicitly named `_runStateUpdatesUnguarded`. Validating
+    ///      costs O(k) per program; a caller whose list is already validated, as `GasKillerSDK`'s
+    ///      is at deployment, can use `_runStateUpdatesPrevalidated` instead.
     function _runStateUpdates(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges
+    ) internal {
+        StorageGuard.validateRanges(ranges);
+        _runStateUpdatesPrevalidated(types, args, ranges);
+    }
+
+    /// @dev Runs a program inside the tree in `ctx`, checking every STORE against `ranges`. As
+    ///      above, `ranges` is validated first and may not be empty.
+    function _runStateUpdates(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges,
+        NestedContext memory ctx
+    ) internal {
+        StorageGuard.validateRanges(ranges);
+        _runStateUpdatesPrevalidated(types, args, ranges, ctx);
+    }
+
+    /// @dev `_runStateUpdates` without validating `ranges`. **`ranges` must already have passed
+    ///      `StorageGuard.validateRanges`**: a malformed list fails open, silently letting writes
+    ///      to protected slots through. `GasKillerSDK` uses it with `_settlementRanges()`, which
+    ///      is a constant of the contract's code and validated by its constructor. An empty list
+    ///      still reverts with `NoProtectedRanges`.
+    function _runStateUpdatesPrevalidated(
         StateUpdateType[] memory types,
         bytes[] memory args,
         StorageGuard.ProtectedRange[] memory ranges
@@ -1125,9 +1152,9 @@ library StateChangeHandlerLib {
         _run(types, args, ranges, StorageGuard.advance, none, _rejectNested);
     }
 
-    /// @dev Runs a program inside the tree in `ctx`, checking every STORE against `ranges`. As
-    ///      above, `ranges` may not be empty; pass `_settlementRanges()`.
-    function _runStateUpdates(
+    /// @dev `_runStateUpdates` inside the tree in `ctx`, without validating `ranges`. Same
+    ///      precondition as above.
+    function _runStateUpdatesPrevalidated(
         StateUpdateType[] memory types,
         bytes[] memory args,
         StorageGuard.ProtectedRange[] memory ranges,
@@ -1176,9 +1203,9 @@ library StateChangeHandlerLib {
     /// @param ranges Protected storage. Nonempty when `check` is `StorageGuard.advance`: the
     ///        guarded entry points reject an empty list (`NoProtectedRanges`), so a caller can't
     ///        turn protection off by passing one. Empty from `_runStateUpdatesUnguarded`, whose
-    ///        `_skipCheck` never reads it. When checked, it **must already have passed
-    ///        `StorageGuard.validateRanges`**: it is not re-validated here, and a malformed list
-    ///        fails open. `GasKillerSDK._settlementRanges()` is validated at deployment. Every
+    ///        `_skipCheck` never reads it. When checked, it has passed
+    ///        `StorageGuard.validateRanges`: in `_runStateUpdates`, or before the caller of
+    ///        `_runStateUpdatesPrevalidated` (`GasKillerSDK`'s constructor). Every
     ///        STORE is checked right before it executes and reverts with
     ///        `StorageGuard.ProtectedSlotWrite` if it would change a protected bit. Checking at
     ///        that moment is exact even after a CALL has legitimately changed protected storage.
@@ -1461,6 +1488,14 @@ abstract contract GasKillerSDK is
     ///      covered when the struct grows: it must fit in the namespace's 256 slots, and it must
     ///      hold only value types. A mapping or dynamic array here would store its entries at
     ///      keccak-derived slots outside the namespace, where they would be unprotected.
+    ///
+    ///      **Its setters (`_setAvsAddress`, `_setSchnorrRegistry`, `_setBlockStaleMeasure`) must
+    ///      not be called from a `trackState` function.** A tracked function that changes a
+    ///      config value carries that write in its program, and settlement rejects it every time
+    ///      with `StorageGuard.ProtectedSlotWrite`: the transition can never settle. Call them
+    ///      from the constructor, an initializer, or an admin function that is not `trackState`,
+    ///      all of which run natively and are never settled. Storing the value already there
+    ///      changes nothing and passes.
     struct GasKillerSDKStorage {
         address avsAddress;
         ISchnorrStakeRegistry registry;
@@ -1649,7 +1684,7 @@ abstract contract GasKillerSDK is
     function _stateChangeHandler(bytes calldata storageUpdates, StorageGuard.ProtectedRange[] memory ranges) internal {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
         if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args);
-        else StateChangeHandlerLib._runStateUpdates(types, args, ranges);
+        else StateChangeHandlerLib._runStateUpdatesPrevalidated(types, args, ranges);
     }
 
     /// @notice The storage ranges a signed program may not change: the SDK's own slots merged
@@ -1839,25 +1874,13 @@ abstract contract GasKillerSDK is
     }
 
     /// @notice Sets the AVS service manager this contract is scoped to.
-    /// @dev **Do not call from a `trackState` function.** The config struct is protected storage
-    ///      (see `gasKillerProtectedRanges`), so a settled program may not change it. A tracked function
-    ///      that changes this value carries that write in its program, and settlement rejects it
-    ///      every time with `StorageGuard.ProtectedSlotWrite`: the transition can never settle.
-    ///      Call it from the constructor, an initializer, or an admin function that is not
-    ///      `trackState`, all of which run natively and are never settled. Storing the value
-    ///      already there changes nothing and passes.
+    /// @dev **Do not call from a `trackState` function**: see `GasKillerSDKStorage`.
     function _setAvsAddress(address _avsAddress) internal {
         _sto().avsAddress = _avsAddress;
     }
 
     /// @notice Sets the registry that verifies quorum signatures for this contract.
-    /// @dev **Do not call from a `trackState` function.** The config struct is protected storage
-    ///      (see `gasKillerProtectedRanges`), so a settled program may not change it. A tracked function
-    ///      that changes this value carries that write in its program, and settlement rejects it
-    ///      every time with `StorageGuard.ProtectedSlotWrite`: the transition can never settle.
-    ///      Call it from the constructor, an initializer, or an admin function that is not
-    ///      `trackState`, all of which run natively and are never settled. Storing the value
-    ///      already there changes nothing and passes.
+    /// @dev **Do not call from a `trackState` function**: see `GasKillerSDKStorage`.
     function _setSchnorrRegistry(address _registry) internal {
         _sto().registry = ISchnorrStakeRegistry(_registry);
     }
@@ -1868,13 +1891,7 @@ abstract contract GasKillerSDK is
 
     /// @notice Sets how many blocks old a settlement's reference block may be (0 means the
     ///         default of 300).
-    /// @dev **Do not call from a `trackState` function.** The config struct is protected storage
-    ///      (see `gasKillerProtectedRanges`), so a settled program may not change it. A tracked function
-    ///      that changes this value carries that write in its program, and settlement rejects it
-    ///      every time with `StorageGuard.ProtectedSlotWrite`: the transition can never settle.
-    ///      Call it from the constructor, an initializer, or an admin function that is not
-    ///      `trackState`, all of which run natively and are never settled. Storing the value
-    ///      already there changes nothing and passes.
+    /// @dev **Do not call from a `trackState` function**: see `GasKillerSDKStorage`.
     function _setBlockStaleMeasure(uint256 _blockStaleMeasure) internal {
         require(_blockStaleMeasure <= type(uint96).max, BlockStaleMeasureOverflow());
         _sto().blockStaleMeasure = uint96(_blockStaleMeasure);
@@ -1988,7 +2005,7 @@ abstract contract GasKillerNestedSDK is GasKillerSDK, IGasKillerNested {
     function _runProgram(bytes memory storageUpdates, NestedContext memory ctx) private {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
         if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args, ctx);
-        else StateChangeHandlerLib._runStateUpdates(types, args, _settlementRanges(), ctx);
+        else StateChangeHandlerLib._runStateUpdatesPrevalidated(types, args, _settlementRanges(), ctx);
     }
 
     /// @dev Nested settlement reverts against a registry without `ISchnorrApprovalRegistry`, and

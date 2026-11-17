@@ -347,12 +347,39 @@ library StateChangeHandlerLib {
 
     /// @dev Runs a program outside any tree, rejecting every NESTED op. Dispatching NESTED
     ///      through a function pointer keeps `_runNested` out of consumers that never nest.
-    ///      Every STORE is checked against `ranges` (see `_run`). An empty list reverts with
-    ///      `NoProtectedRanges` rather than running unchecked; the only unchecked path is the
-    ///      explicitly named `_runStateUpdatesUnguarded`. Inside a `GasKillerSDK` contract, pass
-    ///      `_settlementRanges()`, which always includes the SDK's own storage and was validated
-    ///      at deployment. Any other list must pass `StorageGuard.validateRanges` first.
+    ///      Every STORE is checked against `ranges` (see `_run`). The list is validated first
+    ///      (`StorageGuard.InvalidRanges`), so a malformed one reverts rather than failing open,
+    ///      and an empty one reverts with `NoProtectedRanges` rather than running unchecked; the
+    ///      only unchecked path is the explicitly named `_runStateUpdatesUnguarded`. Validating
+    ///      costs O(k) per program; a caller whose list is already validated, as `GasKillerSDK`'s
+    ///      is at deployment, can use `_runStateUpdatesPrevalidated` instead.
     function _runStateUpdates(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges
+    ) internal {
+        StorageGuard.validateRanges(ranges);
+        _runStateUpdatesPrevalidated(types, args, ranges);
+    }
+
+    /// @dev Runs a program inside the tree in `ctx`, checking every STORE against `ranges`. As
+    ///      above, `ranges` is validated first and may not be empty.
+    function _runStateUpdates(
+        StateUpdateType[] memory types,
+        bytes[] memory args,
+        StorageGuard.ProtectedRange[] memory ranges,
+        NestedContext memory ctx
+    ) internal {
+        StorageGuard.validateRanges(ranges);
+        _runStateUpdatesPrevalidated(types, args, ranges, ctx);
+    }
+
+    /// @dev `_runStateUpdates` without validating `ranges`. **`ranges` must already have passed
+    ///      `StorageGuard.validateRanges`**: a malformed list fails open, silently letting writes
+    ///      to protected slots through. `GasKillerSDK` uses it with `_settlementRanges()`, which
+    ///      is a constant of the contract's code and validated by its constructor. An empty list
+    ///      still reverts with `NoProtectedRanges`.
+    function _runStateUpdatesPrevalidated(
         StateUpdateType[] memory types,
         bytes[] memory args,
         StorageGuard.ProtectedRange[] memory ranges
@@ -362,9 +389,9 @@ library StateChangeHandlerLib {
         _run(types, args, ranges, StorageGuard.advance, none, _rejectNested);
     }
 
-    /// @dev Runs a program inside the tree in `ctx`, checking every STORE against `ranges`. As
-    ///      above, `ranges` may not be empty; pass `_settlementRanges()`.
-    function _runStateUpdates(
+    /// @dev `_runStateUpdates` inside the tree in `ctx`, without validating `ranges`. Same
+    ///      precondition as above.
+    function _runStateUpdatesPrevalidated(
         StateUpdateType[] memory types,
         bytes[] memory args,
         StorageGuard.ProtectedRange[] memory ranges,
@@ -413,9 +440,9 @@ library StateChangeHandlerLib {
     /// @param ranges Protected storage. Nonempty when `check` is `StorageGuard.advance`: the
     ///        guarded entry points reject an empty list (`NoProtectedRanges`), so a caller can't
     ///        turn protection off by passing one. Empty from `_runStateUpdatesUnguarded`, whose
-    ///        `_skipCheck` never reads it. When checked, it **must already have passed
-    ///        `StorageGuard.validateRanges`**: it is not re-validated here, and a malformed list
-    ///        fails open. `GasKillerSDK._settlementRanges()` is validated at deployment. Every
+    ///        `_skipCheck` never reads it. When checked, it has passed
+    ///        `StorageGuard.validateRanges`: in `_runStateUpdates`, or before the caller of
+    ///        `_runStateUpdatesPrevalidated` (`GasKillerSDK`'s constructor). Every
     ///        STORE is checked right before it executes and reverts with
     ///        `StorageGuard.ProtectedSlotWrite` if it would change a protected bit. Checking at
     ///        that moment is exact even after a CALL has legitimately changed protected storage.
