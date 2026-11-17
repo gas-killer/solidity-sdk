@@ -37,6 +37,14 @@ jobs:
         run: forge build --sizes
         id: build
 
+      # The benchmarks in bench/ run only under the gas profile, outside CI, because their
+      # ceilings move with the toolchain. Compiling them here still catches an API change that
+      # breaks them.
+      - name: Build gas benchmarks
+        run: forge build
+        env:
+          FOUNDRY_PROFILE: gas
+
       - name: Run Forge tests
         run: forge test -vvv
         id: test

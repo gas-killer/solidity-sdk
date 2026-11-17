@@ -11,6 +11,7 @@ import {CycleRelay} from "../../src/examples/nested-cycle/CycleRelay.sol";
 import {HashChain} from "../../src/examples/HashChain.sol";
 import {SchnorrSigner} from "../utils/SchnorrSigner.sol";
 import {NestedTreeBuilder} from "../utils/NestedTreeBuilder.sol";
+import {StorageGuard} from "../../src/libraries/StorageGuard.sol";
 
 /// Called from inside the re-entered root frame. Mirrors `CycleRoot.finish`'s native check,
 /// which never runs on replay: the re-entered frame must see the counter `start` already wrote
@@ -25,6 +26,15 @@ contract CycleObserver {
             revert NotIntermediateState(root.counter(), root.settled());
         }
         confirmations += 1;
+    }
+}
+
+/// A relay opted out of protected storage, to check that nested settlement honours the hook.
+contract UnguardedCycleRelay is CycleRelay {
+    constructor(address avs, address registry) CycleRelay(avs, registry) {}
+
+    function _unsafeDisableStorageGuard() internal pure override returns (bool) {
+        return true;
     }
 }
 
@@ -103,6 +113,52 @@ contract NestedCycleTest is Test {
             // The observer's error arrives wrapped in one RevertingContext per enclosing frame.
             assertTrue(_contains(err, reason), "observer rejected the early final write");
         }
+    }
+
+    /// Every frame is checked against its own contract's protected storage. A frame whose copy of
+    /// the transition counter disagrees with what `trackState` wrote is rejected, whichever
+    /// contract in the tree it belongs to.
+    function test_framesCannotRewriteTheirTransitionCounter() public {
+        bytes memory reason = abi.encodeWithSelector(StorageGuard.ProtectedSlotWrite.selector, 0, TRACKER_SLOT);
+
+        // Root frame: its first op is the counter copy.
+        NestedTreeBuilder.Frame[] memory frames = _frames(1, false);
+        frames[0].args[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(9)));
+        TreeSubmission memory sub = _toSubmission(frames.build(expiryBlock));
+        vm.expectRevert(reason);
+        root.verifyAndUpdateTree(sub);
+
+        // A callee's frame: the error arrives wrapped in the parent's RevertingContext.
+        frames = _frames(1, false);
+        frames[1].args[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(9)));
+        sub = _toSubmission(frames.build(expiryBlock));
+        try root.verifyAndUpdateTree(sub) {
+            fail("tree settled");
+        } catch (bytes memory err) {
+            assertTrue(_contains(err, reason), "relay frame's counter rewrite rejected");
+        }
+    }
+
+    /// The hook applies per contract: an opted-out relay's frame may rewrite the relay's counter,
+    /// while the guarded root's frames are still checked.
+    function test_optedOutCalleeFrameIsNotChecked() public {
+        relay = new UnguardedCycleRelay(address(0xA75), address(registry));
+        root = new CycleRoot(address(0xA75), address(registry), relay, ROUNDS);
+        relay.setRoot(root);
+        uint256 snapshot = vm.snapshotState();
+
+        NestedTreeBuilder.Frame[] memory frames = _frames(1, false);
+        frames[1].args[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(9)));
+        root.verifyAndUpdateTree(_toSubmission(frames.build(expiryBlock)));
+        assertEq(relay.stateTransitionCount(), 9);
+        assertEq(relay.relayed(), 1);
+
+        vm.revertToState(snapshot);
+        frames = _frames(1, false);
+        frames[0].args[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(9)));
+        TreeSubmission memory sub = _toSubmission(frames.build(expiryBlock));
+        vm.expectRevert(abi.encodeWithSelector(StorageGuard.ProtectedSlotWrite.selector, 0, TRACKER_SLOT));
+        root.verifyAndUpdateTree(sub);
     }
 
     function _contains(bytes memory haystack, bytes memory needle) private pure returns (bool) {
