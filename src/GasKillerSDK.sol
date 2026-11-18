@@ -316,32 +316,63 @@ abstract contract GasKillerSDK is
     /// @param targetFunction As for `_authorizeCall`: zero in a nested callee's frame.
     function _afterProgram(bytes4 targetFunction) internal virtual {}
 
-    /// @dev The policy a program for `targetFunction` runs under: `_maxOutgoingValue`'s cap and
-    ///      `_authorizeCall`. Fresh per program, so each transition of a batch has its own cap.
+    /// @dev The policy a program for `targetFunction` runs under: `_maxOutgoingValue`'s cap, the
+    ///      self-call check and `_authorizeCall`. Fresh per program, so each transition of a batch
+    ///      has its own cap.
     function _callPolicy(bytes4 targetFunction) internal view returns (CallPolicy memory) {
-        return CallPolicy(targetFunction, _maxOutgoingValue(targetFunction), 0, _authorizeCall);
+        return CallPolicy(targetFunction, _maxOutgoingValue(targetFunction), 0, _authorizeCall, _allowSelfCall);
+    }
+
+    /// @notice Override to let a signed program `CALL` this contract. Rejects every self-call
+    ///         by default (`StateChangeHandlerLib.SelfCall`).
+    /// @dev Checked by `StateChangeHandlerLib`, after the value cap and before `_authorizeCall`,
+    ///      so an `_authorizeCall` override that leaves out `super` can't drop it.
+    ///      A self-call runs with `msg.sender == address(this)`, so it reaches functions gated
+    ///      on it (self-governed setters, `onlyGovernance`-style admin), and a tracked function
+    ///      it reaches runs natively, bumping the transition counter outside `StorageGuard`.
+    ///      gas-analyzer does emit a tracked function's `this.foo()` (including
+    ///      `try this.foo()`) as a self-`CALL`, so a contract whose tracked functions do that
+    ///      must allow those selectors, and only those:
+    ///      ```
+    ///      function _allowSelfCall(bytes4, bytes4 selector) internal pure override returns (bool) {
+    ///          return selector == this.doThing.selector;
+    ///      }
+    ///      ```
+    ///      Internal calls (`foo()`, `_foo()`) are jumps, not `CALL`s, and never get here. Nor
+    ///      do `NESTED` ops, which the callee checks against its own signed frame. Keep it
+    ///      `pure` where you can: a constant list costs no storage read and can't be changed.
+    /// @param targetFunction As for `_authorizeCall`: zero in a nested callee's frame, so a
+    ///        selector a nested frame needs must be allowed for `bytes4(0)` too.
+    /// @param selector The first 4 bytes of the call's data; zero when it is shorter (a plain
+    ///        ETH transfer to this contract).
+    function _allowSelfCall(bytes4 targetFunction, bytes4 selector) internal view virtual returns (bool) {
+        targetFunction;
+        selector;
+        return false;
     }
 
     /// @notice Override to restrict what a signed program may do with this contract's authority.
     ///         Called before every `CALL`, `CREATE`, `CREATE2` and `NESTED` op of a program;
     ///         revert to reject the op, and with it the whole transition. Allows everything by
-    ///         default.
+    ///         default, apart from self-calls, which are rejected before this hook runs unless
+    ///         `_allowSelfCall` allows them.
     /// @dev `StorageGuard` only checks `STORE`s. A `CALL` runs real code as this contract, so
     ///      without a policy a quorum that signs a malicious program can, for example:
-    ///      - call this contract's own functions gated on `msg.sender == address(this)`;
     ///      - transfer or approve tokens this contract holds;
-    ///      - send this contract's ETH through a `CALL`, `CREATE`, `CREATE2` or `NESTED` value.
+    ///      - send this contract's ETH through a `CALL`, `CREATE`, `CREATE2` or `NESTED` value;
+    ///      - call this contract's own functions gated on `msg.sender == address(this)`, if
+    ///        `_allowSelfCall` allows their selectors.
     ///
     ///      A signed program doesn't carry the user's arguments or `msg.sender`, and honest
     ///      programs often call targets only known at run time, so the policy is code rather than
     ///      a list: check what the tracked functions can legitimately do. The hook is not `view`,
-    ///      so it can keep state, such as a rate limit. For example, to reject self-calls (which
-    ///      gas-analyzer does emit for a tracked function that calls `this.foo()`):
+    ///      so it can keep state, such as a rate limit. For example, to allow tokens out only to
+    ///      a known payee:
     ///      ```
-    ///      function _authorizeCall(bytes4, uint256 index, StateUpdateType kind, address target, uint256, bytes memory)
+    ///      function _authorizeCall(bytes4, uint256 index, StateUpdateType, address target, uint256, bytes memory data)
     ///          internal override
     ///      {
-    ///          if (kind == StateUpdateType.CALL && target == address(this)) revert SelfCall(index);
+    ///          if (target == address(token) && !_isTransferToPayee(data)) revert DisallowedCall(index);
     ///      }
     ///      ```
     ///      Per-program value totals are better capped with `_maxOutgoingValue`, which runs first.

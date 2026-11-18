@@ -257,8 +257,9 @@ quietly restores the old value is rejected, and one that keeps the new value pas
 **What it is not.** Protection applies to the signed `STORE` entries only. It does not watch the slot
 itself, so your own functions, called normally, are unaffected, and so is native code a signed
 `CALL` runs. A `CALL` acts with the contract's authority: it can't pass an `onlyOwner` check,
-because `msg.sender` is the contract, but it can reach functions that trust `msg.sender ==
-address(this)`, and it can spend what the contract holds elsewhere (tokens, approvals, ETH).
+because `msg.sender` is the contract, but it can spend what the contract holds elsewhere (tokens,
+approvals, ETH), and, if you allow self-calls, reach functions that trust `msg.sender ==
+address(this)`.
 See [Restricting calls](#restricting-calls).
 
 **Opting out.** A contract whose security already rests on trusting the quorum completely, for
@@ -357,14 +358,34 @@ Both benchmarks run with `FOUNDRY_PROFILE=gas forge test -vv`.
 ## Restricting calls
 
 A signed `CALL` runs real code with your contract's authority, and protected storage doesn't see it.
-With no policy, a program signed by a compromised quorum can call your own functions that trust
-`msg.sender == address(this)`, transfer or approve the tokens your contract holds, and send its ETH
-through the value of a `CALL`, `CREATE`, `CREATE2` or `NESTED` op. Settlement gives you two hooks
-to stop that. Both run before the op does, and a revert in either reverts the whole transition.
+With no policy, a program signed by a compromised quorum can transfer or approve the tokens your
+contract holds, and send its ETH through the value of a `CALL`, `CREATE`, `CREATE2` or `NESTED` op.
+Settlement rejects calls to your own contract by default and gives you hooks to restrict the rest.
+They all run before the op does, and a revert in any of them reverts the whole transition.
 
-**Off by default.** Both hooks allow everything unless you override them, so existing consumers
-behave as before. A consumer that makes no external calls and holds nothing has nothing to restrict.
-One that holds value, or has self-gated functions, should write a policy.
+**Self-calls are rejected by default.** A `CALL` from a signed program to your own contract runs
+with `msg.sender == address(this)`, so it would reach self-gated functions (self-governed setters,
+`onlyGovernance`-style admin) and could run a tracked function natively, bumping the transition
+counter outside protected storage. Settlement rejects it with `SelfCall(index, selector)` unless
+`_allowSelfCall` allows it. Internal calls (`foo()`, `_foo()`) are jumps, not `CALL`s, and aren't
+affected. gas-analyzer does emit a tracked function's `this.foo()`, including `try this.foo()`, as
+a self-`CALL`, so if your tracked functions do that, allow those selectors and only those:
+
+```solidity
+function _allowSelfCall(bytes4 targetFunction, bytes4 selector) internal pure override returns (bool) {
+    return targetFunction == this.process.selector && selector == this.doThing.selector;
+}
+```
+
+`targetFunction` is the selector the transition was signed for (zero in a nested callee's frame), so
+the list can depend on which tracked function is settling. `selector` is zero for calldata under 4
+bytes, such as a plain ETH transfer to the contract. Keep the override `pure` where you can: a
+constant list costs no storage read and can't be changed. The check runs in `StateChangeHandlerLib`,
+ahead of `_authorizeCall`, so an `_authorizeCall` override can't drop it by leaving out `super`.
+
+**The other hooks are off by default.** `_authorizeCall` and `_maxOutgoingValue` allow everything
+unless you override them. A consumer that makes no external calls and holds nothing has nothing
+more to restrict. One that holds value should write a policy.
 
 **`_authorizeCall`** is called before every `CALL`, `CREATE`, `CREATE2` and `NESTED` op with the
 signed selector, the op's position, its kind, its target, its value and its data (a `CALL`'s
@@ -379,7 +400,6 @@ function _authorizeCall(bytes4, uint256 index, StateUpdateType kind, address tar
     internal
     override
 {
-    if (target == address(this)) revert SelfCall(index);
     if (kind == StateUpdateType.CREATE || kind == StateUpdateType.CREATE2) revert NoDeployments(index);
     if (target == address(token) && bytes4(data) != IERC20.transfer.selector) revert DisallowedCall(index);
 }
@@ -390,9 +410,6 @@ function _authorizeCall(bytes4, uint256 index, StateUpdateType kind, address tar
 reverts with `OutgoingValueExceeded(index, total, cap)` at the op that passes it, before that op
 runs. The total counts what the program sends, whatever `msg.value` brought in.
 
-- **Self-calls.** gas-analyzer emits a tracked function's `this.foo()` as a `CALL` to your own
-  contract, so a policy that rejects self-calls also rejects those programs. Reject them unless your
-  tracked functions call themselves that way.
 - **Batches and trees.** Each transition of a `verifyAndUpdateBatch` is checked and capped on its
   own. In a nested tree, each frame runs its own contract's policy: the root frame's hooks get the
   signed selector, and a callee's frame gets zero, since the tree binds a callee's call by calldata
@@ -507,14 +524,15 @@ m zero-value `CALL`s to a warm, empty contract, against the same settlement befo
 
 | m `CALL`s | Before | Default policy | Small policy |
 |---|---|---|---|
-| 1 | 33,576 | +415 (+1.2%) | +453 (+1.3%) |
-| 8 | 47,166 | +1,497 (+3.2%) | +1,815 (+3.8%) |
-| 32 | 94,129 | +5,203 (+5.5%) | +6,481 (+6.9%) |
+| 1 | 33,576 | +548 (+1.6%) | +590 (+1.8%) |
+| 8 | 47,166 | +1,931 (+4.1%) | +2,281 (+4.8%) |
+| 32 | 94,129 | +6,672 (+7.1%) | +8,078 (+8.6%) |
 
-That is about 155 gas per op with the hooks left as they are, about 205 with a self-call check and a
-cap, and about 260 per program. A program of `STORE`s only pays the per-program part and about 3 gas
-per op. A real `CALL` pays a cold account access (2,600) and its callee's work, so the share is
-smaller than against this empty callee.
+That is about 200 gas per op with the hooks left as they are (about 43 of it the self-call check),
+about 240 with a one-target check and a cap, and about 350 per program. An allowed self-call costs
+about 38 more for a one-selector `_allowSelfCall` than for one that allows everything. A program of
+`STORE`s only pays the per-program part and about 3 gas per op. A real `CALL` pays a cold account
+access (2,600) and its callee's work, so the share is smaller than against this empty callee.
 
 **Not covered:** checking a call's arguments against what the user asked for. The program doesn't
 carry the user's input, so `transfer(to, amount)` is judged on its own: the policy can pin `to` to a

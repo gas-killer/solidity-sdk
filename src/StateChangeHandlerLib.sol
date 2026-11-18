@@ -46,7 +46,8 @@ struct NestedContext {
 ///      malicious quorum could otherwise spend anything the consumer holds or controls elsewhere.
 ///      Before each such op, `_run` adds its value to `sent`, reverts with
 ///      `OutgoingValueExceeded` once the total passes `valueCap`, and then calls `authorize`,
-///      which reverts to reject the op.
+///      which reverts to reject the op. Before all that, a `CALL` to the running contract
+///      itself reverts with `SelfCall` unless `allowSelfCall` allows its selector.
 /// @param targetFunction The selector the transition was signed for, handed to `authorize`.
 ///        Zero in a nested callee's frame, which the tree binds by calldata hash only.
 /// @param valueCap The most wei the program's ops may send in total.
@@ -55,11 +56,16 @@ struct NestedContext {
 ///        `CALL`, `data` is the calldata. For `CREATE`/`CREATE2` it is the initcode, with a zero
 ///        `target`, since the address isn't known before the deployment. For `NESTED`, `data` is
 ///        empty: the callee applies and checks its own signed frame.
+/// @param allowSelfCall Called as `(targetFunction, selector)` for a `CALL` to the running
+///        contract; returns whether to let it run. `selector` is zero for calldata under 4
+///        bytes. Checked here rather than left to `authorize`, so an `authorize` that is
+///        overridden can't drop it, and so a `CALL` elsewhere only pays one comparison.
 struct CallPolicy {
     bytes4 targetFunction;
     uint256 valueCap;
     uint256 sent;
     function(bytes4, uint256, StateUpdateType, address, uint256, bytes memory) authorize;
+    function(bytes4, bytes4) view returns (bool) allowSelfCall;
 }
 
 /// @title StateChangeHandlerLib
@@ -170,13 +176,17 @@ library StateChangeHandlerLib {
         _run(types, args, noRanges, _skipCheck, policy, ctx, _runNested);
     }
 
-    /// @dev A policy that allows every op and any total value, for callers outside a
-    ///      `GasKillerSDK` contract. `targetFunction` is zero.
+    /// @dev A policy that allows every op, self-calls included, and any total value, for callers
+    ///      outside a `GasKillerSDK` contract. `targetFunction` is zero.
     function _unrestrictedCalls() internal pure returns (CallPolicy memory) {
-        return CallPolicy(bytes4(0), type(uint256).max, 0, _allowCall);
+        return CallPolicy(bytes4(0), type(uint256).max, 0, _allowCall, _allowSelfCall);
     }
 
     function _allowCall(bytes4, uint256, StateUpdateType, address, uint256, bytes memory) private pure {}
+
+    function _allowSelfCall(bytes4, bytes4) private pure returns (bool) {
+        return true;
+    }
 
     /// @dev Counts `value` against the policy's cap, then hands the op to its `authorize`.
     function _authorize(
@@ -193,6 +203,13 @@ library StateChangeHandlerLib {
             policy.sent = sent;
         }
         policy.authorize(policy.targetFunction, index, kind, target, value, data);
+    }
+
+    /// @dev Rejects a `CALL` to the running contract unless the policy's `allowSelfCall` allows
+    ///      its selector. Kept out of line so a `CALL` elsewhere pays only the address check.
+    function _checkSelfCall(CallPolicy memory policy, uint256 index, bytes memory data) private view {
+        bytes4 selector = data.length < 4 ? bytes4(0) : bytes4(data);
+        require(policy.allowSelfCall(policy.targetFunction, selector), SelfCall(index, selector));
     }
 
     /// @dev The STORE check of an unguarded run: none.
@@ -260,6 +277,7 @@ library StateChangeHandlerLib {
                 // nothing — but it does nullify the batch's cost amortization. See
                 // IGasKillerSDKBatch for the batch-assembly-side note.
                 (address target, uint256 value, bytes memory callargs) = abi.decode(arg, (address, uint256, bytes));
+                if (target == address(this)) _checkSelfCall(policy, i, callargs);
                 _authorize(policy, i, StateUpdateType.CALL, target, value, callargs);
                 bool success;
                 assembly {
@@ -432,6 +450,12 @@ library StateChangeHandlerLib {
     /// @param total The program's outgoing value including that op
     /// @param cap The cap
     error OutgoingValueExceeded(uint256 index, uint256 total, uint256 cap);
+
+    /// @notice Thrown when a CALL op targets the running contract with a selector its
+    ///         `CallPolicy.allowSelfCall` doesn't allow
+    /// @param index The zero-based position of the op
+    /// @param selector The call's first 4 bytes; zero when its calldata is shorter
+    error SelfCall(uint256 index, bytes4 selector);
 
     /// @notice Thrown when a LOG operation's payload is not a canonical, in-bounds ABI encoding
     error MalformedLogPayload();

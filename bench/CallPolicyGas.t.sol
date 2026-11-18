@@ -40,22 +40,41 @@ contract DefaultCaller is GasKillerSDK {
     }
 }
 
-/// A typical small policy: no self-calls, and a value cap.
+/// A typical small policy: one denied target, and a value cap.
 contract PolicedCaller is DefaultCaller {
-    error SelfCall(uint256 index);
+    error Denied(uint256 index);
 
     constructor(address registry) DefaultCaller(registry) {}
 
     function _authorizeCall(bytes4, uint256 index, StateUpdateType, address target, uint256, bytes memory)
         internal
-        view
+        pure
         override
     {
-        if (target == address(this)) revert SelfCall(index);
+        if (target == address(0xdead)) revert Denied(index);
     }
 
     function _maxOutgoingValue(bytes4) internal pure override returns (uint256) {
         return 1 ether;
+    }
+}
+
+/// Lets a signed program call its own `ping`, through a one-selector allow-list or by allowing
+/// every self-call.
+contract SelfCaller is DefaultCaller {
+    bool public immutable allowAll;
+    uint256 public pings;
+
+    constructor(address registry, bool allowAll_) DefaultCaller(registry) {
+        allowAll = allowAll_;
+    }
+
+    function ping() external {
+        ++pings;
+    }
+
+    function _allowSelfCall(bytes4, bytes4 selector) internal view override returns (bool) {
+        return allowAll || selector == this.ping.selector;
     }
 }
 
@@ -67,20 +86,21 @@ contract RateLimitedCaller is GasKillerOutgoingRateLimit {
 }
 
 /// @notice Whole-settlement gas through `verifyAndUpdate` for the counter copy plus m zero-value
-///         CALLs to one warm contract, with the default call policy (`_authorizeCall` and
-///         `_maxOutgoingValue` not overridden) and with the small one above.
+///         CALLs to one warm contract, with the default call policy (`_authorizeCall`,
+///         `_maxOutgoingValue` and `_allowSelfCall` not overridden) and with the small one above.
 ///
 ///         Reference measurements (forge 1.5.1, solc 0.8.33, cancun). "Before" is the same
 ///         settlement before the call policy (#108's tree, 0944508):
 ///
 ///           m   | before | default policy  | small policy
-///           1   | 33,576 | +415 (+1.2%)    | +453 (+1.3%)
-///           8   | 47,166 | +1,497 (+3.2%)  | +1,815 (+3.8%)
-///           32  | 94,129 | +5,203 (+5.5%)  | +6,481 (+6.9%)
+///           1   | 33,576 | +548 (+1.6%)    | +590 (+1.8%)
+///           8   | 47,166 | +1,931 (+4.1%)  | +2,281 (+4.8%)
+///           32  | 94,129 | +6,672 (+7.1%)  | +8,078 (+8.6%)
 ///
-///         About 155 gas per CALL with the default policy, about 205 with the small one, and about
-///         260 fixed per program (building the policy and reading the cap). A program of STOREs
-///         only pays the fixed part and about 3 gas per op (`SettlementGas.t.sol`). Against a
+///         About 200 gas per CALL with the default policy (about 43 of it the self-call address
+///         check), about 240 with the small one, and about 350 fixed per program (building the
+///         policy and reading the cap). A program of STOREs only pays the fixed part and about 3
+///         gas per op (`SettlementGas.t.sol`). Against a
 ///         real CALL, which pays a cold account access (2,600) and the callee's own work, the
 ///         share is smaller than against this empty, warm callee.
 ///
@@ -88,18 +108,28 @@ contract RateLimitedCaller is GasKillerOutgoingRateLimit {
 ///         (1 ether per hour):
 ///
 ///           m   | default | rate limited
-///           1   |  40,864 | +627 (+1.5%)
-///           8   | 103,444 | +4,932 (+4.8%)
-///           32  | 318,369 | +19,692 (+6.2%)
+///           1   |  40,968 | +627 (+1.5%)
+///           8   | 103,849 | +4,932 (+4.7%)
+///           32  | 319,809 | +19,692 (+6.2%)
 ///
 ///         About 615 gas per op that sends value. The consumer is deployed in the same transaction,
 ///         so the budget slot is already warm here; a real settlement also pays about 5,000 once,
 ///         for the first read (2,100, cold) and write (2,900) of the slot.
 ///
 ///         `test_tokenLimit`: the counter copy plus one ERC-20 `transfer`, for a consumer with no
-///         limits (59,144) and for `GasKillerTokenRateLimit` listing k tokens: k = 0 +4,190 (+7.1%),
-///         k = 1 +9,273 (+15.7%), k = 4 +20,532 (+34.7%). Each listed token costs two `balanceOf`
+///         limits (59,248) and for `GasKillerTokenRateLimit` listing k tokens: k = 0 +4,190 (+7.1%),
+///         k = 1 +9,273 (+15.7%), k = 4 +20,531 (+34.7%). Each listed token costs two `balanceOf`
 ///         calls and a budget read and write; a program that runs no code reads no balances.
+///
+///         `test_selfCalls`: the counter copy plus m allowed CALLs to the consumer's own `ping()`,
+///         allowing every self-call or a one-selector list:
+///
+///           m   | allow all | one-selector list
+///           1   |  56,911   | +38
+///           8   |  77,795   | +304
+///           32  | 149,912   | +1,216
+///
+///         About 38 gas per self-call to read the selector and compare it.
 ///
 ///         Run with `FOUNDRY_PROFILE=gas forge test --match-contract CallPolicyGas -vv`.
 contract CallPolicyGasTest is Test {
@@ -211,6 +241,37 @@ contract CallPolicyGasTest is Test {
         console2.log("drop-in, k = 0  |  ", vm.toString(this.tokenGas(true, 0)));
         console2.log("drop-in, k = 1  |  ", vm.toString(this.tokenGas(true, 1)));
         console2.log("drop-in, k = 4  |  ", vm.toString(this.tokenGas(true, 4)));
+    }
+
+    /// @dev The counter copy plus m CALLs to the consumer's own `ping`.
+    function selfGas(bool allowAll, uint256 m) external returns (uint256 used) {
+        GasKillerSDK target = new SelfCaller(address(registry), allowAll);
+        StateUpdateType[] memory t = new StateUpdateType[](m + 1);
+        bytes[] memory a = new bytes[](m + 1);
+        a[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(1)));
+        for (uint256 i = 1; i <= m; ++i) {
+            t[i] = StateUpdateType.CALL;
+            a[i] = abi.encode(address(target), uint256(0), abi.encodeCall(SelfCaller.ping, ()));
+        }
+        bytes memory updates = abi.encode(t, a);
+        bytes32 h = target.getMessageHash(0, FN, updates);
+        address[] memory none = new address[](0);
+        uint32 ref = uint32(block.number - 1);
+        uint256 g = gasleft();
+        target.verifyAndUpdate(h, ref, updates, 0, FN, 1, address(1), none);
+        used = g - gasleft();
+    }
+
+    function test_selfCalls() public {
+        uint256[3] memory ms = [uint256(1), 8, 32];
+        this.settleGas(false, 1); // warm the registry
+        console2.log("settlement gas, counter copy + m allowed self-calls to ping()");
+        console2.log("m  |  allow all  |  one-selector list");
+        for (uint256 i = 0; i < 3; ++i) {
+            uint256 all = this.selfGas(true, ms[i]);
+            uint256 one = this.selfGas(false, ms[i]);
+            console2.log(string.concat(vm.toString(ms[i]), "  |  ", vm.toString(all), "  |  ", vm.toString(one)));
+        }
     }
 
     function test_calls() public {

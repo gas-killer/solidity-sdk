@@ -33,12 +33,33 @@ contract Treasury is GasKillerSDK {
         require(msg.sender == address(this), "only self");
         beneficiary = b;
     }
+
+    function setLimit(uint256 l) external {
+        require(msg.sender == address(this), "only self");
+        limit = l;
+    }
+
+    uint256 public limit; // slot 1
 }
 
-/// The same treasury with a policy: no self-calls, no deployments, tokens and ETH only to its
-/// payee, and at most 1 ether out per program.
+/// A treasury whose tracked function `FN` calls `this.setBeneficiary`: it allows that one
+/// selector, for that one tracked function.
+contract SelfCallingTreasury is Treasury {
+    bytes4 public immutable fn;
+
+    constructor(address registry, bytes4 fn_) Treasury(registry) {
+        fn = fn_;
+    }
+
+    function _allowSelfCall(bytes4 targetFunction, bytes4 selector) internal view override returns (bool) {
+        return targetFunction == fn && selector == this.setBeneficiary.selector;
+    }
+}
+
+/// The same treasury with a policy: no deployments, tokens and ETH only to its payee, and at
+/// most 1 ether out per program. Its `_authorizeCall` doesn't call `super` and doesn't mention
+/// self-calls: the SDK rejects them anyway.
 contract PolicedTreasury is Treasury {
-    error SelfCall(uint256 index);
     error NoDeployments(uint256 index);
     error DisallowedCall(uint256 index);
 
@@ -61,7 +82,6 @@ contract PolicedTreasury is Treasury {
         if (kind == StateUpdateType.CREATE || kind == StateUpdateType.CREATE2) {
             revert NoDeployments(index);
         }
-        if (target == address(this)) revert SelfCall(index);
         if (value != 0 && target != payee) revert DisallowedCall(index);
         if (target == address(token)) {
             if (data.length != 0x44 || bytes4(data) != IERC20.transfer.selector) revert DisallowedCall(index);
@@ -230,18 +250,17 @@ contract GasKillerSDKCallPolicyTest is Test {
 
     // ---------------------------------------------------------------- without a policy
 
-    /// @notice Pins the default: a consumer that writes no policy runs every probe from #109.
+    /// @notice Pins the default: a consumer that writes no policy runs every probe from #109
+    ///         except the self-call, which the SDK rejects on its own.
     function test_withoutAPolicyASignedProgramSpendsWithTheConsumersAuthority() public {
         Treasury t = _funded(new Treasury(address(registry)));
-        Program memory p = _tracked(t, 5);
-        _call(p, address(t), 0, abi.encodeCall(Treasury.setBeneficiary, (ATTACKER)));
+        Program memory p = _tracked(t, 4);
         _call(p, address(token), 0, abi.encodeCall(IERC20.transfer, (ATTACKER, 60)));
         _call(p, address(token), 0, abi.encodeCall(IERC20.approve, (ATTACKER, 40)));
         _call(p, ATTACKER, 9 ether, "");
         _create(p, 1 ether);
         _settle(t, p);
 
-        assertEq(t.beneficiary(), ATTACKER, "self-gated function");
         assertEq(token.balanceOf(ATTACKER), 60, "token drain");
         assertEq(token.allowance(address(t), ATTACKER), 40, "approval");
         assertEq(ATTACKER.balance, 9 ether, "ETH sent");
@@ -261,11 +280,12 @@ contract GasKillerSDKCallPolicyTest is Test {
         assertEq(t.stateTransitionCount(), 1);
     }
 
-    function test_policyRejectsSelfCall() public {
+    /// An `_authorizeCall` override without `super` keeps the self-call ban.
+    function test_policyWithoutSuperStillRejectsSelfCall() public {
         PolicedTreasury t = _policed();
         Program memory p = _tracked(t, 1);
         _call(p, address(t), 0, abi.encodeCall(Treasury.setBeneficiary, (ATTACKER)));
-        _settle(t, p, abi.encodeWithSelector(PolicedTreasury.SelfCall.selector, 1));
+        _settle(t, p, _selfCall(1, Treasury.setBeneficiary.selector));
         assertEq(t.beneficiary(), address(0));
     }
 
@@ -319,6 +339,77 @@ contract GasKillerSDKCallPolicyTest is Test {
         Program memory p = _tracked(t, 1);
         _call(p, address(token), 0, abi.encodeCall(IERC20.transfer, (ATTACKER, 100)));
         _settle(t, p, abi.encodeWithSelector(PolicedTreasury.DisallowedCall.selector, 1));
+
+        p = _tracked(t, 1);
+        _call(p, address(t), 0, abi.encodeCall(Treasury.setBeneficiary, (ATTACKER)));
+        _settle(t, p, _selfCall(1, Treasury.setBeneficiary.selector));
+    }
+
+    // ---------------------------------------------------------------- self-calls
+
+    function _selfCall(uint256 index, bytes4 selector) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(StateChangeHandlerLib.SelfCall.selector, index, selector);
+    }
+
+    /// The default: a self-gated function is out of reach, and the rest of the program rolls back.
+    function test_selfCallRejectedByDefault() public {
+        Treasury t = _funded(new Treasury(address(registry)));
+        Program memory p = _tracked(t, 2);
+        _call(p, PAYEE, 1 ether, "");
+        _call(p, address(t), 0, abi.encodeCall(Treasury.setBeneficiary, (ATTACKER)));
+        _settle(t, p, _selfCall(2, Treasury.setBeneficiary.selector));
+        assertEq(t.beneficiary(), address(0));
+        assertEq(PAYEE.balance, 0);
+        assertEq(t.stateTransitionCount(), 0);
+    }
+
+    /// A tracked function reached by a self-call would bump the counter outside the guard.
+    function test_selfCallToATrackedEntryPointRejected() public {
+        Treasury t = _funded(new Treasury(address(registry)));
+        Program memory p = _tracked(t, 1);
+        _call(p, address(t), 0, abi.encodeWithSelector(GasKillerSDK.verifyAndUpdate.selector));
+        _settle(t, p, _selfCall(1, GasKillerSDK.verifyAndUpdate.selector));
+    }
+
+    /// Calldata under 4 bytes, including a plain ETH send to itself, has selector zero.
+    function test_shortSelfCallHasSelectorZero() public {
+        Treasury t = _funded(new Treasury(address(registry)));
+        Program memory p = _tracked(t, 1);
+        _call(p, address(t), 1 ether, "");
+        _settle(t, p, _selfCall(1, bytes4(0)));
+
+        p = _tracked(t, 1);
+        _call(p, address(t), 0, hex"aabbcc");
+        _settle(t, p, _selfCall(1, bytes4(0)));
+    }
+
+    function test_allowedSelfCallSettles() public {
+        SelfCallingTreasury t = new SelfCallingTreasury(address(registry), FN);
+        _funded(t);
+        Program memory p = _tracked(t, 1);
+        _call(p, address(t), 0, abi.encodeCall(Treasury.setBeneficiary, (PAYEE)));
+        _settle(t, p);
+        assertEq(t.beneficiary(), PAYEE);
+        assertEq(t.stateTransitionCount(), 1);
+    }
+
+    /// Allowing one selector doesn't open the contract's other self-gated functions.
+    function test_allowListLeavesOtherSelectorsClosed() public {
+        SelfCallingTreasury t = new SelfCallingTreasury(address(registry), FN);
+        _funded(t);
+        Program memory p = _tracked(t, 1);
+        _call(p, address(t), 0, abi.encodeCall(Treasury.setLimit, (1)));
+        _settle(t, p, _selfCall(1, Treasury.setLimit.selector));
+        assertEq(t.limit(), 0);
+    }
+
+    /// The allow-list can depend on the tracked function the transition was signed for.
+    function test_allowListDependsOnTheSignedSelector() public {
+        SelfCallingTreasury t = new SelfCallingTreasury(address(registry), FN);
+        _funded(t);
+        Program memory p = _tracked(t, 1);
+        _call(p, address(t), 0, abi.encodeCall(Treasury.setBeneficiary, (PAYEE)));
+        _settle(t, p, bytes4(keccak256("other()")), _selfCall(1, Treasury.setBeneficiary.selector));
     }
 
     // ---------------------------------------------------------------- value cap
