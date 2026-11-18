@@ -337,16 +337,21 @@ struct NestedContext {
 ///      itself reverts with `SelfCall` unless `allowSelfCall` allows its selector.
 /// @param targetFunction The selector the transition was signed for, handed to `authorize`.
 ///        Zero in a nested callee's frame, which the tree binds by calldata hash only.
-/// @param valueCap The most wei the program's ops may send in total.
+/// @param valueCap The most wei the program's ops may send in total. Value an op sends to the
+///        running contract itself (an allowed self-call) stays in it and doesn't count.
 /// @param sent Wei sent so far by the program's ops. Start it at zero.
 /// @param authorize Called as `(targetFunction, index, kind, target, value, data)`. For a
 ///        `CALL`, `data` is the calldata. For `CREATE`/`CREATE2` it is the initcode, with a zero
 ///        `target`, since the address isn't known before the deployment. For `NESTED`, `data` is
 ///        empty: the callee applies and checks its own signed frame.
 /// @param allowSelfCall Called as `(targetFunction, selector)` for a `CALL` to the running
-///        contract; returns whether to let it run. `selector` is zero for calldata under 4
-///        bytes. Checked here rather than left to `authorize`, so an `authorize` that is
-///        overridden can't drop it, and so a `CALL` elsewhere only pays one comparison.
+///        contract; returns whether to let it run. `selector` is zero only for empty calldata;
+///        malformed calldata (1 to 3 bytes, or a zero selector with a payload) is rejected
+///        without asking. Checked here rather than left to `authorize`, so an `authorize` that is
+///        overridden can't drop it, and so a `CALL` elsewhere only pays one comparison. Inside a
+///        `GasKillerSDK` contract, build the policy with its `_callPolicy`. A policy built by
+///        hand should pass `StateChangeHandlerLib._rejectSelfCalls` unless it means to allow
+///        self-calls; `_unrestrictedCalls()` allows them all.
 struct CallPolicy {
     bytes4 targetFunction;
     uint256 valueCap;
@@ -475,7 +480,14 @@ library StateChangeHandlerLib {
         return true;
     }
 
-    /// @dev Counts `value` against the policy's cap, then hands the op to its `authorize`.
+    /// @dev An `allowSelfCall` that rejects every self-call: the safe choice for a `CallPolicy`
+    ///      built by hand.
+    function _rejectSelfCalls(bytes4, bytes4) internal pure returns (bool) {
+        return false;
+    }
+
+    /// @dev Counts `value` against the policy's cap, unless the op sends it to the running
+    ///      contract itself, then hands the op to its `authorize`.
     function _authorize(
         CallPolicy memory policy,
         uint256 index,
@@ -484,19 +496,31 @@ library StateChangeHandlerLib {
         uint256 value,
         bytes memory data
     ) private {
-        if (value != 0) {
-            uint256 sent = policy.sent + value;
-            if (sent > policy.valueCap) revert OutgoingValueExceeded(index, sent, policy.valueCap);
-            policy.sent = sent;
-        }
+        if (value != 0) _countValue(policy, index, target, value);
         policy.authorize(policy.targetFunction, index, kind, target, value, data);
+    }
+
+    /// @dev Adds `value` to the policy's total, or reverts once it passes the cap. Value sent to
+    ///      the running contract itself stays in it and isn't counted. Out of line, like
+    ///      `_checkSelfCall`, so a zero-value op pays only the `value` check.
+    function _countValue(CallPolicy memory policy, uint256 index, address target, uint256 value) private view {
+        if (target == address(this)) return;
+        uint256 sent = policy.sent + value;
+        if (sent > policy.valueCap) revert OutgoingValueExceeded(index, sent, policy.valueCap);
+        policy.sent = sent;
     }
 
     /// @dev Rejects a `CALL` to the running contract unless the policy's `allowSelfCall` allows
     ///      its selector. Kept out of line so a `CALL` elsewhere pays only the address check.
+    ///      Selector zero stands only for empty calldata (a plain ETH transfer). Calldata of 1 to 3
+    ///      bytes, or of 4 or more starting with `0x00000000`, is rejected without asking
+    ///      `allowSelfCall`: Solidity routes it to the fallback with a payload, so allowing the
+    ///      ETH-transfer case, or a selector its zero-padding matches, must not let it through.
     function _checkSelfCall(CallPolicy memory policy, uint256 index, bytes memory data) private view {
-        bytes4 selector = data.length < 4 ? bytes4(0) : bytes4(data);
-        require(policy.allowSelfCall(policy.targetFunction, selector), SelfCall(index, selector));
+        uint256 length = data.length;
+        bytes4 selector = bytes4(data); // zero-padded when shorter than 4 bytes
+        bool wellFormed = length == 0 || (length >= 4 && selector != bytes4(0));
+        require(wellFormed && policy.allowSelfCall(policy.targetFunction, selector), SelfCall(index, selector));
     }
 
     /// @dev The STORE check of an unguarded run: none.
@@ -741,7 +765,7 @@ library StateChangeHandlerLib {
     /// @notice Thrown when a CALL op targets the running contract with a selector its
     ///         `CallPolicy.allowSelfCall` doesn't allow
     /// @param index The zero-based position of the op
-    /// @param selector The call's first 4 bytes; zero when its calldata is shorter
+    /// @param selector The call's first 4 bytes, zero-padded when its calldata is shorter
     error SelfCall(uint256 index, bytes4 selector);
 
     /// @notice Thrown when a LOG operation's payload is not a canonical, in-bounds ABI encoding

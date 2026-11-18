@@ -1156,16 +1156,21 @@ struct NestedContext {
 ///      itself reverts with `SelfCall` unless `allowSelfCall` allows its selector.
 /// @param targetFunction The selector the transition was signed for, handed to `authorize`.
 ///        Zero in a nested callee's frame, which the tree binds by calldata hash only.
-/// @param valueCap The most wei the program's ops may send in total.
+/// @param valueCap The most wei the program's ops may send in total. Value an op sends to the
+///        running contract itself (an allowed self-call) stays in it and doesn't count.
 /// @param sent Wei sent so far by the program's ops. Start it at zero.
 /// @param authorize Called as `(targetFunction, index, kind, target, value, data)`. For a
 ///        `CALL`, `data` is the calldata. For `CREATE`/`CREATE2` it is the initcode, with a zero
 ///        `target`, since the address isn't known before the deployment. For `NESTED`, `data` is
 ///        empty: the callee applies and checks its own signed frame.
 /// @param allowSelfCall Called as `(targetFunction, selector)` for a `CALL` to the running
-///        contract; returns whether to let it run. `selector` is zero for calldata under 4
-///        bytes. Checked here rather than left to `authorize`, so an `authorize` that is
-///        overridden can't drop it, and so a `CALL` elsewhere only pays one comparison.
+///        contract; returns whether to let it run. `selector` is zero only for empty calldata;
+///        malformed calldata (1 to 3 bytes, or a zero selector with a payload) is rejected
+///        without asking. Checked here rather than left to `authorize`, so an `authorize` that is
+///        overridden can't drop it, and so a `CALL` elsewhere only pays one comparison. Inside a
+///        `GasKillerSDK` contract, build the policy with its `_callPolicy`. A policy built by
+///        hand should pass `StateChangeHandlerLib._rejectSelfCalls` unless it means to allow
+///        self-calls; `_unrestrictedCalls()` allows them all.
 struct CallPolicy {
     bytes4 targetFunction;
     uint256 valueCap;
@@ -1294,7 +1299,14 @@ library StateChangeHandlerLib {
         return true;
     }
 
-    /// @dev Counts `value` against the policy's cap, then hands the op to its `authorize`.
+    /// @dev An `allowSelfCall` that rejects every self-call: the safe choice for a `CallPolicy`
+    ///      built by hand.
+    function _rejectSelfCalls(bytes4, bytes4) internal pure returns (bool) {
+        return false;
+    }
+
+    /// @dev Counts `value` against the policy's cap, unless the op sends it to the running
+    ///      contract itself, then hands the op to its `authorize`.
     function _authorize(
         CallPolicy memory policy,
         uint256 index,
@@ -1303,19 +1315,31 @@ library StateChangeHandlerLib {
         uint256 value,
         bytes memory data
     ) private {
-        if (value != 0) {
-            uint256 sent = policy.sent + value;
-            if (sent > policy.valueCap) revert OutgoingValueExceeded(index, sent, policy.valueCap);
-            policy.sent = sent;
-        }
+        if (value != 0) _countValue(policy, index, target, value);
         policy.authorize(policy.targetFunction, index, kind, target, value, data);
+    }
+
+    /// @dev Adds `value` to the policy's total, or reverts once it passes the cap. Value sent to
+    ///      the running contract itself stays in it and isn't counted. Out of line, like
+    ///      `_checkSelfCall`, so a zero-value op pays only the `value` check.
+    function _countValue(CallPolicy memory policy, uint256 index, address target, uint256 value) private view {
+        if (target == address(this)) return;
+        uint256 sent = policy.sent + value;
+        if (sent > policy.valueCap) revert OutgoingValueExceeded(index, sent, policy.valueCap);
+        policy.sent = sent;
     }
 
     /// @dev Rejects a `CALL` to the running contract unless the policy's `allowSelfCall` allows
     ///      its selector. Kept out of line so a `CALL` elsewhere pays only the address check.
+    ///      Selector zero stands only for empty calldata (a plain ETH transfer). Calldata of 1 to 3
+    ///      bytes, or of 4 or more starting with `0x00000000`, is rejected without asking
+    ///      `allowSelfCall`: Solidity routes it to the fallback with a payload, so allowing the
+    ///      ETH-transfer case, or a selector its zero-padding matches, must not let it through.
     function _checkSelfCall(CallPolicy memory policy, uint256 index, bytes memory data) private view {
-        bytes4 selector = data.length < 4 ? bytes4(0) : bytes4(data);
-        require(policy.allowSelfCall(policy.targetFunction, selector), SelfCall(index, selector));
+        uint256 length = data.length;
+        bytes4 selector = bytes4(data); // zero-padded when shorter than 4 bytes
+        bool wellFormed = length == 0 || (length >= 4 && selector != bytes4(0));
+        require(wellFormed && policy.allowSelfCall(policy.targetFunction, selector), SelfCall(index, selector));
     }
 
     /// @dev The STORE check of an unguarded run: none.
@@ -1560,7 +1584,7 @@ library StateChangeHandlerLib {
     /// @notice Thrown when a CALL op targets the running contract with a selector its
     ///         `CallPolicy.allowSelfCall` doesn't allow
     /// @param index The zero-based position of the op
-    /// @param selector The call's first 4 bytes; zero when its calldata is shorter
+    /// @param selector The call's first 4 bytes, zero-padded when its calldata is shorter
     error SelfCall(uint256 index, bytes4 selector);
 
     /// @notice Thrown when a LOG operation's payload is not a canonical, in-bounds ABI encoding
@@ -1907,8 +1931,10 @@ abstract contract GasKillerSDK is
 
     /// @notice Override to let a signed program `CALL` this contract. Rejects every self-call
     ///         by default (`StateChangeHandlerLib.SelfCall`).
-    /// @dev Checked by `StateChangeHandlerLib`, after the value cap and before `_authorizeCall`,
-    ///      so an `_authorizeCall` override that leaves out `super` can't drop it.
+    /// @dev Checked by `StateChangeHandlerLib` first, before the op's value is counted against
+    ///      `_maxOutgoingValue` and before `_authorizeCall`, so an `_authorizeCall` override that
+    ///      leaves out `super` can't drop it. A rejected self-call reverts with `SelfCall` even if
+    ///      it would also pass the cap.
     ///      A self-call runs with `msg.sender == address(this)`, so it reaches functions gated
     ///      on it (self-governed setters, `onlyGovernance`-style admin), and a tracked function
     ///      it reaches runs natively, bumping the transition counter outside `StorageGuard`.
@@ -1923,10 +1949,17 @@ abstract contract GasKillerSDK is
     ///      Internal calls (`foo()`, `_foo()`) are jumps, not `CALL`s, and never get here. Nor
     ///      do `NESTED` ops, which the callee checks against its own signed frame. Keep it
     ///      `pure` where you can: a constant list costs no storage read and can't be changed.
-    /// @param targetFunction As for `_authorizeCall`: zero in a nested callee's frame, so a
-    ///        selector a nested frame needs must be allowed for `bytes4(0)` too.
-    /// @param selector The first 4 bytes of the call's data; zero when it is shorter (a plain
-    ///        ETH transfer to this contract).
+    ///
+    ///      Only calls to `address(this)` are covered. Another contract that trusts this one as
+    ///      `msg.sender` (a vault gated `onlyRouter`, a sibling in a nested tree, a `ProxyAdmin`
+    ///      this contract owns) is reached by an ordinary `CALL`: restrict those in
+    ///      `_authorizeCall`.
+    /// @param targetFunction As for `_authorizeCall`: zero in a nested callee's frame. Scoping
+    ///        by it works for flat settlement; in a nested frame, a selector it needs must be
+    ///        allowed for `bytes4(0)`, which allows it for every nested frame on this contract.
+    /// @param selector The first 4 bytes of the call's data, or zero for empty calldata (a plain
+    ///        ETH transfer to this contract). Other calldata under 4 bytes, and calldata with
+    ///        selector zero and a payload, is rejected before this hook is asked.
     function _allowSelfCall(bytes4 targetFunction, bytes4 selector) internal view virtual returns (bool) {
         targetFunction;
         selector;
@@ -1980,8 +2013,9 @@ abstract contract GasKillerSDK is
     ///         more reverts with `StateChangeHandlerLib.OutgoingValueExceeded`. Unlimited by
     ///         default.
     /// @dev Read once per program, before it runs. The total counts what the program sends,
-    ///      whatever `msg.value` brought in. Each item of a batch, and each frame of a nested
-    ///      tree, is capped on its own.
+    ///      whatever `msg.value` brought in. Value sent to this contract itself, by a self-call
+    ///      `_allowSelfCall` allowed, stays here and doesn't count. Each item of a batch, and each
+    ///      frame of a nested tree, is capped on its own.
     /// @param targetFunction As for `_authorizeCall`: zero in a nested callee's frame.
     function _maxOutgoingValue(bytes4 targetFunction) internal view virtual returns (uint256) {
         targetFunction;
@@ -2228,8 +2262,9 @@ abstract contract GasKillerSDK is
 ///         drain at most that instead of the whole balance at once.
 /// @dev Runs on the SDK's `OutgoingBucket` (`GasKillerSDK._outgoingBucket()`), which lives in the
 ///      SDK's protected config namespace: a signed program can't refill it with a `STORE`. Call
-///      `spend` from `_authorizeCall` for every op; ops that send nothing return straight away.
-///      The drop-in contracts in `src/extensions/GasKillerOutgoingRateLimit.sol` do exactly that.
+///      `spend` from `_authorizeCall` for every op whose target isn't the contract itself (an
+///      allowed self-call keeps its value); ops that send nothing return straight away. The
+///      drop-in contracts in `src/extensions/GasKillerOutgoingRateLimit.sol` do exactly that.
 ///
 ///      All of a contract's programs share the bucket, whether they settle alone, in a batch or
 ///      as frames of a nested tree. Only value sent by signed programs counts: the contract's own
@@ -2740,7 +2775,8 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
         bytes memory data
     ) internal virtual override {
         super._authorizeCall(targetFunction, index, kind, target, value, data);
-        OutgoingRateLimit.spend(_outgoingBucket(), index, value);
+        // Value an allowed self-call sends stays in this contract.
+        if (target != address(this)) OutgoingRateLimit.spend(_outgoingBucket(), index, value);
     }
 }
 
@@ -2774,7 +2810,8 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
         bytes memory data
     ) internal virtual override {
         super._authorizeCall(targetFunction, index, kind, target, value, data);
-        OutgoingRateLimit.spend(_outgoingBucket(), index, value);
+        // Value an allowed self-call sends stays in this contract.
+        if (target != address(this)) OutgoingRateLimit.spend(_outgoingBucket(), index, value);
     }
 }
 
