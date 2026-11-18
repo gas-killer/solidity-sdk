@@ -108,28 +108,29 @@ contract RateLimitedCaller is GasKillerOutgoingRateLimit {
 ///         (1 ether per hour):
 ///
 ///           m   | default | rate limited
-///           1   |  40,968 | +627 (+1.5%)
-///           8   | 103,849 | +4,932 (+4.7%)
-///           32  | 319,809 | +19,692 (+6.2%)
+///           1   |  41,051 | +666 (+1.6%)
+///           8   | 104,513 | +5,244 (+5.0%)
+///           32  | 322,465 | +20,940 (+6.5%)
 ///
-///         About 615 gas per op that sends value. The consumer is deployed in the same transaction,
+///         About 655 gas per op that sends value. The consumer is deployed in the same transaction,
 ///         so the budget slot is already warm here; a real settlement also pays about 5,000 once,
 ///         for the first read (2,100, cold) and write (2,900) of the slot.
 ///
 ///         `test_tokenLimit`: the counter copy plus one ERC-20 `transfer`, for a consumer with no
-///         limits (59,248) and for `GasKillerTokenRateLimit` listing k tokens: k = 0 +4,190 (+7.1%),
-///         k = 1 +9,273 (+15.7%), k = 4 +20,531 (+34.7%). Each listed token costs two `balanceOf`
+///         limits (59,248) and for `GasKillerTokenRateLimit` listing k tokens: k = 0 +4,229 (+7.1%),
+///         k = 1 +9,312 (+15.7%), k = 4 +20,570 (+34.7%). Each listed token costs two `balanceOf`
 ///         calls and a budget read and write; a program that runs no code reads no balances.
 ///
 ///         `test_selfCalls`: the counter copy plus m allowed CALLs to the consumer's own `ping()`,
 ///         allowing every self-call or a one-selector list:
 ///
 ///           m   | allow all | one-selector list
-///           1   |  56,911   | +38
-///           8   |  77,795   | +304
-///           32  | 149,912   | +1,216
+///           1   |  57,003   | +38
+///           8   |  78,531   | +304
+///           32  | 152,856   | +1,216
 ///
-///         About 38 gas per self-call to read the selector and compare it.
+///         About 38 gas per self-call to compare the selector with a one-entry list, on top of
+///         about 90 to reject malformed calldata before the hook is asked.
 ///
 ///         Run with `FOUNDRY_PROFILE=gas forge test --match-contract CallPolicyGas -vv`.
 contract CallPolicyGasTest is Test {

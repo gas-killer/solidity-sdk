@@ -17,11 +17,22 @@ import {MintableToken, PolicedTreasury} from "./GasKillerSDKCallPolicy.t.sol";
 
 /// A drop-in consumer that may send at most 1 ether per hour through signed programs.
 contract RateLimitedTreasury is GasKillerOutgoingRateLimit {
+    uint256 public deposits;
+
     constructor(address registry) GasKillerOutgoingRateLimit(1 ether, 1 hours) {
         _setSchnorrRegistry(registry);
     }
 
     receive() external payable {}
+
+    /// What a tracked function's `this.deposit{value: v}()` reaches; allowed below.
+    function deposit() external payable {
+        deposits += msg.value;
+    }
+
+    function _allowSelfCall(bytes4, bytes4 selector) internal view override returns (bool) {
+        return selector == this.deposit.selector;
+    }
 
     function setLimit(uint256 limit, uint256 period) external {
         _setOutgoingRateLimit(limit, period);
@@ -53,7 +64,7 @@ contract RateLimitedPolicedTreasury is PolicedTreasury {
         bytes memory data
     ) internal override {
         super._authorizeCall(targetFunction, index, kind, target, value, data);
-        OutgoingRateLimit.spend(_outgoingBucket(), index, value);
+        if (target != address(this)) OutgoingRateLimit.spend(_outgoingBucket(), index, value);
     }
 }
 
@@ -174,6 +185,17 @@ contract GasKillerOutgoingRateLimitTest is Test {
     }
 
     /// The budget is shared across transitions: a drain split over many programs is still capped.
+    /// An allowed self-call's value stays in the contract and spends nothing.
+    function test_allowedSelfCallValueDoesNotSpendTheBudget() public {
+        uint256 before = _available(t);
+        Program memory p = _tracked(t, 2);
+        _op(p, StateUpdateType.CALL, abi.encode(address(t), 5 ether, abi.encodeCall(RateLimitedTreasury.deposit, ())));
+        _send(p, ATTACKER, 1 ether);
+        _settle(t, p, "");
+        assertEq(t.deposits(), 5 ether);
+        assertEq(_available(t), before - 1 ether, "only the outgoing ether spent");
+    }
+
     function test_budgetIsSharedAcrossTransitions() public {
         _drain(t, 0.6 ether, "");
         _drain(t, 0.6 ether, _exceeded(1, 0.6 ether, 0.4 ether));

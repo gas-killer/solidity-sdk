@@ -9,8 +9,9 @@ import {GasKillerSDK} from "../GasKillerSDK.sol";
 ///         drain at most that instead of the whole balance at once.
 /// @dev Runs on the SDK's `OutgoingBucket` (`GasKillerSDK._outgoingBucket()`), which lives in the
 ///      SDK's protected config namespace: a signed program can't refill it with a `STORE`. Call
-///      `spend` from `_authorizeCall` for every op; ops that send nothing return straight away.
-///      The drop-in contracts in `src/extensions/GasKillerOutgoingRateLimit.sol` do exactly that.
+///      `spend` from `_authorizeCall` for every op whose target isn't the contract itself (an
+///      allowed self-call keeps its value); ops that send nothing return straight away. The
+///      drop-in contracts in `src/extensions/GasKillerOutgoingRateLimit.sol` do exactly that.
 ///
 ///      All of a contract's programs share the bucket, whether they settle alone, in a batch or
 ///      as frames of a nested tree. Only value sent by signed programs counts: the contract's own

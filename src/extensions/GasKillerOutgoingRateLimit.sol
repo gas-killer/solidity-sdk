@@ -41,7 +41,8 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
         bytes memory data
     ) internal virtual override {
         super._authorizeCall(targetFunction, index, kind, target, value, data);
-        OutgoingRateLimit.spend(_outgoingBucket(), index, value);
+        // Value an allowed self-call sends stays in this contract.
+        if (target != address(this)) OutgoingRateLimit.spend(_outgoingBucket(), index, value);
     }
 }
 
@@ -75,6 +76,7 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
         bytes memory data
     ) internal virtual override {
         super._authorizeCall(targetFunction, index, kind, target, value, data);
-        OutgoingRateLimit.spend(_outgoingBucket(), index, value);
+        // Value an allowed self-call sends stays in this contract.
+        if (target != address(this)) OutgoingRateLimit.spend(_outgoingBucket(), index, value);
     }
 }

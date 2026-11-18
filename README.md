@@ -372,16 +372,26 @@ affected. gas-analyzer does emit a tracked function's `this.foo()`, including `t
 a self-`CALL`, so if your tracked functions do that, allow those selectors and only those:
 
 ```solidity
-function _allowSelfCall(bytes4 targetFunction, bytes4 selector) internal pure override returns (bool) {
-    return targetFunction == this.process.selector && selector == this.doThing.selector;
+function _allowSelfCall(bytes4, bytes4 selector) internal pure override returns (bool) {
+    return selector == this.doThing.selector;
 }
 ```
 
-`targetFunction` is the selector the transition was signed for (zero in a nested callee's frame), so
-the list can depend on which tracked function is settling. `selector` is zero for calldata under 4
-bytes, such as a plain ETH transfer to the contract. Keep the override `pure` where you can: a
-constant list costs no storage read and can't be changed. The check runs in `StateChangeHandlerLib`,
-ahead of `_authorizeCall`, so an `_authorizeCall` override can't drop it by leaving out `super`.
+- **Scoping by tracked function.** The first argument, `targetFunction`, is the selector the
+  transition was signed for, so a flat consumer can allow a self-call only while a given tracked
+  function settles. In a nested callee's frame it is zero, since the tree binds a callee's call by
+  calldata hash only. A `GasKillerNestedSDK` contract that scopes by it must also allow the selector
+  for `bytes4(0)`, which allows it for every nested frame on the contract.
+- **Selector zero** means empty calldata, a plain ETH transfer to the contract. Other calldata under
+  4 bytes, and calldata with selector `0x00000000` and a payload, is always rejected: it would land
+  in the fallback.
+- **Order.** The check runs in `StateChangeHandlerLib` before anything else on the op, ahead of the
+  value cap and `_authorizeCall`, so an `_authorizeCall` override can't drop it by leaving out
+  `super`. Keep the override `pure` where you can: a constant list costs no storage read and can't
+  be changed.
+- **Only `address(this)`.** Another contract that trusts yours as `msg.sender` (a vault gated
+  `onlyRouter`, a sibling in a nested tree, a `ProxyAdmin` your contract owns) is reached by an
+  ordinary `CALL`. The default doesn't cover it: restrict those calls in `_authorizeCall`.
 
 **The other hooks are off by default.** `_authorizeCall` and `_maxOutgoingValue` allow everything
 unless you override them. A consumer that makes no external calls and holds nothing has nothing
@@ -408,7 +418,8 @@ function _authorizeCall(bytes4, uint256 index, StateUpdateType kind, address tar
 **`_maxOutgoingValue(targetFunction)`** caps the wei one program may send, summed over its `CALL`,
 `CREATE`, `CREATE2` and `NESTED` values. It is read once per program, and a program that would pass it
 reverts with `OutgoingValueExceeded(index, total, cap)` at the op that passes it, before that op
-runs. The total counts what the program sends, whatever `msg.value` brought in.
+runs. The total counts what the program sends, whatever `msg.value` brought in. Value an allowed
+self-call sends to your own contract stays in it and doesn't count.
 
 - **Batches and trees.** Each transition of a `verifyAndUpdateBatch` is checked and capped on its
   own. In a nested tree, each frame runs its own contract's policy: the root frame's hooks get the
@@ -422,7 +433,7 @@ runs. The total counts what the program sends, whatever `msg.value` brought in.
 `_maxOutgoingValue` caps one program. To bound what a compromised quorum can drain over time, across
 any number of programs, add the optional outgoing rate limit: a token bucket that holds at most
 `limit` wei and refills continuously, a full `limit` every `period` seconds. Every op that sends value
-spends from it, and one that would send more than the bucket holds reverts the transition with
+out of the contract spends from it (an allowed self-call's value stays and spends nothing), and one that would send more than the bucket holds reverts the transition with
 `OutgoingRateLimitExceeded(index, value, available)` before it runs.
 
 Inherit the drop-in instead of the SDK base:
@@ -466,7 +477,7 @@ function _authorizeCall(bytes4 fn, uint256 index, StateUpdateType kind, address 
   can never settle. Behind a proxy, set it in the initializer; until then the budget is empty and
   every op that sends value reverts. `gasKillerOutgoingAllowance()` returns what is available now,
   the limit and the period.
-- **Cost.** About 615 gas per op that sends value, plus about 5,000 once per settlement for the
+- **Cost.** About 655 gas per op that sends value, plus about 5,000 once per settlement for the
   first (cold) read and write of the budget slot. Ops that send nothing pay nothing extra.
 
 ### Rate-limiting outgoing tokens
@@ -514,7 +525,7 @@ allowance aren't seen, such as `approveAndCall` or Permit2: reject them in `_aut
 - A contract that already inherits another SDK base can use the `TokenRateLimit` library directly:
   `begin` in `_beforeProgram`, `beforeOp` in `_authorizeCall`, `endProgram` in `_afterProgram`.
 - **Cost.** For a program with one token `transfer`, about +4,200 with no tokens listed, +9,300 with
-  one and +20,500 with four. Each listed token costs two `balanceOf` calls and a budget read and
+  one and +20,600 with four. Each listed token costs two `balanceOf` calls and a budget read and
   write per settlement that runs code.
 
 ### Cost of the hooks

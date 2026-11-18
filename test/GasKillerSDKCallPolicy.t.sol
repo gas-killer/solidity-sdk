@@ -43,7 +43,8 @@ contract Treasury is GasKillerSDK {
 }
 
 /// A treasury whose tracked function `FN` calls `this.setBeneficiary`: it allows that one
-/// selector, for that one tracked function.
+/// selector, for that one tracked function. Scoping by `targetFunction` only suits flat
+/// settlement; a nested frame sees zero.
 contract SelfCallingTreasury is Treasury {
     bytes4 public immutable fn;
 
@@ -53,6 +54,39 @@ contract SelfCallingTreasury is Treasury {
 
     function _allowSelfCall(bytes4 targetFunction, bytes4 selector) internal view override returns (bool) {
         return targetFunction == fn && selector == this.setBeneficiary.selector;
+    }
+}
+
+/// May send nothing out per program, and lets its tracked functions call `this.deposit{value}()`.
+contract DepositingTreasury is Treasury {
+    uint256 public deposits;
+
+    constructor(address registry) Treasury(registry) {}
+
+    function deposit() external payable {
+        deposits += msg.value;
+    }
+
+    function _allowSelfCall(bytes4, bytes4 selector) internal pure override returns (bool) {
+        return selector == this.deposit.selector;
+    }
+
+    function _maxOutgoingValue(bytes4) internal pure override returns (uint256) {
+        return 0;
+    }
+}
+
+/// Allows a plain ETH transfer to itself (selector zero) and a selector `0xaabbcc00`, which a
+/// zero-padded 3-byte call would match.
+contract ZeroAllowingTreasury is Treasury {
+    constructor(address registry) Treasury(registry) {}
+
+    fallback() external payable {
+        beneficiary = address(0xBAD);
+    }
+
+    function _allowSelfCall(bytes4, bytes4 selector) internal pure override returns (bool) {
+        return selector == bytes4(0) || selector == bytes4(0xaabbcc00);
     }
 }
 
@@ -371,8 +405,8 @@ contract GasKillerSDKCallPolicyTest is Test {
         _settle(t, p, _selfCall(1, GasKillerSDK.verifyAndUpdate.selector));
     }
 
-    /// Calldata under 4 bytes, including a plain ETH send to itself, has selector zero.
-    function test_shortSelfCallHasSelectorZero() public {
+    /// Empty calldata (a plain ETH send to itself) has selector zero; short calldata is padded.
+    function test_shortSelfCallSelectors() public {
         Treasury t = _funded(new Treasury(address(registry)));
         Program memory p = _tracked(t, 1);
         _call(p, address(t), 1 ether, "");
@@ -380,7 +414,42 @@ contract GasKillerSDKCallPolicyTest is Test {
 
         p = _tracked(t, 1);
         _call(p, address(t), 0, hex"aabbcc");
+        _settle(t, p, _selfCall(1, bytes4(0xaabbcc00)));
+    }
+
+    /// Allowing selector zero allows a plain ETH transfer to itself, and nothing else.
+    function test_allowingSelectorZeroOnlyAllowsEmptyCalldata() public {
+        ZeroAllowingTreasury t = new ZeroAllowingTreasury(address(registry));
+        _funded(t);
+        Program memory p = _tracked(t, 1);
+        _call(p, address(t), 1 ether, "");
+        _settle(t, p);
+        assertEq(address(t).balance, 10 ether, "ETH sent to itself");
+        assertEq(t.stateTransitionCount(), 1);
+        assertEq(t.beneficiary(), address(0), "went to receive(), not the fallback");
+    }
+
+    function test_zeroSelectorWithAPayloadRejected() public {
+        ZeroAllowingTreasury t = new ZeroAllowingTreasury(address(registry));
+        _funded(t);
+        Program memory p = _tracked(t, 1);
+        _call(p, address(t), 0, abi.encodePacked(bytes4(0), uint256(1)));
         _settle(t, p, _selfCall(1, bytes4(0)));
+        assertEq(t.beneficiary(), address(0));
+    }
+
+    /// 1 to 3 bytes of calldata are rejected even when the padded selector is allowed.
+    function test_shortCalldataRejectedEvenIfThePaddedSelectorIsAllowed() public {
+        ZeroAllowingTreasury t = new ZeroAllowingTreasury(address(registry));
+        _funded(t);
+        Program memory p = _tracked(t, 1);
+        _call(p, address(t), 0, hex"aabbcc");
+        _settle(t, p, _selfCall(1, bytes4(0xaabbcc00)));
+
+        p = _tracked(t, 1);
+        _call(p, address(t), 0, hex"00");
+        _settle(t, p, _selfCall(1, bytes4(0)));
+        assertEq(t.beneficiary(), address(0));
     }
 
     function test_allowedSelfCallSettles() public {
@@ -413,6 +482,21 @@ contract GasKillerSDKCallPolicyTest is Test {
     }
 
     // ---------------------------------------------------------------- value cap
+
+    /// Value an allowed self-call sends stays in the contract and doesn't count against the cap.
+    function test_allowedSelfCallValueIsNotCapped() public {
+        DepositingTreasury t = new DepositingTreasury(address(registry));
+        _funded(t);
+        Program memory p = _tracked(t, 1);
+        _call(p, address(t), 3 ether, abi.encodeCall(DepositingTreasury.deposit, ()));
+        _settle(t, p);
+        assertEq(t.deposits(), 3 ether);
+        assertEq(address(t).balance, 10 ether);
+
+        p = _tracked(t, 1);
+        _call(p, PAYEE, 1, "");
+        _settle(t, p, _exceeded(1, 1, 0));
+    }
 
     function test_capCountsEveryValueOpInTheProgram() public {
         CappedTreasury t = new CappedTreasury(address(registry), FN);

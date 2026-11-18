@@ -325,8 +325,10 @@ abstract contract GasKillerSDK is
 
     /// @notice Override to let a signed program `CALL` this contract. Rejects every self-call
     ///         by default (`StateChangeHandlerLib.SelfCall`).
-    /// @dev Checked by `StateChangeHandlerLib`, after the value cap and before `_authorizeCall`,
-    ///      so an `_authorizeCall` override that leaves out `super` can't drop it.
+    /// @dev Checked by `StateChangeHandlerLib` first, before the op's value is counted against
+    ///      `_maxOutgoingValue` and before `_authorizeCall`, so an `_authorizeCall` override that
+    ///      leaves out `super` can't drop it. A rejected self-call reverts with `SelfCall` even if
+    ///      it would also pass the cap.
     ///      A self-call runs with `msg.sender == address(this)`, so it reaches functions gated
     ///      on it (self-governed setters, `onlyGovernance`-style admin), and a tracked function
     ///      it reaches runs natively, bumping the transition counter outside `StorageGuard`.
@@ -341,10 +343,17 @@ abstract contract GasKillerSDK is
     ///      Internal calls (`foo()`, `_foo()`) are jumps, not `CALL`s, and never get here. Nor
     ///      do `NESTED` ops, which the callee checks against its own signed frame. Keep it
     ///      `pure` where you can: a constant list costs no storage read and can't be changed.
-    /// @param targetFunction As for `_authorizeCall`: zero in a nested callee's frame, so a
-    ///        selector a nested frame needs must be allowed for `bytes4(0)` too.
-    /// @param selector The first 4 bytes of the call's data; zero when it is shorter (a plain
-    ///        ETH transfer to this contract).
+    ///
+    ///      Only calls to `address(this)` are covered. Another contract that trusts this one as
+    ///      `msg.sender` (a vault gated `onlyRouter`, a sibling in a nested tree, a `ProxyAdmin`
+    ///      this contract owns) is reached by an ordinary `CALL`: restrict those in
+    ///      `_authorizeCall`.
+    /// @param targetFunction As for `_authorizeCall`: zero in a nested callee's frame. Scoping
+    ///        by it works for flat settlement; in a nested frame, a selector it needs must be
+    ///        allowed for `bytes4(0)`, which allows it for every nested frame on this contract.
+    /// @param selector The first 4 bytes of the call's data, or zero for empty calldata (a plain
+    ///        ETH transfer to this contract). Other calldata under 4 bytes, and calldata with
+    ///        selector zero and a payload, is rejected before this hook is asked.
     function _allowSelfCall(bytes4 targetFunction, bytes4 selector) internal view virtual returns (bool) {
         targetFunction;
         selector;
@@ -398,8 +407,9 @@ abstract contract GasKillerSDK is
     ///         more reverts with `StateChangeHandlerLib.OutgoingValueExceeded`. Unlimited by
     ///         default.
     /// @dev Read once per program, before it runs. The total counts what the program sends,
-    ///      whatever `msg.value` brought in. Each item of a batch, and each frame of a nested
-    ///      tree, is capped on its own.
+    ///      whatever `msg.value` brought in. Value sent to this contract itself, by a self-call
+    ///      `_allowSelfCall` allowed, stays here and doesn't count. Each item of a batch, and each
+    ///      frame of a nested tree, is capped on its own.
     /// @param targetFunction As for `_authorizeCall`: zero in a nested callee's frame.
     function _maxOutgoingValue(bytes4 targetFunction) internal view virtual returns (uint256) {
         targetFunction;
