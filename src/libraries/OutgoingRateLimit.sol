@@ -26,6 +26,11 @@ library OutgoingRateLimit {
     /// @param available Wei the budget held.
     error OutgoingRateLimitExceeded(uint256 index, uint256 value, uint256 available);
 
+    /// @notice A function wrapped in `limitsOutflow` sent more than the budget holds.
+    /// @param value Wei the function sent out, net of what it received.
+    /// @param available Wei the budget held.
+    error NativeOutflowRateLimitExceeded(uint256 value, uint256 available);
+
     /// @notice A limit above `type(uint96).max`, or a period of zero or above `type(uint32).max`.
     error InvalidOutgoingRateLimit();
 
@@ -74,6 +79,8 @@ library OutgoingRateLimit {
     ///      (224-255). `test_bucketPackingMatchesTheStruct` pins that.
     function spend(GasKillerSDK.OutgoingBucket storage b, uint256 index, address target, uint256 value) internal {
         if (value == 0 || target == address(this)) return;
+        // Inlined rather than shared with `spendNative` through `_take`: this runs on every op
+        // that sends value, and the shared helper costs about 80 gas more per op.
         uint256 word;
         assembly ("memory-safe") {
             word := sload(b.slot)
@@ -89,6 +96,55 @@ library OutgoingRateLimit {
         assembly ("memory-safe") {
             sstore(b.slot, word)
         }
+    }
+
+    /// @notice Spends `value` that one of the contract's own functions sent, or reverts with
+    ///         `NativeOutflowRateLimitExceeded`. Spends nothing when `value` is zero.
+    /// @dev For payout paths outside signed programs, so that a balance a program credits with a
+    ///      `STORE` can't be withdrawn faster than the budget allows. Usually reached through
+    ///      `beginNative` / `endNative`, which measure the value rather than trusting the caller
+    ///      to count every transfer.
+    function spendNative(GasKillerSDK.OutgoingBucket storage b, uint256 value) internal {
+        if (value == 0) return;
+        (bool ok, uint256 left) = _take(b, value);
+        if (!ok) revert NativeOutflowRateLimitExceeded(value, left);
+    }
+
+    /// @notice Opens a measuring window around one of the contract's own functions: returns its
+    ///         ETH balance before the function, not counting the `msg.value` it was called with.
+    function beginNative() internal view returns (uint256 baseline) {
+        return address(this).balance - msg.value;
+    }
+
+    /// @notice Closes the window `beginNative` opened: spends the net decrease of the contract's
+    ///         ETH balance since then.
+    /// @dev Net: ETH the function received offsets ETH it sent, so unwrapping WETH held by the
+    ///      contract and sending the ETH on isn't charged here; limit WETH as a token too. A
+    ///      window nested in another (one limited function calling another, possibly through a
+    ///      callback) is charged both to itself and to the window around it.
+    function endNative(GasKillerSDK.OutgoingBucket storage b, uint256 baseline) internal {
+        uint256 balance = address(this).balance;
+        if (balance < baseline) spendNative(b, baseline - balance);
+    }
+
+    /// @dev Takes `value` from the budget if it holds that much, as `spend` does inline. One
+    ///      `SLOAD`, and one `SSTORE` when it does.
+    function _take(GasKillerSDK.OutgoingBucket storage b, uint256 value) private returns (bool ok, uint256 left) {
+        uint256 word;
+        assembly ("memory-safe") {
+            word := sload(b.slot)
+        }
+        uint256 updated;
+        (left, updated) = _refilled(word);
+        if (value > left) return (false, left);
+        // Keep `limit` and `period`; replace `available` and `updated`, as `spend` does.
+        unchecked {
+            word = (word & _KEEP) | ((left - value) << 96) | (updated << 224);
+        }
+        assembly ("memory-safe") {
+            sstore(b.slot, word)
+        }
+        return (true, left);
     }
 
     /// @notice What the budget holds now, its limit and its period.

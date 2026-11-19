@@ -33,6 +33,17 @@ contract NestedSelfCaller is GasKillerNestedSDK {
     }
 }
 
+/// A nested consumer that may send nothing out per program.
+contract ZeroCapNestedSelf is NestedSelfCaller {
+    constructor(address registry) NestedSelfCaller(registry, false) {}
+
+    receive() external payable {}
+
+    function _maxOutgoingValue() internal pure override returns (uint256) {
+        return 0;
+    }
+}
+
 /// Runs programs through the library directly, with a policy built by hand.
 contract LibraryRunner {
     address public beneficiary; // slot 0
@@ -108,6 +119,23 @@ contract GasKillerSDKSelfCallNestedTest is Test {
         t.verifyAndUpdateTree(_submission(_nestedSelfFrames(t)));
         assertEq(t.beneficiary(), NEW_BENEFICIARY);
         assertEq(t.stateTransitionCount(), 2, "root frame and the self-opened frame");
+    }
+
+    /// ETH a NESTED op sends to the contract itself stays in it, so it isn't counted against the
+    /// per-program cap.
+    function test_nestedOpValueToSelfIsNotCapped() public {
+        ZeroCapNestedSelf t = new ZeroCapNestedSelf(address(registry));
+        vm.deal(address(t), 1 ether);
+        NestedTreeBuilder.Frame[] memory frames = new NestedTreeBuilder.Frame[](2);
+        frames[0] = _frame(address(t), address(0), 0, ROOT_FN, 1);
+        _op(frames[0], 0, StateUpdateType.NESTED, abi.encode(address(t), 1 ether, uint256(1)));
+        frames[1] = _frame(address(t), address(t), 1, bytes4(0), 1);
+        frames[1].value = 1 ether;
+        _op(frames[1], 0, StateUpdateType.LOG0, abi.encode(bytes("hi")));
+
+        t.verifyAndUpdateTree(_submission(frames));
+        assertEq(address(t).balance, 1 ether);
+        assertEq(t.stateTransitionCount(), 2);
     }
 
     /// `_rejectSelfCalls` rejects a self-call in a policy built by hand; `_unrestrictedCalls`

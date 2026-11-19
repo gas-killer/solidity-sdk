@@ -67,6 +67,17 @@ abstract contract GasKillerTokenRateLimit is GasKillerOutgoingRateLimit {
     ///         can't be set or cleared here either.
     function _afterLimitedProgram() internal virtual {}
 
+    function _beginOutflow() internal virtual override returns (uint256 ethBaseline) {
+        ethBaseline = super._beginOutflow();
+        TokenRateLimit.begin();
+        TokenRateLimit.snapshot(_tokenLimits());
+    }
+
+    function _endOutflow(uint256 ethBaseline) internal virtual override {
+        TokenRateLimit.endProgram(_tokenLimits());
+        super._endOutflow(ethBaseline);
+    }
+
     function _beforeProgram() internal override {
         super._beforeProgram();
         TokenRateLimit.begin();
@@ -128,6 +139,17 @@ abstract contract GasKillerNestedTokenRateLimit is GasKillerNestedOutgoingRateLi
 
     /// @notice As `GasKillerTokenRateLimit._afterLimitedProgram`.
     function _afterLimitedProgram() internal virtual {}
+
+    function _beginOutflow() internal virtual override returns (uint256 ethBaseline) {
+        ethBaseline = super._beginOutflow();
+        TokenRateLimit.begin();
+        TokenRateLimit.snapshot(_tokenLimits());
+    }
+
+    function _endOutflow(uint256 ethBaseline) internal virtual override {
+        TokenRateLimit.endProgram(_tokenLimits());
+        super._endOutflow(ethBaseline);
+    }
 
     function _beforeProgram() internal override {
         super._beforeProgram();
