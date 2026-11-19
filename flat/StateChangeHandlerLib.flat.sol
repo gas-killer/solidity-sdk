@@ -336,7 +336,9 @@ struct NestedContext {
 ///      which reverts to reject the op. Before all that, a `CALL` to the running contract
 ///      itself reverts with `SelfCall` unless `allowSelfCall` allows its selector.
 /// @param targetFunction The selector the transition was signed for, handed to `authorize`.
-///        Zero in a nested callee's frame, which the tree binds by calldata hash only.
+///        Zero in a nested callee's frame, which the tree binds by calldata hash only. The
+///        quorum signs it and nothing checks it against the program, so it is not a security
+///        boundary: a malicious quorum can claim whichever selector a hook trusts most.
 /// @param valueCap The most wei the program's ops may send in total. Value an op sends to the
 ///        running contract itself (an allowed self-call) stays in it and doesn't count.
 /// @param sent Wei sent so far by the program's ops. Start it at zero.
@@ -471,12 +473,12 @@ library StateChangeHandlerLib {
     /// @dev A policy that allows every op, self-calls included, and any total value, for callers
     ///      outside a `GasKillerSDK` contract. `targetFunction` is zero.
     function _unrestrictedCalls() internal pure returns (CallPolicy memory) {
-        return CallPolicy(bytes4(0), type(uint256).max, 0, _allowCall, _allowSelfCall);
+        return CallPolicy(bytes4(0), type(uint256).max, 0, _allowCall, _allowAllSelfCalls);
     }
 
     function _allowCall(bytes4, uint256, StateUpdateType, address, uint256, bytes memory) private pure {}
 
-    function _allowSelfCall(bytes4, bytes4) private pure returns (bool) {
+    function _allowAllSelfCalls(bytes4, bytes4) private pure returns (bool) {
         return true;
     }
 

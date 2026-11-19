@@ -712,7 +712,9 @@ struct NestedContext {
 ///      which reverts to reject the op. Before all that, a `CALL` to the running contract
 ///      itself reverts with `SelfCall` unless `allowSelfCall` allows its selector.
 /// @param targetFunction The selector the transition was signed for, handed to `authorize`.
-///        Zero in a nested callee's frame, which the tree binds by calldata hash only.
+///        Zero in a nested callee's frame, which the tree binds by calldata hash only. The
+///        quorum signs it and nothing checks it against the program, so it is not a security
+///        boundary: a malicious quorum can claim whichever selector a hook trusts most.
 /// @param valueCap The most wei the program's ops may send in total. Value an op sends to the
 ///        running contract itself (an allowed self-call) stays in it and doesn't count.
 /// @param sent Wei sent so far by the program's ops. Start it at zero.
@@ -847,12 +849,12 @@ library StateChangeHandlerLib {
     /// @dev A policy that allows every op, self-calls included, and any total value, for callers
     ///      outside a `GasKillerSDK` contract. `targetFunction` is zero.
     function _unrestrictedCalls() internal pure returns (CallPolicy memory) {
-        return CallPolicy(bytes4(0), type(uint256).max, 0, _allowCall, _allowSelfCall);
+        return CallPolicy(bytes4(0), type(uint256).max, 0, _allowCall, _allowAllSelfCalls);
     }
 
     function _allowCall(bytes4, uint256, StateUpdateType, address, uint256, bytes memory) private pure {}
 
-    function _allowSelfCall(bytes4, bytes4) private pure returns (bool) {
+    function _allowAllSelfCalls(bytes4, bytes4) private pure returns (bool) {
         return true;
     }
 
@@ -1511,9 +1513,19 @@ abstract contract GasKillerSDK is
     ///      `msg.sender` (a vault gated `onlyRouter`, a sibling in a nested tree, a `ProxyAdmin`
     ///      this contract owns) is reached by an ordinary `CALL`: restrict those in
     ///      `_authorizeCall`.
-    /// @param targetFunction As for `_authorizeCall`: zero in a nested callee's frame. Scoping
-    ///        by it works for flat settlement; in a nested frame, a selector it needs must be
-    ///        allowed for `bytes4(0)`, which allows it for every nested frame on this contract.
+    ///
+    ///      **An allowed selector runs outside the call policy.** Its function runs natively, so
+    ///      what it does (its own `CALL`s, ETH it sends on, including the self-call's own value)
+    ///      isn't seen by `_authorizeCall`, `_maxOutgoingValue` or an outgoing rate limit. A
+    ///      malicious quorum chooses its arguments. Allow only functions that are safe to call
+    ///      with any arguments, or that enforce their own limits.
+    /// @param targetFunction As for `_authorizeCall`: zero in a nested callee's frame. **Not a
+    ///        security boundary.** The quorum signs it and nothing checks it against the
+    ///        program, so a malicious quorum can claim any tracked function, or zero (a nested
+    ///        frame, which a root frame can open on this contract with a `NESTED` op to itself).
+    ///        A selector allowed for any `targetFunction` is therefore reachable by any program.
+    ///        Scoping by it only stops an honest program for one function from reaching
+    ///        another's self-call.
     /// @param selector The first 4 bytes of the call's data, or zero for empty calldata (a plain
     ///        ETH transfer to this contract). Other calldata under 4 bytes, and calldata with
     ///        selector zero and a payload, is rejected before this hook is asked.
@@ -1549,7 +1561,8 @@ abstract contract GasKillerSDK is
     ///      ```
     ///      Per-program value totals are better capped with `_maxOutgoingValue`, which runs first.
     /// @param targetFunction The selector the transition was signed for; zero in a nested
-    ///        callee's frame (`applyNested`), which the tree binds by calldata hash only.
+    ///        callee's frame (`applyNested`), which the tree binds by calldata hash only. The
+    ///        quorum chooses it, so a policy must hold for every value: see `_allowSelfCall`.
     /// @param index The op's position in the program.
     /// @param kind `CALL`, `CREATE`, `CREATE2` or `NESTED`.
     /// @param target The callee; zero for `CREATE`/`CREATE2`.
@@ -1571,9 +1584,12 @@ abstract contract GasKillerSDK is
     ///         default.
     /// @dev Read once per program, before it runs. The total counts what the program sends,
     ///      whatever `msg.value` brought in. Value sent to this contract itself, by a self-call
-    ///      `_allowSelfCall` allowed, stays here and doesn't count. Each item of a batch, and each
-    ///      frame of a nested tree, is capped on its own.
-    /// @param targetFunction As for `_authorizeCall`: zero in a nested callee's frame.
+    ///      `_allowSelfCall` allowed, stays here and doesn't count; what the allowed function then
+    ///      sends natively isn't counted either. Each item of a batch, and each frame of a nested
+    ///      tree, is capped on its own.
+    /// @param targetFunction As for `_authorizeCall`: zero in a nested callee's frame. The quorum
+    ///        chooses it, so against a malicious quorum the effective cap is the largest this
+    ///        returns for any selector, zero included.
     function _maxOutgoingValue(bytes4 targetFunction) internal view virtual returns (uint256) {
         targetFunction;
         return type(uint256).max;
