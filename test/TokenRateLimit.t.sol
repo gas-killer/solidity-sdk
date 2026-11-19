@@ -51,7 +51,7 @@ contract TokenVault is GasKillerTokenRateLimit {
     }
 
     /// `mint` grants no allowance, so it is safe to allow; the inflow tests use it.
-    function _allowTokenCall(address, bytes4 selector) internal pure override returns (bool) {
+    function _allowTokenCall(address, bytes4 selector, bytes memory) internal pure override returns (bool) {
         return selector == MintableToken.mint.selector;
     }
 }
@@ -96,6 +96,19 @@ contract NestingHarness is GasKillerSDK {
         token.transfer(to, 20);
         TokenRateLimit.endProgram(_tokenLimits()); // the inner program: 20
         TokenRateLimit.endProgram(_tokenLimits()); // the outer one: 10 + 20
+    }
+
+    /// The outer program sends 50; the inner one pulls 50 in from `user` as a deposit.
+    function nestedDeposit(IERC20 token, address user, address to) external {
+        TokenRateLimit.begin();
+        TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
+        token.transfer(to, 50);
+        TokenRateLimit.begin();
+        bytes memory pull = abi.encodeCall(IERC20.transferFrom, (user, address(this), 50));
+        require(!TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(token), pull));
+        token.transferFrom(user, address(this), 50);
+        TokenRateLimit.endProgram(_tokenLimits()); // the inner program: nothing
+        TokenRateLimit.endProgram(_tokenLimits()); // the outer one: 50, not offset
     }
 
     function available(address token) external view returns (uint256 a) {
@@ -361,26 +374,51 @@ contract TokenRateLimitTest is Test {
         );
     }
 
-    /// Users who approved the vault can't be drained by a program: a `transferFrom` from anyone
-    /// but the vault is rejected, whether the tokens go straight out or through the vault.
-    function test_transferFromAUserIsRejected() public {
-        address user = address(0xA11CE);
-        token.mint(user, 1000);
-        vm.prank(user);
+    address constant USER = address(0xA11CE);
+
+    function _approveVault() internal {
+        token.mint(USER, 1000);
+        vm.prank(USER);
         token.approve(address(v), 1000);
-        bytes memory rejected = abi.encodeWithSelector(
-            TokenRateLimit.UnrecognizedTokenCall.selector, 1, address(token), IERC20.transferFrom.selector
-        );
+    }
 
+    /// Users who approved the vault can't be drained straight out: a `transferFrom` between two
+    /// others is rejected.
+    function test_transferFromAUserToAnotherIsRejected() public {
+        _approveVault();
         Program memory p = _tracked(1);
-        _call(p, address(token), abi.encodeCall(IERC20.transferFrom, (user, ATTACKER, 1000)));
-        _settle(p, rejected);
+        _call(p, address(token), abi.encodeCall(IERC20.transferFrom, (USER, ATTACKER, 1000)));
+        _settle(
+            p,
+            abi.encodeWithSelector(
+                TokenRateLimit.UnrecognizedTokenCall.selector, 1, address(token), IERC20.transferFrom.selector
+            )
+        );
+        assertEq(token.balanceOf(USER), 1000);
+    }
 
-        p = _tracked(2);
-        _call(p, address(token), abi.encodeCall(IERC20.transferFrom, (user, address(v), 1000)));
+    /// A deposit, pulling a user's tokens into the vault, settles and is charged nothing.
+    function test_depositSettles() public {
+        _approveVault();
+        Program memory p = _tracked(1);
+        _call(p, address(token), abi.encodeCall(IERC20.transferFrom, (USER, address(v), 500)));
+        _settle(p, "");
+        assertEq(token.balanceOf(address(v)), 1500);
+        assertEq(_available(), 100);
+    }
+
+    /// Nor through the vault: what a deposit brings in doesn't offset a send.
+    function test_depositCannotOffsetASend() public {
+        _approveVault();
+        Program memory p = _tracked(2);
+        _call(p, address(token), abi.encodeCall(IERC20.transferFrom, (USER, address(v), 1000)));
         _transfer(p, token, ATTACKER, 1000);
-        _settle(p, rejected);
-        assertEq(token.balanceOf(user), 1000);
+        _settle(p, _exceeded(1000, 100));
+        p = _tracked(2);
+        _call(p, address(token), abi.encodeCall(IERC20.transferFrom, (USER, address(v), 1000)));
+        _transfer(p, token, ATTACKER, 60);
+        _settle(p, "");
+        assertEq(_available(), 40);
     }
 
     /// A `transferFrom` from the vault itself is measured through its balance.
@@ -489,6 +527,17 @@ contract TokenRateLimitTest is Test {
         token.mint(address(h), 100);
         h.nested(token, ATTACKER);
         assertEq(h.available(address(token)), 100 - 20 - 30);
+    }
+
+    /// A deposit in an inner program doesn't offset a send in the program around it either.
+    function test_nestedDepositCannotOffsetAnOuterSend() public {
+        NestingHarness h = new NestingHarness(address(token));
+        token.mint(address(h), 100);
+        token.mint(USER, 50);
+        vm.prank(USER);
+        token.approve(address(h), 50);
+        h.nestedDeposit(token, USER, ATTACKER);
+        assertEq(h.available(address(token)), 50);
     }
 
     /// Without `begin` there is no program to record into; the library reverts rather than

@@ -38,8 +38,8 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
     }
 
     /// @notice Override, in place of `_authorizeCall`, to reject ops; the arguments and rules
-    ///         are `_authorizeCall`'s. Runs before the op is charged to the limit. Allows
-    ///         everything by default.
+    ///         are `_authorizeCall`'s, including that `data` must not be written. Runs before
+    ///         the op is charged to the limit. Allows everything by default.
     function _authorizeLimitedCall(
         uint256 index,
         StateUpdateType kind,

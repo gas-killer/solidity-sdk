@@ -417,7 +417,8 @@ more to restrict. One that holds value should write a policy.
 **`_authorizeCall`** is called before every `CALL`, `CREATE`, `CREATE2` and `NESTED` op with the
 op's position, its kind, its target, its value and its data (a `CALL`'s
 calldata, or the initcode of a deployment, whose target is zero since the address isn't known yet).
-Revert to reject the op. It is code rather than a list because a signed program doesn't carry the
+Revert to reject the op. Read `data`, never write it: it is the buffer the op runs from, so a change
+would run a call nobody signed. It is code rather than a list because a signed program doesn't carry the
 user's arguments or `msg.sender`, and honest programs often call targets known only at run time,
 such as a user-supplied token or the caller being paid out. It isn't `view`, so it can keep state;
 don't declare your override `view` if you might later combine it with the rate limit below.
@@ -536,30 +537,32 @@ through whatever else the token implements, so the limit reads `balanceOf(this)`
 token right before the program's first op that runs code, and again when the program ends, and
 charges the decrease. Tokens the program receives offset tokens it sends, so a program could pull
 tokens in from users who approved your contract (`transferFrom(user, this, x)`) and send them on
-uncharged: a `transferFrom` on a listed token from anyone but your contract is therefore rejected
-(see below). A program can still unwind a position you hold in a form you haven't listed (an
-aToken, an LP or staking token) into a listed token and send that uncharged, so list the tokens your
-positions are held in as well. Users' allowances on unlisted tokens aren't guarded.
+uncharged. So a deposit like that doesn't offset: the amount pulled in is added to the starting
+balance (a fee-on-transfer token's fee is charged), and a `transferFrom` between two others is
+rejected (see below). Other receipts still offset sends. A program can unwind a position you hold in
+a form you haven't listed (an aToken, an LP or staking token), or borrow against your collateral,
+and send the proceeds out uncharged. List the tokens your positions are held in, and reject calls
+to lending and debt markets (anything that can pay your contract out against a future obligation)
+in `_authorizeLimitedCall`. Users' allowances on unlisted tokens aren't guarded.
 
 A token is recognized by the address it is listed under: don't list a token that is also reachable
 through a second address sharing its balances (a legacy proxy or alias), and don't list your
 contract itself.
 
 **Approvals.** An approval moves nothing until it is used, possibly long after the program. So an
-`approve`, `increaseAllowance` or `decreaseAllowance` call to a listed token is recorded with the spender's allowance
-before it, and at the end any allowance left above that is charged in full. Approving a router that
-pulls the tokens in the same program is charged once, through the balance; an approval left
-standing is charged, and an unlimited one always exceeds the budget. Other ways of granting an
-allowance aren't seen by the balance check, so a signed `CALL` to a listed token is rejected with
-`TokenRateLimit.UnrecognizedTokenCall` unless it is `transfer`, `approve`, `increaseAllowance`,
-`decreaseAllowance` or a `transferFrom` from your contract: anything else (`increaseApproval`,
-ERC-777 `authorizeOperator`, `approveAndCall`) might grant an allowance the limit can't charge, and
-a `transferFrom` from a user moves tokens the balance doesn't show. If your contract really pulls
-deposits in signed programs, allow `transferFrom` in `_allowTokenCall` and check the sender
-yourself. To allow a
-function you know is safe, such as WETH's `withdraw`, override `_allowTokenCall(token, selector)`.
-An allowance system outside the token, such as Permit2, isn't seen at all: reject calls to it in
-`_authorizeLimitedCall`.
+`approve`, `increaseAllowance` or `decreaseAllowance` call to a listed token is recorded with the
+spender's allowance before it, and at the end any allowance left above that is charged in full.
+Approving a router that pulls the tokens in the same program is charged once, through the balance;
+an approval left standing is charged, and an unlimited one always exceeds the budget. Other ways of
+granting an allowance aren't seen by the balance check, so a signed `CALL` to a listed token is
+rejected with `TokenRateLimit.UnrecognizedTokenCall` unless it is `transfer`, `approve`,
+`increaseAllowance`, `decreaseAllowance` or a `transferFrom` from or to your contract: anything
+else (`increaseApproval`, ERC-777 `authorizeOperator`, `approveAndCall`) might grant an allowance
+the limit can't charge, and a `transferFrom` between two others moves tokens the balance doesn't
+show. To allow a call you know is safe, such as WETH's `withdraw`, override
+`_allowTokenCall(token, selector, data)`; check `data`'s arguments where the selector alone isn't
+enough. An allowance system outside the token, such as Permit2, isn't seen at all: reject calls to
+it in `_authorizeLimitedCall`.
 
 The token drop-in also finalizes `_beforeProgram` and `_afterProgram`; use `_beforeLimitedProgram`
 and `_afterLimitedProgram` instead.
@@ -570,9 +573,13 @@ and `_afterLimitedProgram` instead.
   `TokenRateLimitExceeded(token, amount, available)`.
 - `_setTokenRateLimit` and `_clearTokenRateLimit` follow the same rule as the other setters: never
   from a `trackState` function. As for ETH, a newly listed token starts with a full budget, and
-  updating one keeps what its budget holds, capped at the new limit. `gasKillerTokenAllowance(token)` returns the budget.
-- In a nested tree that re-enters the same contract, the inner frame's outflow is charged to it and
-  again to the frame around it: conservative, never under-counted.
+  updating one keeps what its budget holds, capped at the new limit. Clearing a token drops its
+  budget, so listing it again starts full: to tighten a limit during a drain, lower it instead.
+  `gasKillerTokenAllowance(token)` returns the budget.
+- The limit errs towards charging twice, never under-counting. An approval left standing is charged
+  when its program ends, and the spender's later pull is charged again through the balance. In a
+  nested tree that re-enters the same contract, the inner frame's outflow is charged to it and
+  again to the frame around it.
 - A contract that already inherits another SDK base can use the `TokenRateLimit` library directly:
   `begin` in `_beforeProgram`, `beforeOp` in `_authorizeCall`, `endProgram` in `_afterProgram`.
   Reject the op when `beforeOp` returns true (an unrecognized call to a listed token), and make sure

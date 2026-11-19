@@ -19,9 +19,9 @@ import {GasKillerOutgoingRateLimit, GasKillerNestedOutgoingRateLimit} from "./Ga
 ///
 ///      A signed `CALL` to a listed token is rejected with `TokenRateLimit.UnrecognizedTokenCall`
 ///      unless it is `transfer`, `approve`, `increaseAllowance`, `decreaseAllowance` or a
-///      `transferFrom` from this contract, or `_allowTokenCall` allows it: any other function
-///      could grant an allowance the limit doesn't see, and a `transferFrom` from anyone else
-///      moves tokens users approved this contract for, which its balance doesn't show.
+///      `transferFrom` from or to this contract, or `_allowTokenCall` allows it: any other
+///      function could grant an allowance the limit doesn't see, and a `transferFrom` between two
+///      others moves tokens users approved this contract for, which its balance doesn't show.
 abstract contract GasKillerTokenRateLimit is GasKillerOutgoingRateLimit {
     /// @param ethLimit Most wei signed programs may send in one `ethPeriod`.
     /// @param ethPeriod Seconds over which the full `ethLimit` refills.
@@ -50,11 +50,13 @@ abstract contract GasKillerTokenRateLimit is GasKillerOutgoingRateLimit {
         TokenRateLimit.clear(_tokenLimits(), token);
     }
 
-    /// @notice Override to let signed programs call `selector` on the listed `token`. Rejects all
-    ///         by default. Allow only functions that can't grant an allowance or otherwise let
-    ///         tokens leave later: what they move during the program is charged through the
-    ///         balance, but what they authorize for afterwards is not.
-    function _allowTokenCall(address token, bytes4 selector) internal view virtual returns (bool) {}
+    /// @notice Override to let signed programs make a call the limit doesn't recognize to the
+    ///         listed `token`: `selector` is `data`'s first four bytes, zero when it is shorter.
+    ///         Rejects all by default. Allow only calls that can't grant an allowance or otherwise
+    ///         let tokens leave later: what they move during the program is charged through the
+    ///         balance, but what they authorize for afterwards is not. Check `data`'s arguments
+    ///         where the selector alone isn't enough.
+    function _allowTokenCall(address token, bytes4 selector, bytes memory data) internal view virtual returns (bool) {}
 
     /// @notice Override, in place of `_beforeProgram`, to act right before a signed program runs.
     function _beforeLimitedProgram() internal virtual {}
@@ -72,7 +74,9 @@ abstract contract GasKillerTokenRateLimit is GasKillerOutgoingRateLimit {
     function _rateLimitOp(uint256 index, StateUpdateType kind, address target, bytes memory data) internal override {
         if (TokenRateLimit.beforeOp(_tokenLimits(), kind, target, data)) {
             bytes4 selector = bytes4(data);
-            require(_allowTokenCall(target, selector), TokenRateLimit.UnrecognizedTokenCall(index, target, selector));
+            require(
+                _allowTokenCall(target, selector, data), TokenRateLimit.UnrecognizedTokenCall(index, target, selector)
+            );
         }
     }
 
@@ -114,7 +118,7 @@ abstract contract GasKillerNestedTokenRateLimit is GasKillerNestedOutgoingRateLi
     }
 
     /// @notice As `GasKillerTokenRateLimit._allowTokenCall`.
-    function _allowTokenCall(address token, bytes4 selector) internal view virtual returns (bool) {}
+    function _allowTokenCall(address token, bytes4 selector, bytes memory data) internal view virtual returns (bool) {}
 
     /// @notice As `GasKillerTokenRateLimit._beforeLimitedProgram`.
     function _beforeLimitedProgram() internal virtual {}
@@ -131,7 +135,9 @@ abstract contract GasKillerNestedTokenRateLimit is GasKillerNestedOutgoingRateLi
     function _rateLimitOp(uint256 index, StateUpdateType kind, address target, bytes memory data) internal override {
         if (TokenRateLimit.beforeOp(_tokenLimits(), kind, target, data)) {
             bytes4 selector = bytes4(data);
-            require(_allowTokenCall(target, selector), TokenRateLimit.UnrecognizedTokenCall(index, target, selector));
+            require(
+                _allowTokenCall(target, selector, data), TokenRateLimit.UnrecognizedTokenCall(index, target, selector)
+            );
         }
     }
 
