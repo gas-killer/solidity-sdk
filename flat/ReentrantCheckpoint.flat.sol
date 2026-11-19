@@ -166,7 +166,9 @@ contract StateTracker {
 /// @title StorageGuard
 /// @notice Checks a signed program's `STORE` writes against a denylist of protected storage
 ///         ranges, so a quorum-signed update cannot overwrite slots such as an `Ownable` owner,
-///         the `StateTracker` counter, the SDK's own configuration or EIP-1967 proxy slots.
+///         the `StateTracker` counter, the SDK's own configuration or EIP-1967 proxy slots. The
+///         SDK protects its own counter and configuration; anything else, proxy slots included,
+///         is protected only if the consumer lists it in `_protectedRanges`.
 ///         `StateChangeHandlerLib._run` calls `advance` right before every STORE executes.
 /// @dev The list denies rather than allows. Honest writes to mappings and dynamic arrays land on
 ///      keccak-derived slots spread across the whole slot space, which an allowlist of ranges
@@ -1570,6 +1572,20 @@ abstract contract GasKillerSDK is
     ///          r[0] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL); // Ownable._owner
     ///      }
     ///      ```
+    ///
+    ///      **Behind a proxy, list the EIP-1967 slots.** The SDK doesn't protect them, and a
+    ///      signed `STORE` to the implementation slot replaces the contract's code, after which no
+    ///      limit or policy holds. They sort between the SDK's two ranges and don't collide with
+    ///      them:
+    ///      ```
+    ///      r[0] = StorageGuard.ProtectedRange(0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc,
+    ///          0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc, StorageGuard.FULL); // implementation
+    ///      r[1] = StorageGuard.ProtectedRange(0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50,
+    ///          0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50, StorageGuard.FULL); // beacon
+    ///      r[2] = StorageGuard.ProtectedRange(0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103,
+    ///          0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103, StorageGuard.FULL); // admin
+    ///      ```
+    ///      A tracked function that upgrades the contract then can't be settled through Gas Killer.
     function _protectedRanges() internal pure virtual returns (StorageGuard.ProtectedRange[] memory) {
         return new StorageGuard.ProtectedRange[](0);
     }
