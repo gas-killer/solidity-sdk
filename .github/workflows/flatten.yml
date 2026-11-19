@@ -49,6 +49,11 @@ jobs:
       - name: Compile flattened sources
         run: forge build flat --force
 
+      # Consumers paste flat files into via-IR builds too, and some failures only show up there
+      # (stack layout, memory-safety of inline assembly), so compile them that way as well.
+      - name: Compile flattened sources with via-IR
+        run: forge build flat --force --via-ir
+
       # Commit & push the fresh flats back to the branch.
       # Skip on pull_request: its merge-commit checkout makes the commit step
       # fail, and the push run already commits the flats.

@@ -8,7 +8,7 @@ import {IGasKillerSDKBatch, TaskSubmission} from "./interface/IGasKillerSDKBatch
 import {IGasKillerValueBound} from "./interface/IGasKillerValueBound.sol";
 import {StateTracker} from "./StateTracker.sol";
 import {TransitionGuard} from "./TransitionGuard.sol";
-import {StateChangeHandlerLib, StateUpdateType} from "./StateChangeHandlerLib.sol";
+import {StateChangeHandlerLib, StateUpdateType, CallPolicy} from "./StateChangeHandlerLib.sol";
 import {StorageGuard} from "./libraries/StorageGuard.sol";
 import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
 
@@ -73,6 +73,41 @@ abstract contract GasKillerSDK is
         address avsAddress;
         ISchnorrStakeRegistry registry;
         uint96 blockStaleMeasure;
+        OutgoingBucket outgoing;
+        TokenLimits tokens;
+    }
+
+    /// @dev The outgoing-value budget of `GasKillerOutgoingRateLimit`, kept here so that it is
+    ///      protected storage: a signed program that could write it could refill its own budget.
+    ///      All zero, and never read, in a contract that doesn't use the extension. One slot.
+    /// @param limit Most wei the budget holds, which is also what refills over one `period`.
+    /// @param available Wei left at `updated`.
+    /// @param period Seconds a full refill takes.
+    /// @param updated Timestamp `available` was last computed at.
+    struct OutgoingBucket {
+        uint96 limit;
+        uint96 available;
+        uint32 period;
+        uint32 updated;
+    }
+
+    /// @dev The per-token budgets of `TokenRateLimit`, kept here for the same reason as
+    ///      `OutgoingBucket`. A fixed array rather than a mapping: a mapping's entries would live
+    ///      at keccak-derived slots outside the protected namespace. All zero, and never read, in a
+    ///      contract that doesn't use per-token limits. 17 slots.
+    /// @param count Tokens in use, the first `count` entries of `buckets`.
+    struct TokenLimits {
+        uint256 count;
+        TokenBucket[8] buckets;
+    }
+
+    /// @dev One token's budget: like `OutgoingBucket`, in two slots.
+    struct TokenBucket {
+        address token;
+        uint32 period;
+        uint32 updated;
+        uint128 limit;
+        uint128 available;
     }
 
     // keccak256(abi.encode(uint256(keccak256("gaskiller.SchnorrGasKillerSDK.storage")) - 1)) & ~bytes32(uint256(0xff))
@@ -254,10 +289,135 @@ abstract contract GasKillerSDK is
     ///      The opt-out is dispatched here (and in `GasKillerNestedSDK._runProgram`), never by
     ///      the list: an opted-out program ignores `ranges`, and a guarded one with an empty list
     ///      reverts (`NoProtectedRanges`), so the list alone never turns protection off.
-    function _stateChangeHandler(bytes calldata storageUpdates, StorageGuard.ProtectedRange[] memory ranges) internal {
+    ///      Every CALL, CREATE, CREATE2 and NESTED goes through `_callPolicy()`.
+    function _stateChangeHandler(bytes calldata storageUpdates, StorageGuard.ProtectedRange[] memory ranges) private {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args);
-        else StateChangeHandlerLib._runStateUpdatesPrevalidated(types, args, ranges);
+        _beforeProgram();
+        CallPolicy memory policy = _callPolicy();
+        if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args, policy);
+        else StateChangeHandlerLib._runStateUpdatesPrevalidated(types, args, ranges, policy);
+        _afterProgram();
+    }
+
+    /// @notice Override to act right before a signed program runs, after it was verified.
+    ///         Does nothing by default. Runs before the program's call policy is built, so
+    ///         `_maxOutgoingValue` sees what it sets.
+    /// @dev Paired with `_afterProgram`. Programs can nest on one contract (a nested tree can
+    ///      re-enter it), so per-program state should be kept per depth, for example in
+    ///      transient storage, as `TokenRateLimit` does.
+    function _beforeProgram() internal virtual {}
+
+    /// @notice Override to act right after a signed program ran; revert to reject it. Does
+    ///         nothing by default.
+    function _afterProgram() internal virtual {}
+
+    /// @dev The policy a program runs under: `_maxOutgoingValue`'s cap, the self-call check and
+    ///      `_authorizeCall`. Fresh per program, so each transition of a batch has its own cap.
+    ///
+    ///      None of the policy hooks is told which tracked function a transition is for. The
+    ///      quorum names that function and nothing checks it against the program, so a
+    ///      per-function rule would only look narrower than it is: every hook must hold for any
+    ///      program.
+    function _callPolicy() internal view returns (CallPolicy memory) {
+        return CallPolicy(_maxOutgoingValue(), 0, _authorizeCall, _allowSelfCall);
+    }
+
+    /// @notice Override to let a signed program `CALL` this contract. Rejects every self-call
+    ///         by default (`StateChangeHandlerLib.SelfCall`).
+    /// @dev Checked by `StateChangeHandlerLib` first, before the op's value is counted against
+    ///      `_maxOutgoingValue` and before `_authorizeCall`, so an `_authorizeCall` override that
+    ///      leaves out `super` can't drop it. A rejected self-call reverts with `SelfCall` even if
+    ///      it would also pass the cap.
+    ///      A self-call runs with `msg.sender == address(this)`, so it reaches functions gated
+    ///      on it (self-governed setters, `onlyGovernance`-style admin), and a tracked function
+    ///      it reaches runs natively, bumping the transition counter outside `StorageGuard`.
+    ///      gas-analyzer does emit a tracked function's `this.foo()` (including
+    ///      `try this.foo()`) as a self-`CALL`, so a contract whose tracked functions do that
+    ///      must allow those selectors, and only those:
+    ///      ```
+    ///      function _allowSelfCall(bytes4 selector) internal pure override returns (bool) {
+    ///          return selector == this.doThing.selector;
+    ///      }
+    ///      ```
+    ///      Internal calls (`foo()`, `_foo()`) are jumps, not `CALL`s, and never get here. Nor
+    ///      do `NESTED` ops, which the callee checks against its own signed frame. Keep it
+    ///      `pure` where you can: a constant list costs no storage read and can't be changed.
+    ///
+    ///      Only calls to `address(this)` are covered. Another contract that trusts this one as
+    ///      `msg.sender` (a vault gated `onlyRouter`, a sibling in a nested tree, a `ProxyAdmin`
+    ///      this contract owns) is reached by an ordinary `CALL`: restrict those in
+    ///      `_authorizeCall`.
+    ///
+    ///      **An allowed selector runs outside the call policy.** Its function runs natively, so
+    ///      what it does (its own `CALL`s, ETH it sends on, including the self-call's own value)
+    ///      isn't seen by `_authorizeCall`, `_maxOutgoingValue` or an outgoing rate limit. A
+    ///      malicious quorum chooses its arguments. Allow only functions that are safe to call
+    ///      with any arguments, or that enforce their own limits.
+    ///
+    ///      The list applies to every program, root and nested frames alike (see `_callPolicy`).
+    /// @param selector The first 4 bytes of the call's data, or zero for empty calldata (a plain
+    ///        ETH transfer to this contract). Other calldata under 4 bytes, and calldata with
+    ///        selector zero and a payload, is rejected before this hook is asked.
+    function _allowSelfCall(bytes4 selector) internal view virtual returns (bool) {
+        selector;
+        return false;
+    }
+
+    /// @notice Override to restrict what a signed program may do with this contract's authority.
+    ///         Called before every `CALL`, `CREATE`, `CREATE2` and `NESTED` op of a program;
+    ///         revert to reject the op, and with it the whole transition. Allows everything by
+    ///         default, apart from self-calls, which are rejected before this hook runs unless
+    ///         `_allowSelfCall` allows them.
+    /// @dev `StorageGuard` only checks `STORE`s. A `CALL` runs real code as this contract, so
+    ///      without a policy a quorum that signs a malicious program can, for example:
+    ///      - transfer or approve tokens this contract holds;
+    ///      - send this contract's ETH through a `CALL`, `CREATE`, `CREATE2` or `NESTED` value;
+    ///      - call this contract's own functions gated on `msg.sender == address(this)`, if
+    ///        `_allowSelfCall` allows their selectors.
+    ///
+    ///      A signed program doesn't carry the user's arguments or `msg.sender`, and honest
+    ///      programs often call targets only known at run time, so the policy is code rather than
+    ///      a list: check what the tracked functions can legitimately do. The hook is not `view`,
+    ///      so it can keep state, such as a rate limit. For example, to allow tokens out only to
+    ///      a known payee:
+    ///      ```
+    ///      function _authorizeCall(uint256 index, StateUpdateType, address target, uint256, bytes memory data)
+    ///          internal override
+    ///      {
+    ///          if (target == address(token) && !_isTransferToPayee(data)) revert DisallowedCall(index);
+    ///      }
+    ///      ```
+    ///      Per-program value totals are capped with `_maxOutgoingValue`, which runs first.
+    ///
+    ///      **This only sees what the program's own ops do.** A quorum can also `STORE` into this
+    ///      contract's own state (a balance mapping can't be protected) and then withdraw through
+    ///      the contract's normal functions in a later transaction, which no call policy sees.
+    /// @param index The op's position in the program.
+    /// @param kind `CALL`, `CREATE`, `CREATE2` or `NESTED`.
+    /// @param target The callee; zero for `CREATE`/`CREATE2`.
+    /// @param value Wei the op sends.
+    /// @param data The calldata of a `CALL`, the initcode of a `CREATE`/`CREATE2`, empty for a
+    ///        `NESTED` op (the callee checks its own signed frame). **Read it, never write it**:
+    ///        it is the buffer the op runs from, so a change would run a call nobody signed.
+    function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
+        internal
+        virtual {}
+
+    /// @notice Override to cap the wei one signed program may send out of this contract, summed
+    ///         over its `CALL`, `CREATE`, `CREATE2` and `NESTED` ops. A program that would send
+    ///         more reverts with `StateChangeHandlerLib.OutgoingValueExceeded`. Unlimited by
+    ///         default.
+    /// @dev Read once per program, before it runs. The total counts what the program sends,
+    ///      whatever `msg.value` brought in. Value sent to this contract itself, by a self-call
+    ///      `_allowSelfCall` allowed, stays here and doesn't count; what the allowed function then
+    ///      sends natively isn't counted either. Each item of a batch, and each frame of a nested
+    ///      tree, is capped on its own.
+    ///
+    ///      **Not a drain bound.** A malicious quorum can sign any number of transitions, or batch
+    ///      items, each with its own cap. This guards against an honest program sending more than
+    ///      intended; to bound outflow over time, use an outgoing rate limit.
+    function _maxOutgoingValue() internal view virtual returns (uint256) {
+        return type(uint256).max;
     }
 
     /// @notice The storage ranges a signed program may not change: the SDK's own slots merged
@@ -285,7 +445,9 @@ abstract contract GasKillerSDK is
     /// @dev With the check off, a quorum that signs a malicious program can overwrite any slot of
     ///      this contract: an owner, an upgrade slot, the transition counter (replaying or
     ///      skipping transitions) and the SDK's own configuration, including the registry that
-    ///      verifies signatures. Opt out only if the contract's correctness already rests on
+    ///      verifies signatures and the rate-limit budgets (`OutgoingRateLimit`, `TokenRateLimit`),
+    ///      which a program could then refill before spending them: the rate limits stay in the
+    ///      code but bound nothing. Opt out only if the contract's correctness already rests on
     ///      trusting the quorum completely, for example one with no owner, no upgrade path and
     ///      nothing else a rewrite could take over.
     ///
@@ -311,6 +473,20 @@ abstract contract GasKillerSDK is
     ///          r[0] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL); // Ownable._owner
     ///      }
     ///      ```
+    ///
+    ///      **Behind a proxy, list the EIP-1967 slots.** The SDK doesn't protect them, and a
+    ///      signed `STORE` to the implementation slot replaces the contract's code, after which no
+    ///      limit or policy holds. They sort between the SDK's two ranges and don't collide with
+    ///      them:
+    ///      ```
+    ///      r[0] = StorageGuard.ProtectedRange(0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc,
+    ///          0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc, StorageGuard.FULL); // implementation
+    ///      r[1] = StorageGuard.ProtectedRange(0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50,
+    ///          0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50, StorageGuard.FULL); // beacon
+    ///      r[2] = StorageGuard.ProtectedRange(0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103,
+    ///          0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103, StorageGuard.FULL); // admin
+    ///      ```
+    ///      A tracked function that upgrades the contract then can't be settled through Gas Killer.
     function _protectedRanges() internal pure virtual returns (StorageGuard.ProtectedRange[] memory) {
         return new StorageGuard.ProtectedRange[](0);
     }
@@ -473,6 +649,16 @@ abstract contract GasKillerSDK is
     function _getBlockStaleMeasure() internal view returns (uint256) {
         uint256 v = _sto().blockStaleMeasure;
         return v == 0 ? DEFAULT_BLOCK_STALE_MEASURE : v;
+    }
+
+    /// @dev Storage of `GasKillerOutgoingRateLimit`'s budget. Not for other use.
+    function _outgoingBucket() internal view returns (OutgoingBucket storage) {
+        return _sto().outgoing;
+    }
+
+    /// @dev Storage of `TokenRateLimit`'s budgets. Not for other use.
+    function _tokenLimits() internal view returns (TokenLimits storage) {
+        return _sto().tokens;
     }
 
     function _sto() private pure returns (GasKillerSDKStorage storage $) {

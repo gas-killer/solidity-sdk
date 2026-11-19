@@ -3,7 +3,7 @@ pragma solidity ^0.8.27;
 
 import {ERC165Checker} from "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
 import {GasKillerSDK} from "./GasKillerSDK.sol";
-import {StateChangeHandlerLib, StateUpdateType, NestedContext} from "./StateChangeHandlerLib.sol";
+import {StateChangeHandlerLib, StateUpdateType, NestedContext, CallPolicy} from "./StateChangeHandlerLib.sol";
 import {ISchnorrApprovalRegistry} from "./interface/ISchnorrApprovalRegistry.sol";
 import {IGasKillerNested, TreeSubmission} from "./interface/IGasKillerNested.sol";
 import {NestedFrames} from "./libraries/NestedFrames.sol";
@@ -101,8 +101,11 @@ abstract contract GasKillerNestedSDK is GasKillerSDK, IGasKillerNested {
     ///      1,000 and 2,940 just to read the cached words back.
     function _runProgram(bytes memory storageUpdates, NestedContext memory ctx) private {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args, ctx);
-        else StateChangeHandlerLib._runStateUpdatesPrevalidated(types, args, _settlementRanges(), ctx);
+        _beforeProgram();
+        CallPolicy memory policy = _callPolicy();
+        if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args, policy, ctx);
+        else StateChangeHandlerLib._runStateUpdatesPrevalidated(types, args, _settlementRanges(), policy, ctx);
+        _afterProgram();
     }
 
     /// @dev Nested settlement reverts against a registry without `ISchnorrApprovalRegistry`, and

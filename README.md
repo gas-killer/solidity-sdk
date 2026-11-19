@@ -237,6 +237,26 @@ function _protectedRanges() internal pure override returns (StorageGuard.Protect
 }
 ```
 
+> **Upgradeable contracts: protect the proxy slots yourself.** The SDK protects only its own
+> counter and configuration. Behind a UUPS, transparent or beacon proxy, a signed `STORE` to the
+> EIP-1967 implementation slot replaces your contract's code, and with it every protection, policy
+> and rate limit. List the EIP-1967 slots (they sort between the SDK's two ranges):
+>
+> ```solidity
+> bytes32 constant IMPLEMENTATION = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+> bytes32 constant BEACON = 0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50;
+> bytes32 constant ADMIN = 0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103;
+>
+> function _protectedRanges() internal pure override returns (StorageGuard.ProtectedRange[] memory r) {
+>     r = new StorageGuard.ProtectedRange[](3);
+>     r[0] = StorageGuard.ProtectedRange(uint256(IMPLEMENTATION), uint256(IMPLEMENTATION), StorageGuard.FULL);
+>     r[1] = StorageGuard.ProtectedRange(uint256(BEACON), uint256(BEACON), StorageGuard.FULL);
+>     r[2] = StorageGuard.ProtectedRange(uint256(ADMIN), uint256(ADMIN), StorageGuard.FULL);
+> }
+> ```
+>
+> A tracked function that upgrades the contract then can't be settled through Gas Killer.
+
 - `StorageGuard.FULL` protects every bit of every slot in the range. A narrower mask, on a single
   slot, protects part of a packed slot, such as an owner address that shares its slot with a counter.
 - The SDK merges your list with its own and validates the result once, in its constructor. A list
@@ -257,9 +277,10 @@ quietly restores the old value is rejected, and one that keeps the new value pas
 **What it is not.** Protection applies to the signed `STORE` entries only. It does not watch the slot
 itself, so your own functions, called normally, are unaffected, and so is native code a signed
 `CALL` runs. A `CALL` acts with the contract's authority: it can't pass an `onlyOwner` check,
-because `msg.sender` is the contract, but it can reach functions that trust `msg.sender ==
-address(this)`, and it can spend what the contract holds elsewhere (tokens, approvals, ETH).
-Restricting calls is [#109](https://github.com/gas-killer/solidity-sdk/issues/109).
+because `msg.sender` is the contract, but it can spend what the contract holds elsewhere (tokens,
+approvals, ETH), and, if you allow self-calls, reach functions that trust `msg.sender ==
+address(this)`.
+See [Restricting calls](#restricting-calls).
 
 **Opting out.** A contract whose security already rests on trusting the quorum completely, for
 example one with no owner, no upgrade path and nothing else a rewrite could take over, can turn the
@@ -348,11 +369,281 @@ Both benchmarks run with `FOUNDRY_PROFILE=gas forge test -vv`.
 
 **Not covered:**
 
-- Restricting what a signed `CALL` may do: [#109](https://github.com/gas-killer/solidity-sdk/issues/109).
+- Restricting what a signed `CALL` may do: see [Restricting calls](#restricting-calls).
 - A target function that is a general-purpose VM over all of its storage can't be restricted this
   way.
 - Ranges are declared by the consumer. Deriving them by scanning a contract's functions is left for
   later.
+
+## Restricting calls
+
+A signed `CALL` runs real code with your contract's authority, and protected storage doesn't see it.
+With no policy, a program signed by a compromised quorum can transfer or approve the tokens your
+contract holds, and send its ETH through the value of a `CALL`, `CREATE`, `CREATE2` or `NESTED` op.
+Settlement rejects calls to your own contract by default and gives you hooks to restrict the rest.
+They all run before the op does, and a revert in any of them reverts the whole transition.
+
+**What these limits cover, and what they don't.** The call policy and the rate limits below see only
+what a program's own ops do. A compromised quorum can also `STORE` into your contract's own state,
+for example crediting itself a large balance in a mapping (mapping entries can't be protected, see
+[Protected storage](#protected-storage)), and then withdraw through your contract's normal functions
+in a later transaction. Nothing here sees that. For a contract whose payouts follow its own balances,
+such as a vault, an AMM or a staking pool, these limits close the direct route only; bounding the
+indirect one means having your own payout functions spend from the same budget as well.
+
+None of the hooks is told which tracked function a transition is for. The quorum names that
+function and nothing checks it against the program, so a rule that depended on it would only look
+narrower than it is: every hook has to be safe for any program.
+
+**Self-calls are rejected by default.** A `CALL` from a signed program to your own contract runs
+with `msg.sender == address(this)`, so it would reach self-gated functions (self-governed setters,
+`onlyGovernance`-style admin) and could run a tracked function natively, bumping the transition
+counter outside protected storage. Settlement rejects it with `SelfCall(index, selector)` unless
+`_allowSelfCall` allows it. Internal calls (`foo()`, `_foo()`) are jumps, not `CALL`s, and aren't
+affected. gas-analyzer does emit a tracked function's `this.foo()`, including `try this.foo()`, as
+a self-`CALL`, so if your tracked functions do that, allow those selectors and only those:
+
+```solidity
+function _allowSelfCall(bytes4 selector) internal pure override returns (bool) {
+    return selector == this.doThing.selector;
+}
+```
+
+- **One list for every program.** Root frames and nested callee frames use the same list.
+- **An allowed function runs outside the policy.** It runs natively, so its own calls and any ETH
+  it sends on, including the self-call's value, bypass `_authorizeCall`, `_maxOutgoingValue` and the
+  rate limits below, with arguments the quorum chooses. Allow only functions that are safe with any
+  arguments, or that enforce their own limits.
+- **Selector zero** means empty calldata, a plain ETH transfer to the contract. Other calldata under
+  4 bytes, and calldata with selector `0x00000000` and a payload, is always rejected: it would land
+  in the fallback.
+- **Order.** The check runs in `StateChangeHandlerLib` before anything else on the op, ahead of the
+  value cap and `_authorizeCall`, so an `_authorizeCall` override can't drop it by leaving out
+  `super`. Keep the override `pure` where you can: a constant list costs no storage read and can't
+  be changed.
+- **Only `address(this)`.** Another contract that trusts yours as `msg.sender` (a vault gated
+  `onlyRouter`, a sibling in a nested tree, a `ProxyAdmin` your contract owns) is reached by an
+  ordinary `CALL`. The default doesn't cover it: restrict those calls in `_authorizeCall`.
+- **Upgrading.** Earlier SDK versions let every self-call through. If a tracked function of yours
+  uses `this.foo()` or `try this.foo()`, override `_allowSelfCall` in the same upgrade that brings
+  in this version. Otherwise its transitions revert with `SelfCall`, and because the transition
+  counter only advances on settlement, every later transition waits behind them until you deploy
+  the override.
+
+**The other hooks are off by default.** `_authorizeCall` and `_maxOutgoingValue` allow everything
+unless you override them. A consumer that makes no external calls and holds nothing has nothing
+more to restrict. One that holds value should write a policy.
+
+**`_authorizeCall`** is called before every `CALL`, `CREATE`, `CREATE2` and `NESTED` op with the
+op's position, its kind, its target, its value and its data (a `CALL`'s
+calldata, or the initcode of a deployment, whose target is zero since the address isn't known yet).
+Revert to reject the op. Read `data`, never write it: it is the buffer the op runs from, so a change
+would run a call nobody signed. It is code rather than a list because a signed program doesn't carry the
+user's arguments or `msg.sender`, and honest programs often call targets known only at run time,
+such as a user-supplied token or the caller being paid out. It isn't `view`, so it can keep state;
+don't declare your override `view` if you might later combine it with the rate limit below.
+
+```solidity
+function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256, bytes memory data)
+    internal
+    override
+{
+    if (kind == StateUpdateType.CREATE || kind == StateUpdateType.CREATE2) revert NoDeployments(index);
+    if (target == address(token) && bytes4(data) != IERC20.transfer.selector) revert DisallowedCall(index);
+}
+```
+
+**`_maxOutgoingValue()`** caps the wei one program may send, summed over its `CALL`, `CREATE`,
+`CREATE2` and `NESTED` values. It is read once per program, and a program that would pass it reverts
+with `OutgoingValueExceeded(index, total, cap)` at the op that passes it, before that op runs. The
+total counts what the program sends, whatever `msg.value` brought in. Value an allowed self-call
+sends to your own contract stays in it and doesn't count. **It isn't a drain bound:** a compromised
+quorum can sign any number of transitions, or batch items, each capped on its own. It catches an
+honest program sending more than intended; to bound outflow over time, use a rate limit below.
+
+- **Batches and trees.** Each transition of a `verifyAndUpdateBatch` is checked and capped on its
+  own. In a nested tree, each frame runs its own contract's policy. A `NESTED` op's target and value
+  go through the parent's policy; the callee checks its own frame.
+- **Opting out of protected storage** doesn't turn the call policy off.
+
+### Rate-limiting outgoing ETH
+
+`_maxOutgoingValue` caps one program. To bound what signed programs can send over time, across any
+number of programs, add the optional outgoing rate limit: a token bucket that holds at most `limit`
+wei and refills continuously, a full `limit` every `period` seconds. Every op that sends value out of
+the contract spends from it (an allowed self-call's value stays and spends nothing), and one that
+would send more than the bucket holds reverts the transition with
+`OutgoingRateLimitExceeded(index, value, available)` before it runs. Because the bucket starts full
+and refills continuously, up to about twice `limit` can leave within one `period`.
+
+Inherit the drop-in instead of the SDK base:
+
+```solidity
+import {GasKillerOutgoingRateLimit} from "gas-killer-sdk/extensions/GasKillerOutgoingRateLimit.sol";
+
+contract Vault is GasKillerOutgoingRateLimit {
+    constructor(address registry) GasKillerOutgoingRateLimit(10 ether, 1 days) {
+        _setSchnorrRegistry(registry);
+    }
+}
+```
+
+Use `GasKillerNestedOutgoingRateLimit` in place of `GasKillerNestedSDK`.
+
+**In a rate-limited contract, write your call policy in `_authorizeLimitedCall`.** It takes the same
+arguments as `_authorizeCall` and runs before the op is charged. The drop-in finalizes
+`_authorizeCall`, so overriding it is a compile error: otherwise an override that forgot `super`
+would switch the limit off without any error.
+
+A contract that already
+inherits another SDK base (Solidity would otherwise ask it to re-override every function the two
+paths both touch) can call the `OutgoingRateLimit` library from its own `_authorizeCall` instead:
+
+```solidity
+constructor() { OutgoingRateLimit.set(_outgoingBucket(), 10 ether, 1 days); }
+
+function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
+    internal
+    override
+{
+    super._authorizeCall(index, kind, target, value, data);
+    OutgoingRateLimit.spend(_outgoingBucket(), index, target, value);
+}
+```
+
+- **The budget can't be refilled by a signed program.** It lives in the SDK's protected config
+  namespace, so a `STORE` to it is rejected like one to the registry address.
+- **Shared.** All of the contract's programs spend from one bucket: single, batched, and nested
+  frames alike. A `NESTED` op's value spends the parent's bucket; a callee with its own limit spends
+  its own.
+- **Signed programs only.** The contract's own functions, called natively, spend nothing from it.
+  So a quorum that credits itself a balance with a `STORE` and withdraws through your own
+  `withdraw()` isn't limited: see [What these limits cover](#restricting-calls).
+- **ETH only.** A token transfer sends no value; see per-token limits below.
+- **Changing the limit.** The first `_setOutgoingRateLimit(limit, period)` (or
+  `OutgoingRateLimit.set`) fills the bucket. A later one keeps what it holds, capped at the new limit: lowering the limit during a drain doesn't
+  hand out a fresh budget, and raising it refills at the new rate from there. Call it from the constructor, an initializer or an admin function,
+  never from a `trackState` function: like the SDK's config setters, a program carrying that write
+  can never settle. Behind a proxy, pass `(0, 0)` to the constructor and set it in the initializer;
+  until then the budget is empty and
+  every op that sends value reverts. `gasKillerOutgoingAllowance()` returns what is available now,
+  the limit and the period.
+- **Cost.** About 665 gas per op that sends value, plus about 5,000 once per settlement for the
+  first (cold) read and write of the budget slot. Ops that send nothing pay nothing extra.
+
+### Rate-limiting outgoing tokens
+
+`GasKillerTokenRateLimit` (and `GasKillerNestedTokenRateLimit`) extends the ETH limit with
+per-token budgets: for each ERC-20 you list, signed programs may move out at most `limit` per
+`period`, refilling continuously. Up to 8 tokens; unlisted tokens aren't limited, so restrict
+those in `_authorizeLimitedCall` if you hold any. It is a separate base so a contract that only limits ETH
+doesn't pay for it.
+
+```solidity
+import {GasKillerTokenRateLimit} from "gas-killer-sdk/extensions/GasKillerTokenRateLimit.sol";
+
+contract Vault is GasKillerTokenRateLimit {
+    constructor(address registry, address usdc) GasKillerTokenRateLimit(type(uint96).max, 1 days) {
+        _setSchnorrRegistry(registry);
+        _setTokenRateLimit(usdc, 50_000e6, 1 days);
+    }
+}
+```
+
+Pass `type(uint96).max` as the ETH limit to leave ETH effectively unlimited.
+
+**What is charged: net outflow, measured.** A token can leave through `transfer`, through a
+`transferFrom` by a contract holding an allowance (a router pulling during a signed `CALL`), or
+through whatever else the token implements, so the limit reads `balanceOf(this)` for every listed
+token right before the program's first op that runs code, and again when the program ends, and
+charges the decrease. Tokens the program receives offset tokens it sends, so a program could pull
+tokens in from users who approved your contract (`transferFrom(user, this, x)`) and send them on
+uncharged. So a deposit like that doesn't offset: the amount pulled in is added to the starting
+balance (a fee-on-transfer token's fee is charged), and a `transferFrom` between two others is
+rejected (see below). Other receipts still offset sends. A program can unwind a position you hold in
+a form you haven't listed (an aToken, an LP or staking token), or borrow against your collateral,
+and send the proceeds out uncharged. So can a deposit that isn't a signed op: a contract the
+program calls can call back into your own deposit function, get credited, and the tokens it brings
+in offset a send. List the tokens your positions are held in, reject calls to lending and debt
+markets (anything that can pay your contract out against a future obligation) in
+`_authorizeLimitedCall`, and if your contract takes deposits, don't let programs call untrusted
+contracts. A signed deposit is counted at its calldata amount, so a token that delivers less (a fee
+on transfer, a `false` return) is charged the difference, and one that reads `type(uint256).max` as
+"the whole balance" reverts the program. Users' allowances on unlisted tokens aren't guarded.
+
+A token is recognized by the address it is listed under: don't list a token that is also reachable
+through a second address sharing its balances (a legacy proxy or alias). Listing your contract
+itself reverts with `InvalidTokenRateLimit`.
+
+**Approvals.** An approval moves nothing until it is used, possibly long after the program. So an
+`approve`, `increaseAllowance` or `decreaseAllowance` call to a listed token is recorded with the
+spender's allowance before it, and at the end any allowance left above that is charged in full.
+Approving a router that pulls the tokens in the same program is charged once, through the balance;
+an approval left standing is charged, and an unlimited one always exceeds the budget. Other ways of
+granting an allowance aren't seen by the balance check, so a signed `CALL` to a listed token is
+rejected with `TokenRateLimit.UnrecognizedTokenCall` unless it is `transfer`, `approve`,
+`increaseAllowance`, `decreaseAllowance` or a `transferFrom` from or to your contract: anything
+else (`increaseApproval`, ERC-777 `authorizeOperator`, `approveAndCall`) might grant an allowance
+the limit can't charge, and a `transferFrom` between two others moves tokens the balance doesn't
+show. To allow a call you know is safe, such as WETH's `withdraw`, override
+`_allowTokenCall(token, selector, data)` (an unwrap still lowers the WETH balance, so it uses up the
+WETH budget, and the ETH is charged again if sent); check `data`'s arguments where the selector alone isn't
+enough. An allowance system outside the token, such as Permit2, isn't seen at all: reject calls to
+it in `_authorizeLimitedCall`.
+
+The token drop-in also finalizes `_beforeProgram` and `_afterProgram`; use `_beforeLimitedProgram`
+and `_afterLimitedProgram` instead.
+
+- The budgets live in the SDK's protected config namespace, like the ETH budget.
+- A program that runs no code can't move tokens, so it reads no balances.
+- A shortfall reverts the transition at the end of the program with
+  `TokenRateLimitExceeded(token, amount, available)`.
+- `_setTokenRateLimit` and `_clearTokenRateLimit` follow the same rule as the other setters: never
+  from a `trackState` function. As for ETH, a newly listed token starts with a full budget, and
+  updating one keeps what its budget holds, capped at the new limit. Clearing a token drops its
+  budget, so listing it again starts full: to tighten a limit during a drain, lower it instead.
+  Neither may run while a signed program is running (`TokenRateLimitChangedMidProgram`), which
+  includes `_beforeLimitedProgram` and `_afterLimitedProgram`. A listed token must have code, and
+  one whose `balanceOf` reverts (paused, upgraded) blocks every program that runs code until you
+  clear it.
+  `gasKillerTokenAllowance(token)` returns the budget.
+- The limit errs towards charging twice, never under-counting. An approval left standing is charged
+  when its program ends, and the spender's later pull is charged again through the balance. In a
+  nested tree that re-enters the same contract, the inner frame's outflow is charged to it and
+  again to the frame around it.
+- A contract that already inherits another SDK base can use the `TokenRateLimit` library directly:
+  `begin` in `_beforeProgram`, `beforeOp` in `_authorizeCall`, `endProgram` in `_afterProgram`.
+  Reject the op when `beforeOp` returns true (an unrecognized call to a listed token), and make sure
+  no override can skip these calls.
+- **Cost.** For a program with one token `transfer`, about +4,200 with no tokens listed, +9,300 with
+  one and +20,600 with four. Each listed token costs two `balanceOf` calls and a budget read and
+  write per settlement that runs code.
+
+### Cost of the hooks
+
+Measured through `verifyAndUpdate` (`bench/CallPolicyGas.t.sol`) for the counter copy plus
+m zero-value `CALL`s to a warm, empty contract, against the same settlement before the hooks:
+
+| m `CALL`s | Before | Default policy | Small policy |
+|---|---|---|---|
+| 1 | 33,576 | +446 (+1.3%) | +488 (+1.5%) |
+| 8 | 47,166 | +1,738 (+3.7%) | +2,088 (+4.4%) |
+| 32 | 94,129 | +6,164 (+6.5%) | +7,570 (+8.0%) |
+
+That is about 185 gas per op with the hooks left as they are (about 43 of it the self-call check),
+about 230 with a one-target check and a cap, and about 260 per program. An allowed self-call costs
+about 37 more for a one-selector `_allowSelfCall` than for one that allows everything. A program of
+`STORE`s only pays the per-program part and about 3 gas per op. A real `CALL` pays a cold account
+access (2,600) and its callee's work, so the share is smaller than against this empty callee.
+
+**Not covered:**
+- Checking a call's arguments against what the user asked for. The program doesn't carry the user's
+  input, so `transfer(to, amount)` is judged on its own: the policy can pin `to` to a known payee,
+  but can't tell a legitimate payout to an arbitrary user from theft.
+- Value that leaves through your contract's own functions after a program has written its state,
+  such as a balance a `STORE` credited (see [What these limits cover](#restricting-calls)).
+- Checking that a program is what the tracked function would have produced. That is what the
+  quorum attests; only a fraud or validity proof of the execution would remove that trust.
 
 ## Repository Structure
 
@@ -364,7 +655,8 @@ Both benchmarks run with `FOUNDRY_PROFILE=gas forge test -vv`.
   - `StateChangeHandlerLib.sol` — Executes batched `STORE`, `CALL`, `LOG`, `CREATE` and `NESTED` operations
   - `TransitionGuard.sol` — EIP-1153 reentrancy / in-transition latch, keyed by the active nested root
   - `interface/` — `IGasKillerSDK`, `IGasKillerSDKBatch`, `IGasKillerNested`, `ISchnorrStakeRegistry`, `ISchnorrApprovalRegistry`, and the Alloy-compatible `IStateUpdateTypes`
-  - `libraries/` — `Secp256k1` (affine point math), `SchnorrVerify` (constant-gas `ecrecover`-trick verify), `NestedFrames` (nested-settlement leaves, tree membership and witnesses) and `StorageGuard` (protected storage ranges for `STORE` updates)
+  - `libraries/` — `Secp256k1` (affine point math), `SchnorrVerify` (constant-gas `ecrecover`-trick verify), `NestedFrames` (nested-settlement leaves, tree membership and witnesses) `StorageGuard` (protected storage ranges for `STORE` updates) `OutgoingRateLimit` (token bucket over the ETH signed programs send) and `TokenRateLimit` (per-token budgets over measured ERC-20 outflow)
+  - `extensions/` — Optional drop-in bases: `GasKillerOutgoingRateLimit` (outgoing-ETH rate limit) and `GasKillerTokenRateLimit` (plus per-token limits), each with a `Nested` variant
 - **`src/examples/`** — Demo apps: `ArraySummation`(`Factory`), `ReentrantCheckpoint`(`Factory`), and the nested-settlement `nested-chain`, `nested-cycle` and `nested-deposit` examples
 - **`script/`** — Deployment scripts
 - **`test/`** — Unit and integration tests

@@ -82,6 +82,18 @@ contract LayoutProbe is GasKillerSDK {
         _setAvsAddress(address(type(uint160).max));
         _setSchnorrRegistry(address(type(uint160).max));
         _setBlockStaleMeasure(type(uint96).max);
+        // `GasKillerOutgoingRateLimit`'s budget, which has no setter that fills every bit.
+        _outgoingBucket().limit = type(uint96).max;
+        _outgoingBucket().available = type(uint96).max;
+        _outgoingBucket().period = type(uint32).max;
+        _outgoingBucket().updated = type(uint32).max;
+        // `TokenRateLimit`'s budgets.
+        _tokenLimits().count = type(uint256).max;
+        for (uint256 i = 0; i < 8; ++i) {
+            _tokenLimits().buckets[i] = GasKillerSDK.TokenBucket(
+                address(type(uint160).max), type(uint32).max, type(uint32).max, type(uint128).max, type(uint128).max
+            );
+        }
     }
 }
 
@@ -122,6 +134,25 @@ contract Poker {
 }
 
 /// Re-declares the transition counter, which the SDK already protects.
+/// Lists the EIP-1967 proxy slots as the README shows.
+contract ProxySlotConsumer is GasKillerSDK {
+    bytes32 constant IMPLEMENTATION = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+    bytes32 constant BEACON = 0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50;
+    bytes32 constant ADMIN = 0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103;
+
+    constructor(address registry) {
+        _setSchnorrRegistry(registry);
+        _setAvsAddress(address(0xA75));
+    }
+
+    function _protectedRanges() internal pure override returns (StorageGuard.ProtectedRange[] memory r) {
+        r = new StorageGuard.ProtectedRange[](3);
+        r[0] = StorageGuard.ProtectedRange(uint256(IMPLEMENTATION), uint256(IMPLEMENTATION), StorageGuard.FULL);
+        r[1] = StorageGuard.ProtectedRange(uint256(BEACON), uint256(BEACON), StorageGuard.FULL);
+        r[2] = StorageGuard.ProtectedRange(uint256(ADMIN), uint256(ADMIN), StorageGuard.FULL);
+    }
+}
+
 contract OverlappingConsumer is GasKillerSDK {
     function _protectedRanges() internal pure override returns (StorageGuard.ProtectedRange[] memory r) {
         r = new StorageGuard.ProtectedRange[](2);
@@ -310,7 +341,7 @@ contract GasKillerSDKProtectedStorageTest is Test {
         }
         // Tripwire, not protection: when the struct grows, add the new field's setter to
         // `LayoutProbe.fill` and update this count, so the check above covers it.
-        assertEq(used, 2, "config struct changed: add its setter to LayoutProbe.fill and update this count");
+        assertEq(used, 20, "config struct changed: add its setter to LayoutProbe.fill and update this count");
         // Nothing below the namespace either.
         assertEq(vm.load(address(probe), bytes32(uint256(SDK_STORAGE) - 1)), bytes32(0));
     }
@@ -351,6 +382,23 @@ contract GasKillerSDKProtectedStorageTest is Test {
     }
 
     // ---------------------------------------------------------------- the consumer's slots
+
+    /// The README's EIP-1967 list deploys alongside the SDK's ranges and rejects a signed
+    /// upgrade through each slot.
+    function test_proxySlotListFromTheReadmeProtects() public {
+        ProxySlotConsumer c = new ProxySlotConsumer(address(registry));
+        assertEq(c.gasKillerProtectedRanges().length, 5);
+        bytes32[3] memory slots = [
+            bytes32(0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc),
+            0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50,
+            0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103
+        ];
+        for (uint256 i = 0; i < 3; ++i) {
+            Program memory p = _tracked(c, 1);
+            _store(p, slots[i], bytes32(uint256(uint160(ATTACKER))));
+            _settle(c, p, _rejection(1, slots[i]));
+        }
+    }
 
     function test_ownerRewriteRejected() public {
         Program memory p = _tracked(vault, 1);
