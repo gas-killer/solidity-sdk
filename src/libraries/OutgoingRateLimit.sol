@@ -29,10 +29,12 @@ library OutgoingRateLimit {
     /// @notice A limit above `type(uint96).max`, or a period of zero or above `type(uint32).max`.
     error InvalidOutgoingRateLimit();
 
-    /// @notice The budget was reset to `limit` wei per `period` seconds, full.
+    /// @notice The budget was set to `limit` wei per `period` seconds.
     event OutgoingRateLimitSet(uint256 limit, uint256 period);
 
-    /// @notice Sets the limit and period, and fills the budget.
+    /// @notice Sets the limit and period. The first call fills the budget; a later one keeps what
+    ///         the budget holds now, capped at the new limit, so lowering the limit during a drain
+    ///         doesn't hand out a fresh budget, and raising it refills at the new rate from there.
     /// @dev **Do not call from a `trackState` function**, for the same reason as the SDK's config
     ///      setters: the budget is protected storage, so a program carrying the write can never
     ///      settle. Call it from a constructor, an initializer or an admin function that is not
@@ -42,8 +44,17 @@ library OutgoingRateLimit {
     /// @param period Seconds over which the full `limit` refills.
     function set(GasKillerSDK.OutgoingBucket storage b, uint256 limit, uint256 period) internal {
         require(limit <= type(uint96).max && period != 0 && period <= type(uint32).max, InvalidOutgoingRateLimit());
+        uint256 available = limit;
+        if (b.period != 0) {
+            uint256 word;
+            assembly ("memory-safe") {
+                word := sload(b.slot)
+            }
+            (uint256 held,) = _refilled(word);
+            if (held < available) available = held;
+        }
         b.limit = uint96(limit);
-        b.available = uint96(limit);
+        b.available = uint96(available);
         b.period = uint32(period);
         b.updated = uint32(block.timestamp);
         emit OutgoingRateLimitSet(limit, period);

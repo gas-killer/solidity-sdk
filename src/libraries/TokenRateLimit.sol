@@ -97,8 +97,10 @@ library TokenRateLimit {
 
     // ------------------------------------------------------------------ configuration
 
-    /// @notice Limits `token` to `limit` per `period` and fills its budget, adding it to the list
-    ///         or updating it.
+    /// @notice Limits `token` to `limit` per `period`, adding it to the list or updating it. A
+    ///         newly added token starts with a full budget; updating one keeps what its budget
+    ///         holds now, capped at the new limit, so lowering a limit during a drain doesn't hand
+    ///         out a fresh budget.
     /// @dev **Do not call from a `trackState` function**: the budgets are protected storage, so a
     ///      program carrying the write can never settle. Call it from a constructor, an
     ///      initializer or an admin function that is not `trackState`.
@@ -109,12 +111,17 @@ library TokenRateLimit {
         );
         uint256 n = t.count;
         uint256 i = _find(t, token, n);
+        uint256 available = limit;
         if (i == n) {
             require(n < MAX_TOKENS, TooManyRateLimitedTokens());
             t.count = n + 1;
+        } else {
+            (uint256 held,) = _refilled(t.buckets[i]);
+            if (held < available) available = held;
         }
-        t.buckets[i] =
-            GasKillerSDK.TokenBucket(token, uint32(period), uint32(block.timestamp), uint128(limit), uint128(limit));
+        t.buckets[i] = GasKillerSDK.TokenBucket(
+            token, uint32(period), uint32(block.timestamp), uint128(limit), uint128(available)
+        );
         emit TokenRateLimitSet(token, limit, period);
     }
 

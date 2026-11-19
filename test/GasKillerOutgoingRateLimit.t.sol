@@ -316,15 +316,33 @@ contract GasKillerOutgoingRateLimitTest is Test {
         _drain(t, 1, _exceeded(1, 1, 0));
     }
 
-    function test_resettingTheLimitRefills() public {
-        _drain(t, 1 ether, "");
+    /// Changing the limit keeps what the budget holds: raising it doesn't refill, and it then
+    /// refills at the new rate.
+    function test_changingTheLimitKeepsTheBudget() public {
+        _drain(t, 0.75 ether, "");
         vm.expectEmit(address(t));
         emit OutgoingRateLimit.OutgoingRateLimitSet(2 ether, 1 days);
         t.setLimit(2 ether, 1 days);
         (uint256 available, uint256 limit, uint256 period) = t.gasKillerOutgoingAllowance();
-        assertEq(available, 2 ether);
+        assertEq(available, 0.25 ether);
         assertEq(limit, 2 ether);
         assertEq(period, 1 days);
+        vm.warp(block.timestamp + 12 hours);
+        assertEq(_available(t), 1.25 ether);
+    }
+
+    /// Lowering the limit during a drain doesn't hand out a fresh budget.
+    function test_loweringTheLimitDoesNotRefill() public {
+        _drain(t, 1 ether, "");
+        t.setLimit(0.1 ether, 1 hours);
+        assertEq(_available(t), 0);
+        _drain(t, 1, _exceeded(1, 1, 0));
+    }
+
+    /// Lowering it below what the budget holds caps the budget at the new limit.
+    function test_loweringTheLimitCapsTheBudget() public {
+        t.setLimit(0.1 ether, 1 hours);
+        assertEq(_available(t), 0.1 ether);
     }
 
     function test_invalidLimitsRevert() public {

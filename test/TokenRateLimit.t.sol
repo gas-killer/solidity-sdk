@@ -288,6 +288,7 @@ contract TokenRateLimitTest is Test {
 
     /// As `OutgoingRateLimit`: frequent small charges don't stop the budget refilling.
     function test_frequentChargesStillRefill() public {
+        v.clearTokenLimit(address(token)); // re-added, so it starts full at the new limit
         v.setTokenLimit(address(token), 1000, 1 days);
         for (uint256 i = 0; i < 300; ++i) {
             vm.warp(block.timestamp + 60);
@@ -345,6 +346,21 @@ contract TokenRateLimitTest is Test {
         _send(150, _exceeded(150, 100));
         _send(100, "");
         assertEq(pv.seen(), 1, "the consumer's hook still ran");
+    }
+
+    /// Updating a listed token's limit keeps what its budget holds, capped at the new limit;
+    /// only a newly added token starts full.
+    function test_changingATokenLimitKeepsTheBudget() public {
+        _send(100, "");
+        v.setTokenLimit(address(token), 10, 1 hours);
+        assertEq(_available(), 0, "lowering mid-drain hands out nothing");
+        _send(1, _exceeded(1, 0));
+        v.setTokenLimit(address(token), 1000, 1 hours);
+        assertEq(_available(), 0, "raising doesn't refill either");
+        vm.warp(block.timestamp + 6 minutes);
+        assertEq(_available(), 100, "it refills at the new rate");
+        v.setTokenLimit(address(token), 40, 1 hours);
+        assertEq(_available(), 40, "capped at a lower limit");
     }
 
     /// Only the increase over the allowance the spender already had is charged.

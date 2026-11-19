@@ -499,8 +499,9 @@ function _authorizeCall(uint256 index, StateUpdateType kind, address target, uin
   So a quorum that credits itself a balance with a `STORE` and withdraws through your own
   `withdraw()` isn't limited: see [What these limits cover](#restricting-calls).
 - **ETH only.** A token transfer sends no value; see per-token limits below.
-- **Changing the limit.** `_setOutgoingRateLimit(limit, period)` (or `OutgoingRateLimit.set`)
-  resets the bucket to full. Call it from the constructor, an initializer or an admin function,
+- **Changing the limit.** The first `_setOutgoingRateLimit(limit, period)` (or
+  `OutgoingRateLimit.set`) fills the bucket. A later one keeps what it holds, capped at the new limit: lowering the limit during a drain doesn't
+  hand out a fresh budget, and raising it refills at the new rate from there. Call it from the constructor, an initializer or an admin function,
   never from a `trackState` function: like the SDK's config setters, a program carrying that write
   can never settle. Behind a proxy, set it in the initializer; until then the budget is empty and
   every op that sends value reverts. `gasKillerOutgoingAllowance()` returns what is available now,
@@ -561,7 +562,8 @@ and `_afterLimitedProgram` instead.
 - A shortfall reverts the transition at the end of the program with
   `TokenRateLimitExceeded(token, amount, available)`.
 - `_setTokenRateLimit` and `_clearTokenRateLimit` follow the same rule as the other setters: never
-  from a `trackState` function. `gasKillerTokenAllowance(token)` returns the budget.
+  from a `trackState` function. As for ETH, a newly listed token starts with a full budget, and
+  updating one keeps what its budget holds, capped at the new limit. `gasKillerTokenAllowance(token)` returns the budget.
 - In a nested tree that re-enters the same contract, the inner frame's outflow is charged to it and
   again to the frame around it: conservative, never under-counted.
 - A contract that already inherits another SDK base can use the `TokenRateLimit` library directly:
