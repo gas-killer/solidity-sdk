@@ -1077,8 +1077,10 @@ library StateChangeHandlerLib {
     function _runNested(uint256 i, bytes memory arg, NestedContext memory ctx, CallPolicy memory policy) private {
         if (ctx.root == bytes32(0)) revert NestedOutsideTree();
         (address target, uint256 value, bytes32 childLeaf) = abi.decode(arg, (address, uint256, bytes32));
-        _authorize(policy, i, StateUpdateType.NESTED, target, value, "");
+        // The cheap structural check first, so a malformed tree reverts with `MissingWitness`
+        // before the policy spends budgets or calls out.
         if (ctx.consumed >= ctx.children.length) revert MissingWitness(i);
+        _authorize(policy, i, StateUpdateType.NESTED, target, value, "");
         bytes memory callargs =
             abi.encodeCall(IGasKillerNested.applyNested, (ctx.root, childLeaf, ctx.children[ctx.consumed++]));
 
@@ -1616,7 +1618,9 @@ abstract contract GasKillerSDK is
     /// @dev With the check off, a quorum that signs a malicious program can overwrite any slot of
     ///      this contract: an owner, an upgrade slot, the transition counter (replaying or
     ///      skipping transitions) and the SDK's own configuration, including the registry that
-    ///      verifies signatures. Opt out only if the contract's correctness already rests on
+    ///      verifies signatures and the rate-limit budgets (`OutgoingRateLimit`, `TokenRateLimit`),
+    ///      which a program could then refill before spending them: the rate limits stay in the
+    ///      code but bound nothing. Opt out only if the contract's correctness already rests on
     ///      trusting the quorum completely, for example one with no owner, no upgrade path and
     ///      nothing else a rewrite could take over.
     ///
@@ -1844,9 +1848,10 @@ abstract contract GasKillerSDK is
 ///      the lowest allowance seen before its approvals, so an allowance left standing is charged
 ///      once however many times it was set. Approving a router that then pulls the tokens is charged
 ///      once, through the balance; an approval left standing is charged in full, so an unlimited
-///      one always reverts. Other ways to grant an allowance aren't seen: another selector
-///      (`approveAndCall`), or an allowance system outside the token, such as Permit2. Reject
-///      those in `_authorizeCall`.
+///      one always reverts. A call to a listed token with any other function could grant an
+///      allowance another way (`increaseApproval`, `authorizeOperator`, `approveAndCall`), so
+///      `beforeOp` flags it and the drop-ins reject it. An allowance system outside the token,
+///      such as Permit2, isn't seen at all: reject calls to it in `_authorizeCall`.
 ///
 ///      Wire it up with `begin` in `_beforeProgram`, `beforeOp` in `_authorizeCall` and
 ///      `endProgram` in `_afterProgram`; the drop-ins in `src/extensions/` do. Programs can nest on
@@ -1879,6 +1884,11 @@ library TokenRateLimit {
     /// @notice `beforeOp` or `endProgram` ran outside a program: `begin` wasn't called first.
     error TokenRateLimitNotBegun();
 
+    /// @notice A signed `CALL` to a listed token with a function the limit can't account for
+    ///         (see `beforeOp`). Raised by the drop-ins in `src/extensions/`.
+    /// @param index The op's position in its program.
+    error UnrecognizedTokenCall(uint256 index, address token, bytes4 selector);
+
     event TokenRateLimitSet(address indexed token, uint256 limit, uint256 period);
     event TokenRateLimitCleared(address indexed token);
 
@@ -1887,6 +1897,9 @@ library TokenRateLimit {
 
     bytes4 private constant _APPROVE = IERC20.approve.selector;
     bytes4 private constant _INCREASE_ALLOWANCE = bytes4(keccak256("increaseAllowance(address,uint256)"));
+    bytes4 private constant _DECREASE_ALLOWANCE = bytes4(keccak256("decreaseAllowance(address,uint256)"));
+    bytes4 private constant _TRANSFER = IERC20.transfer.selector;
+    bytes4 private constant _TRANSFER_FROM = IERC20.transferFrom.selector;
 
     /// @dev Transient storage. `_DEPTH` holds the depth of the running program, and each depth
     ///      has a region at `_DEPTH + (depth << 64)`:
@@ -1972,8 +1985,16 @@ library TokenRateLimit {
 
     /// @notice Call from `_authorizeCall`, before every op that runs code. Takes the snapshot on
     ///         the program's first such op and records approvals of listed tokens.
+    /// @return unrecognized True for a `CALL` to a listed token with a selector other than
+    ///         `transfer`, `transferFrom`, `approve`, `increaseAllowance` or `decreaseAllowance`
+    ///         (or calldata too short to carry one). **Reject the op when it is true**, unless you
+    ///         know what that function does: a token can grant an allowance some other way
+    ///         (`increaseApproval`, ERC-777 `authorizeOperator`, `approveAndCall`) that moves
+    ///         nothing during the program, so it would never be charged. The drop-ins revert with
+    ///         `UnrecognizedTokenCall` unless their `_allowTokenCall` allows it.
     function beforeOp(GasKillerSDK.TokenLimits storage t, StateUpdateType kind, address target, bytes memory data)
         internal
+        returns (bool unrecognized)
     {
         uint256 r = _region();
         uint256 head = _tload(r);
@@ -1987,13 +2008,20 @@ library TokenRateLimit {
             head = 1 | (count << 1);
             _tstore(r, head);
         }
-        if (kind != StateUpdateType.CALL || data.length < 0x44) return;
-        bytes4 selector = bytes4(data);
-        if (selector != _APPROVE && selector != _INCREASE_ALLOWANCE) return;
+        if (kind != StateUpdateType.CALL) return false;
+        bytes4 selector = bytes4(data); // zero-padded when shorter than 4 bytes
+        // Moves measured through the balance, or lowers an allowance: fine on any target, so a
+        // transfer skips the lookup below.
+        if (
+            data.length >= 4 && (selector == _TRANSFER || selector == _TRANSFER_FROM || selector == _DECREASE_ALLOWANCE)
+        ) {
+            return false;
+        }
         uint256 n = (head >> 1) & 0xff;
         uint256 index;
         while (index < n && _tload(r + 1 + 3 * index) != uint160(target)) ++index;
-        if (index == n) return;
+        if (index == n) return false;
+        if ((selector != _APPROVE && selector != _INCREASE_ALLOWANCE) || data.length < 0x44) return true;
         address spender;
         assembly ("memory-safe") {
             spender := and(mload(add(data, 0x24)), 0xffffffffffffffffffffffffffffffffffffffff)

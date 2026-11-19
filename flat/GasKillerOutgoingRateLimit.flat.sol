@@ -1442,8 +1442,10 @@ library StateChangeHandlerLib {
     function _runNested(uint256 i, bytes memory arg, NestedContext memory ctx, CallPolicy memory policy) private {
         if (ctx.root == bytes32(0)) revert NestedOutsideTree();
         (address target, uint256 value, bytes32 childLeaf) = abi.decode(arg, (address, uint256, bytes32));
-        _authorize(policy, i, StateUpdateType.NESTED, target, value, "");
+        // The cheap structural check first, so a malformed tree reverts with `MissingWitness`
+        // before the policy spends budgets or calls out.
         if (ctx.consumed >= ctx.children.length) revert MissingWitness(i);
+        _authorize(policy, i, StateUpdateType.NESTED, target, value, "");
         bytes memory callargs =
             abi.encodeCall(IGasKillerNested.applyNested, (ctx.root, childLeaf, ctx.children[ctx.consumed++]));
 
@@ -1981,7 +1983,9 @@ abstract contract GasKillerSDK is
     /// @dev With the check off, a quorum that signs a malicious program can overwrite any slot of
     ///      this contract: an owner, an upgrade slot, the transition counter (replaying or
     ///      skipping transitions) and the SDK's own configuration, including the registry that
-    ///      verifies signatures. Opt out only if the contract's correctness already rests on
+    ///      verifies signatures and the rate-limit budgets (`OutgoingRateLimit`, `TokenRateLimit`),
+    ///      which a program could then refill before spending them: the rate limits stay in the
+    ///      code but bound nothing. Opt out only if the contract's correctness already rests on
     ///      trusting the quorum completely, for example one with no owner, no upgrade path and
     ///      nothing else a rewrite could take over.
     ///
@@ -2427,14 +2431,19 @@ abstract contract GasKillerNestedSDK is GasKillerSDK, IGasKillerNested {
 /// @notice `GasKillerSDK` with a rate limit on the ETH signed programs send: at most `limit` wei
 ///         per `period`, refilling continuously (see `OutgoingRateLimit`). Inherit it instead of
 ///         `GasKillerSDK`; for per-token limits too, inherit `GasKillerTokenRateLimit`.
-/// @dev Spends in `_authorizeCall`, after `super._authorizeCall`. A consumer that writes its own
-///      `_authorizeCall` must call `super._authorizeCall` too, and can't declare it `view`.
+/// @dev **Write your call policy in `_authorizeLimitedCall`, not `_authorizeCall`.** This contract
+///      finalizes `_authorizeCall`, so the limit is spent whatever an override does: an override
+///      that left out `super` would otherwise switch the limit off without any error. Trying to
+///      override `_authorizeCall` is a compile error.
 ///      `_maxOutgoingValue` still caps each program on its own. To add the limit to a contract
 ///      that already inherits another `GasKillerSDK` base, call `OutgoingRateLimit` from that
-///      contract's own `_authorizeCall` instead, as this one does.
+///      contract's own `_authorizeCall` instead.
 abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
     /// @param limit Most wei signed programs may send in one `period`; zero sends none.
     /// @param period Seconds over which the full `limit` refills.
+    /// @dev Sets the budget in the deploying contract's own storage. **Behind a proxy that is the
+    ///      implementation, not the proxy**: call `_setOutgoingRateLimit` from the initializer, or
+    ///      the proxy's budget stays empty and every op that sends value reverts.
     constructor(uint256 limit, uint256 period) {
         OutgoingRateLimit.set(_outgoingBucket(), limit, period);
     }
@@ -2449,23 +2458,43 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
         OutgoingRateLimit.set(_outgoingBucket(), limit, period);
     }
 
+    /// @notice Override, in place of `_authorizeCall`, to reject ops; the arguments and rules
+    ///         are `_authorizeCall`'s. Runs before the op is charged to the limit. Allows
+    ///         everything by default.
+    function _authorizeLimitedCall(
+        uint256 index,
+        StateUpdateType kind,
+        address target,
+        uint256 value,
+        bytes memory data
+    ) internal virtual {}
+
+    /// @dev For `GasKillerTokenRateLimit`, which adds its own per-op step here. Runs after the ETH
+    ///      limit. Not meant for consumers: put policy in `_authorizeLimitedCall`.
+    function _rateLimitOp(uint256 index, StateUpdateType kind, address target, bytes memory data) internal virtual {}
+
+    /// @dev Final: see the contract's notes.
     function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
         internal
-        virtual
         override
     {
         super._authorizeCall(index, kind, target, value, data);
+        _authorizeLimitedCall(index, kind, target, value, data);
         OutgoingRateLimit.spend(_outgoingBucket(), index, target, value);
+        _rateLimitOp(index, kind, target, data);
     }
 }
 
 /// @title GasKillerNestedOutgoingRateLimit
 /// @notice `GasKillerOutgoingRateLimit` for nested settlement: inherit it instead of
 ///         `GasKillerNestedSDK`. Value a `NESTED` op forwards spends this contract's budget; a
-///         callee with its own limit spends its own.
+///         callee with its own limit spends its own. As there, write the call policy in
+///         `_authorizeLimitedCall`.
 abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
     /// @param limit Most wei signed programs may send in one `period`; zero sends none.
     /// @param period Seconds over which the full `limit` refills.
+    /// @dev Behind a proxy, call `_setOutgoingRateLimit` from the initializer, as for
+    ///      `GasKillerOutgoingRateLimit`.
     constructor(uint256 limit, uint256 period) {
         OutgoingRateLimit.set(_outgoingBucket(), limit, period);
     }
@@ -2480,12 +2509,26 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
         OutgoingRateLimit.set(_outgoingBucket(), limit, period);
     }
 
+    /// @notice As `GasKillerOutgoingRateLimit._authorizeLimitedCall`.
+    function _authorizeLimitedCall(
+        uint256 index,
+        StateUpdateType kind,
+        address target,
+        uint256 value,
+        bytes memory data
+    ) internal virtual {}
+
+    /// @dev As `GasKillerOutgoingRateLimit._rateLimitOp`.
+    function _rateLimitOp(uint256 index, StateUpdateType kind, address target, bytes memory data) internal virtual {}
+
+    /// @dev Final, as in `GasKillerOutgoingRateLimit`.
     function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
         internal
-        virtual
         override
     {
         super._authorizeCall(index, kind, target, value, data);
+        _authorizeLimitedCall(index, kind, target, value, data);
         OutgoingRateLimit.spend(_outgoingBucket(), index, target, value);
+        _rateLimitOp(index, kind, target, data);
     }
 }

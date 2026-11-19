@@ -1464,8 +1464,10 @@ library StateChangeHandlerLib {
     function _runNested(uint256 i, bytes memory arg, NestedContext memory ctx, CallPolicy memory policy) private {
         if (ctx.root == bytes32(0)) revert NestedOutsideTree();
         (address target, uint256 value, bytes32 childLeaf) = abi.decode(arg, (address, uint256, bytes32));
-        _authorize(policy, i, StateUpdateType.NESTED, target, value, "");
+        // The cheap structural check first, so a malformed tree reverts with `MissingWitness`
+        // before the policy spends budgets or calls out.
         if (ctx.consumed >= ctx.children.length) revert MissingWitness(i);
+        _authorize(policy, i, StateUpdateType.NESTED, target, value, "");
         bytes memory callargs =
             abi.encodeCall(IGasKillerNested.applyNested, (ctx.root, childLeaf, ctx.children[ctx.consumed++]));
 
@@ -2003,7 +2005,9 @@ abstract contract GasKillerSDK is
     /// @dev With the check off, a quorum that signs a malicious program can overwrite any slot of
     ///      this contract: an owner, an upgrade slot, the transition counter (replaying or
     ///      skipping transitions) and the SDK's own configuration, including the registry that
-    ///      verifies signatures. Opt out only if the contract's correctness already rests on
+    ///      verifies signatures and the rate-limit budgets (`OutgoingRateLimit`, `TokenRateLimit`),
+    ///      which a program could then refill before spending them: the rate limits stay in the
+    ///      code but bound nothing. Opt out only if the contract's correctness already rests on
     ///      trusting the quorum completely, for example one with no owner, no upgrade path and
     ///      nothing else a rewrite could take over.
     ///
