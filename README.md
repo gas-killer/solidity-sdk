@@ -534,22 +534,29 @@ Pass `type(uint96).max` as the ETH limit to leave ETH effectively unlimited.
 `transferFrom` by a contract holding an allowance (a router pulling during a signed `CALL`), or
 through whatever else the token implements, so the limit reads `balanceOf(this)` for every listed
 token right before the program's first op that runs code, and again when the program ends, and
-charges the decrease. Tokens the program receives offset tokens it sends, which leaves two routes
-open: a program can pull tokens in from users who approved your contract (`transferFrom(user, this,
-x)`) and send them on, or unwind a position you hold in a form you haven't listed (an aToken, an LP
-or staking token) into a listed token and send that, and neither is charged. List the tokens your
-positions are held in as well, and reject `transferFrom` from anyone but your contract in
-`_authorizeLimitedCall`.
+charges the decrease. Tokens the program receives offset tokens it sends, so a program could pull
+tokens in from users who approved your contract (`transferFrom(user, this, x)`) and send them on
+uncharged: a `transferFrom` on a listed token from anyone but your contract is therefore rejected
+(see below). A program can still unwind a position you hold in a form you haven't listed (an
+aToken, an LP or staking token) into a listed token and send that uncharged, so list the tokens your
+positions are held in as well. Users' allowances on unlisted tokens aren't guarded.
+
+A token is recognized by the address it is listed under: don't list a token that is also reachable
+through a second address sharing its balances (a legacy proxy or alias), and don't list your
+contract itself.
 
 **Approvals.** An approval moves nothing until it is used, possibly long after the program. So an
-`approve` or `increaseAllowance` call to a listed token is recorded with the spender's allowance
+`approve`, `increaseAllowance` or `decreaseAllowance` call to a listed token is recorded with the spender's allowance
 before it, and at the end any allowance left above that is charged in full. Approving a router that
 pulls the tokens in the same program is charged once, through the balance; an approval left
 standing is charged, and an unlimited one always exceeds the budget. Other ways of granting an
 allowance aren't seen by the balance check, so a signed `CALL` to a listed token is rejected with
-`TokenRateLimit.UnrecognizedTokenCall` unless it is `transfer`, `transferFrom`, `approve`,
-`increaseAllowance` or `decreaseAllowance`: anything else (`increaseApproval`, ERC-777
-`authorizeOperator`, `approveAndCall`) might grant an allowance the limit can't charge. To allow a
+`TokenRateLimit.UnrecognizedTokenCall` unless it is `transfer`, `approve`, `increaseAllowance`,
+`decreaseAllowance` or a `transferFrom` from your contract: anything else (`increaseApproval`,
+ERC-777 `authorizeOperator`, `approveAndCall`) might grant an allowance the limit can't charge, and
+a `transferFrom` from a user moves tokens the balance doesn't show. If your contract really pulls
+deposits in signed programs, allow `transferFrom` in `_allowTokenCall` and check the sender
+yourself. To allow a
 function you know is safe, such as WETH's `withdraw`, override `_allowTokenCall(token, selector)`.
 An allowance system outside the token, such as Permit2, isn't seen at all: reject calls to it in
 `_authorizeLimitedCall`.

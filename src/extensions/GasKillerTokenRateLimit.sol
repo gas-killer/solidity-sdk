@@ -18,9 +18,10 @@ import {GasKillerOutgoingRateLimit, GasKillerNestedOutgoingRateLimit} from "./Ga
 ///      `_beforeLimitedProgram` and `_afterLimitedProgram`.
 ///
 ///      A signed `CALL` to a listed token is rejected with `TokenRateLimit.UnrecognizedTokenCall`
-///      unless it is `transfer`, `transferFrom`, `approve`, `increaseAllowance` or
-///      `decreaseAllowance`, or `_allowTokenCall` allows it: any other function could grant an
-///      allowance the limit doesn't see.
+///      unless it is `transfer`, `approve`, `increaseAllowance`, `decreaseAllowance` or a
+///      `transferFrom` from this contract, or `_allowTokenCall` allows it: any other function
+///      could grant an allowance the limit doesn't see, and a `transferFrom` from anyone else
+///      moves tokens users approved this contract for, which its balance doesn't show.
 abstract contract GasKillerTokenRateLimit is GasKillerOutgoingRateLimit {
     /// @param ethLimit Most wei signed programs may send in one `ethPeriod`.
     /// @param ethPeriod Seconds over which the full `ethLimit` refills.

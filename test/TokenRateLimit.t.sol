@@ -20,6 +20,16 @@ contract Puller {
     }
 }
 
+/// A legacy-style token whose `decreaseAllowance` subtracts unchecked, so it can wrap.
+contract WrappingToken is MintableToken {
+    function decreaseAllowance(address spender, uint256 subtracted) public override returns (bool) {
+        unchecked {
+            _approve(msg.sender, spender, allowance(msg.sender, spender) - subtracted);
+        }
+        return true;
+    }
+}
+
 /// A vault limiting `token` to 100 per hour, ETH effectively unlimited.
 contract TokenVault is GasKillerTokenRateLimit {
     constructor(address registry, address token) GasKillerTokenRateLimit(type(uint96).max, 1) {
@@ -336,6 +346,53 @@ contract TokenRateLimitTest is Test {
         _settle(p, "");
         assertEq(token.allowance(address(v), ATTACKER), 20);
         assertEq(_available(), 100, "nothing charged");
+    }
+
+    /// A `decreaseAllowance` that raises the allowance is charged like an approval.
+    function test_decreaseAllowanceThatRaisesIsCharged() public {
+        WrappingToken w = new WrappingToken();
+        w.mint(address(v), 1000);
+        v.setTokenLimit(address(w), 100, 1 hours);
+        Program memory p = _tracked(1);
+        _call(p, address(w), abi.encodeWithSignature("decreaseAllowance(address,uint256)", ATTACKER, 1));
+        _settle(
+            p,
+            abi.encodeWithSelector(TokenRateLimit.TokenRateLimitExceeded.selector, address(w), type(uint256).max, 100)
+        );
+    }
+
+    /// Users who approved the vault can't be drained by a program: a `transferFrom` from anyone
+    /// but the vault is rejected, whether the tokens go straight out or through the vault.
+    function test_transferFromAUserIsRejected() public {
+        address user = address(0xA11CE);
+        token.mint(user, 1000);
+        vm.prank(user);
+        token.approve(address(v), 1000);
+        bytes memory rejected = abi.encodeWithSelector(
+            TokenRateLimit.UnrecognizedTokenCall.selector, 1, address(token), IERC20.transferFrom.selector
+        );
+
+        Program memory p = _tracked(1);
+        _call(p, address(token), abi.encodeCall(IERC20.transferFrom, (user, ATTACKER, 1000)));
+        _settle(p, rejected);
+
+        p = _tracked(2);
+        _call(p, address(token), abi.encodeCall(IERC20.transferFrom, (user, address(v), 1000)));
+        _transfer(p, token, ATTACKER, 1000);
+        _settle(p, rejected);
+        assertEq(token.balanceOf(user), 1000);
+    }
+
+    /// A `transferFrom` from the vault itself is measured through its balance.
+    function test_transferFromTheVaultIsCharged() public {
+        v.approveNatively(token, address(v), 1000);
+        Program memory p = _tracked(1);
+        _call(p, address(token), abi.encodeCall(IERC20.transferFrom, (address(v), ATTACKER, 150)));
+        _settle(p, _exceeded(150, 100));
+        p = _tracked(1);
+        _call(p, address(token), abi.encodeCall(IERC20.transferFrom, (address(v), ATTACKER, 60)));
+        _settle(p, "");
+        assertEq(_available(), 40);
     }
 
     /// A consumer's call policy that calls no `super` can't switch the limit off.
