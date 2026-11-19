@@ -567,6 +567,23 @@ contract TokenRateLimitTest is Test {
         v.setTokenLimit(address(v), 100, 1 hours);
     }
 
+    /// A token with no code would make every program's `balanceOf` read revert.
+    function test_tokenWithoutCodeCannotBeListed() public {
+        vm.expectRevert(TokenRateLimit.InvalidTokenRateLimit.selector);
+        v.setTokenLimit(address(0x1234), 100, 1 hours);
+    }
+
+    /// Re-setting a token's limit keeps the refill's carried-over remainder.
+    function test_changingATokenLimitKeepsTheRefillRemainder() public {
+        v.setTokenLimit(address(token), 10, 1 days);
+        _send(10, "");
+        vm.warp(block.timestamp + 7776); // 0.09 days: 0.9 tokens
+        v.setTokenLimit(address(token), 10, 1 days);
+        assertEq(_available(), 0);
+        vm.warp(block.timestamp + 7776);
+        assertEq(_available(), 1);
+    }
+
     /// Without `begin` there is no program to record into; the library reverts rather than
     /// writing over its depth counter.
     function test_withoutBeginReverts() public {
@@ -614,11 +631,12 @@ contract TokenRateLimitTest is Test {
     }
 
     function test_atMostEightTokens() public {
-        for (uint160 i = 1; i < 8; ++i) {
-            v.setTokenLimit(address(i), 1, 1);
+        for (uint256 i = 1; i < 8; ++i) {
+            v.setTokenLimit(address(new MintableToken()), 1, 1);
         }
+        address ninth = address(new MintableToken());
         vm.expectRevert(TokenRateLimit.TooManyRateLimitedTokens.selector);
-        v.setTokenLimit(address(9), 1, 1);
+        v.setTokenLimit(ninth, 1, 1);
         v.setTokenLimit(address(token), 7, 1); // updating an existing entry still works
     }
 

@@ -68,8 +68,8 @@ library TokenRateLimit {
     ///         token's budget.
     error TokenRateLimitExceeded(address token, uint256 amount, uint256 available);
 
-    /// @notice A zero token, this contract itself, a limit above `type(uint128).max`, or a
-    ///         period of zero or above `type(uint32).max`.
+    /// @notice A token with no code, this contract itself, a limit above `type(uint128).max`, or
+    ///         a period of zero or above `type(uint32).max`.
     error InvalidTokenRateLimit();
 
     /// @notice All `MAX_TOKENS` entries are in use.
@@ -124,11 +124,14 @@ library TokenRateLimit {
     ///         out a fresh budget.
     /// @dev **Do not call from a `trackState` function**: the budgets are protected storage, so a
     ///      program carrying the write can never settle. Reverts while a program is running
-    ///      (`TokenRateLimitChangedMidProgram`), so a callback can't change the list under it. Call it from a constructor, an
+    ///      (`TokenRateLimitChangedMidProgram`), so a callback can't change the list under it.
+    ///      Every program that runs code reads each listed token's `balanceOf`, so a token whose
+    ///      `balanceOf` can revert (paused, upgraded, self-destructed) blocks all settlement
+    ///      until it is cleared. Call it from a constructor, an
     ///      initializer or an admin function that is not `trackState`.
     function set(GasKillerSDK.TokenLimits storage t, address token, uint256 limit, uint256 period) internal {
         require(
-            token != address(0) && token != address(this) && limit <= type(uint128).max && period != 0
+            token.code.length != 0 && token != address(this) && limit <= type(uint128).max && period != 0
                 && period <= type(uint32).max,
             InvalidTokenRateLimit()
         );
@@ -136,16 +139,17 @@ library TokenRateLimit {
         uint256 n = t.count;
         uint256 i = _find(t, token, n);
         uint256 available = limit;
+        uint256 updated = block.timestamp;
         if (i == n) {
             require(n < MAX_TOKENS, TooManyRateLimitedTokens());
             t.count = n + 1;
         } else {
-            (uint256 held,) = _refilled(t.buckets[i]);
-            if (held < available) available = held;
+            (uint256 held, uint256 heldSince) = _refilled(t.buckets[i]);
+            // Below the new limit, keep the refill's carried-over remainder, as `_spend` does.
+            if (held < available) (available, updated) = (held, heldSince);
         }
-        t.buckets[i] = GasKillerSDK.TokenBucket(
-            token, uint32(period), uint32(block.timestamp), uint128(limit), uint128(available)
-        );
+        t.buckets[i] =
+            GasKillerSDK.TokenBucket(token, uint32(period), uint32(updated), uint128(limit), uint128(available));
         emit TokenRateLimitSet(token, limit, period);
     }
 
@@ -203,7 +207,9 @@ library TokenRateLimit {
     ///         raises the snapshot by its amount, so what it brings in offsets no send. The
     ///         amount is taken from the calldata before the call runs, so a token that delivers
     ///         less (a fee on transfer, a `false` return instead of a revert) is charged the
-    ///         difference: never too little. **Reject the op when it is true**, unless you
+    ///         difference: never too little. A token that reads a special amount, such as
+    ///         `type(uint256).max` for "the whole balance", saturates the charge and reverts the
+    ///         program; don't list one if programs deposit it that way. **Reject the op when it is true**, unless you
     ///         know what that function does: a token can grant an allowance some other way
     ///         (`increaseApproval`, ERC-777 `authorizeOperator`, `approveAndCall`) that moves
     ///         nothing during the program, so it would never be charged. The drop-ins revert with
@@ -357,7 +363,8 @@ library TokenRateLimit {
 
     // ------------------------------------------------------------------ internals
 
-    /// @dev Spends `amount` from `token`'s budget. A token cleared mid-program is skipped.
+    /// @dev Spends `amount` from `token`'s budget. Every snapshotted token is still listed, since
+    ///      the list can't change mid-program; the `i == n` return is only a guard.
     function _spend(GasKillerSDK.TokenLimits storage t, address token, uint256 amount) private {
         uint256 n = t.count;
         uint256 i = _find(t, token, n);

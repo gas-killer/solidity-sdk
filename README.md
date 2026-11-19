@@ -547,7 +547,8 @@ in offset a send. List the tokens your positions are held in, reject calls to le
 markets (anything that can pay your contract out against a future obligation) in
 `_authorizeLimitedCall`, and if your contract takes deposits, don't let programs call untrusted
 contracts. A signed deposit is counted at its calldata amount, so a token that delivers less (a fee
-on transfer, a `false` return) is charged the difference. Users' allowances on unlisted tokens aren't guarded.
+on transfer, a `false` return) is charged the difference, and one that reads `type(uint256).max` as
+"the whole balance" reverts the program. Users' allowances on unlisted tokens aren't guarded.
 
 A token is recognized by the address it is listed under: don't list a token that is also reachable
 through a second address sharing its balances (a legacy proxy or alias). Listing your contract
@@ -580,7 +581,10 @@ and `_afterLimitedProgram` instead.
   from a `trackState` function. As for ETH, a newly listed token starts with a full budget, and
   updating one keeps what its budget holds, capped at the new limit. Clearing a token drops its
   budget, so listing it again starts full: to tighten a limit during a drain, lower it instead.
-  Neither may run while a signed program is running (`TokenRateLimitChangedMidProgram`).
+  Neither may run while a signed program is running (`TokenRateLimitChangedMidProgram`), which
+  includes `_beforeLimitedProgram` and `_afterLimitedProgram`. A listed token must have code, and
+  one whose `balanceOf` reverts (paused, upgraded) blocks every program that runs code until you
+  clear it.
   `gasKillerTokenAllowance(token)` returns the budget.
 - The limit errs towards charging twice, never under-counting. An approval left standing is charged
   when its program ends, and the spender's later pull is charged again through the balance. In a

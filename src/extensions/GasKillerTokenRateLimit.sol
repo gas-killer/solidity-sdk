@@ -59,10 +59,12 @@ abstract contract GasKillerTokenRateLimit is GasKillerOutgoingRateLimit {
     function _allowTokenCall(address token, bytes4 selector, bytes memory data) internal view virtual returns (bool) {}
 
     /// @notice Override, in place of `_beforeProgram`, to act right before a signed program runs.
+    ///         The program has begun, so token limits can't be set or cleared here.
     function _beforeLimitedProgram() internal virtual {}
 
     /// @notice Override, in place of `_afterProgram`, to act right after a signed program ran;
-    ///         revert to reject it. Runs before the program's tokens are charged.
+    ///         revert to reject it. Runs before the program's tokens are charged, so token limits
+    ///         can't be set or cleared here either.
     function _afterLimitedProgram() internal virtual {}
 
     function _beforeProgram() internal override {

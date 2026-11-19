@@ -45,18 +45,20 @@ library OutgoingRateLimit {
     function set(GasKillerSDK.OutgoingBucket storage b, uint256 limit, uint256 period) internal {
         require(limit <= type(uint96).max && period != 0 && period <= type(uint32).max, InvalidOutgoingRateLimit());
         uint256 available = limit;
+        uint256 updated = block.timestamp;
         if (b.period != 0) {
             uint256 word;
             assembly ("memory-safe") {
                 word := sload(b.slot)
             }
-            (uint256 held,) = _refilled(word);
-            if (held < available) available = held;
+            (uint256 held, uint256 heldSince) = _refilled(word);
+            // Below the new limit, keep the refill's carried-over remainder, as `spend` does.
+            if (held < available) (available, updated) = (held, heldSince);
         }
         b.limit = uint96(limit);
         b.available = uint96(available);
         b.period = uint32(period);
-        b.updated = uint32(block.timestamp);
+        b.updated = uint32(updated);
         emit OutgoingRateLimitSet(limit, period);
     }
 

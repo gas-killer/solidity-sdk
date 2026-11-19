@@ -331,6 +331,18 @@ contract GasKillerOutgoingRateLimitTest is Test {
         assertEq(_available(t), 1.25 ether);
     }
 
+    /// Re-setting a limit keeps the refill's carried-over remainder: 0.9 wei accrued before the
+    /// update and 0.9 after make 1.
+    function test_changingTheLimitKeepsTheRefillRemainder() public {
+        t.setLimit(10, 1 days);
+        _drain(t, 10, "");
+        vm.warp(block.timestamp + 7776); // 0.09 days: 0.9 wei
+        t.setLimit(10, 1 days);
+        assertEq(_available(t), 0);
+        vm.warp(block.timestamp + 7776);
+        assertEq(_available(t), 1);
+    }
+
     /// Lowering the limit during a drain doesn't hand out a fresh budget.
     function test_loweringTheLimitDoesNotRefill() public {
         _drain(t, 1 ether, "");
