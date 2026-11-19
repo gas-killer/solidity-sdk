@@ -1852,7 +1852,7 @@ abstract contract GasKillerSDK is
     ///      the list: an opted-out program ignores `ranges`, and a guarded one with an empty list
     ///      reverts (`NoProtectedRanges`), so the list alone never turns protection off.
     ///      Every CALL, CREATE, CREATE2 and NESTED goes through `_callPolicy()`.
-    function _stateChangeHandler(bytes calldata storageUpdates, StorageGuard.ProtectedRange[] memory ranges) internal {
+    function _stateChangeHandler(bytes calldata storageUpdates, StorageGuard.ProtectedRange[] memory ranges) private {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
         _beforeProgram();
         CallPolicy memory policy = _callPolicy();

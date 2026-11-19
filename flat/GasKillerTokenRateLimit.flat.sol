@@ -1908,7 +1908,7 @@ abstract contract GasKillerSDK is
     ///      the list: an opted-out program ignores `ranges`, and a guarded one with an empty list
     ///      reverts (`NoProtectedRanges`), so the list alone never turns protection off.
     ///      Every CALL, CREATE, CREATE2 and NESTED goes through `_callPolicy()`.
-    function _stateChangeHandler(bytes calldata storageUpdates, StorageGuard.ProtectedRange[] memory ranges) internal {
+    function _stateChangeHandler(bytes calldata storageUpdates, StorageGuard.ProtectedRange[] memory ranges) private {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
         _beforeProgram();
         CallPolicy memory policy = _callPolicy();
@@ -2323,8 +2323,12 @@ library OutgoingRateLimit {
                 word := sload(b.slot)
             }
             (uint256 held, uint256 heldSince) = _refilled(word);
-            // Below the new limit, keep the refill's carried-over remainder, as `spend` does.
-            if (held < available) (available, updated) = (held, heldSince);
+            if (held < available) {
+                available = held;
+                // The carried-over remainder is time accrued at the old rate, so keep it only
+                // while the rate is the same: at a higher one it would credit at once.
+                if (limit == b.limit && period == b.period) updated = heldSince;
+            }
         }
         b.limit = uint96(limit);
         b.available = uint96(available);
@@ -2543,9 +2547,14 @@ library TokenRateLimit {
             require(n < MAX_TOKENS, TooManyRateLimitedTokens());
             t.count = n + 1;
         } else {
-            (uint256 held, uint256 heldSince) = _refilled(t.buckets[i]);
-            // Below the new limit, keep the refill's carried-over remainder, as `_spend` does.
-            if (held < available) (available, updated) = (held, heldSince);
+            GasKillerSDK.TokenBucket memory b = t.buckets[i];
+            (uint256 held, uint256 heldSince) = _refilled(b);
+            if (held < available) {
+                available = held;
+                // The carried-over remainder is time accrued at the old rate, so keep it only
+                // while the rate is the same: at a higher one it would credit at once.
+                if (limit == b.limit && period == b.period) updated = heldSince;
+            }
         }
         t.buckets[i] =
             GasKillerSDK.TokenBucket(token, uint32(period), uint32(updated), uint128(limit), uint128(available));
