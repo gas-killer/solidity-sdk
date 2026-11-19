@@ -335,31 +335,28 @@ struct NestedContext {
 ///      `OutgoingValueExceeded` once the total passes `valueCap`, and then calls `authorize`,
 ///      which reverts to reject the op. Before all that, a `CALL` to the running contract
 ///      itself reverts with `SelfCall` unless `allowSelfCall` allows its selector.
-/// @param targetFunction The selector the transition was signed for, handed to `authorize`.
-///        Zero in a nested callee's frame, which the tree binds by calldata hash only. The
-///        quorum signs it and nothing checks it against the program, so it is not a security
-///        boundary: a malicious quorum can claim whichever selector a hook trusts most.
 /// @param valueCap The most wei the program's ops may send in total. Value an op sends to the
 ///        running contract itself (an allowed self-call) stays in it and doesn't count.
 /// @param sent Wei sent so far by the program's ops. Start it at zero.
-/// @param authorize Called as `(targetFunction, index, kind, target, value, data)`. For a
+/// @param authorize Called as `(index, kind, target, value, data)`. For a
 ///        `CALL`, `data` is the calldata. For `CREATE`/`CREATE2` it is the initcode, with a zero
 ///        `target`, since the address isn't known before the deployment. For `NESTED`, `data` is
 ///        empty: the callee applies and checks its own signed frame.
-/// @param allowSelfCall Called as `(targetFunction, selector)` for a `CALL` to the running
-///        contract; returns whether to let it run. `selector` is zero only for empty calldata;
+/// @param allowSelfCall Called with the selector of a `CALL` to the running contract; returns
+///        whether to let it run. `selector` is zero only for empty calldata;
 ///        malformed calldata (1 to 3 bytes, or a zero selector with a payload) is rejected
 ///        without asking. Checked here rather than left to `authorize`, so an `authorize` that is
 ///        overridden can't drop it, and so a `CALL` elsewhere only pays one comparison. Inside a
 ///        `GasKillerSDK` contract, build the policy with its `_callPolicy`. A policy built by
 ///        hand should pass `StateChangeHandlerLib._rejectSelfCalls` unless it means to allow
 ///        self-calls; `_unrestrictedCalls()` allows them all.
+///      The policy isn't told which tracked function the program is for: the quorum names that
+///      function and nothing checks it against the program, so no rule may depend on it.
 struct CallPolicy {
-    bytes4 targetFunction;
     uint256 valueCap;
     uint256 sent;
-    function(bytes4, uint256, StateUpdateType, address, uint256, bytes memory) authorize;
-    function(bytes4, bytes4) view returns (bool) allowSelfCall;
+    function(uint256, StateUpdateType, address, uint256, bytes memory) authorize;
+    function(bytes4) view returns (bool) allowSelfCall;
 }
 
 /// @title StateChangeHandlerLib
@@ -471,20 +468,20 @@ library StateChangeHandlerLib {
     }
 
     /// @dev A policy that allows every op, self-calls included, and any total value, for callers
-    ///      outside a `GasKillerSDK` contract. `targetFunction` is zero.
+    ///      outside a `GasKillerSDK` contract.
     function _unrestrictedCalls() internal pure returns (CallPolicy memory) {
-        return CallPolicy(bytes4(0), type(uint256).max, 0, _allowCall, _allowAllSelfCalls);
+        return CallPolicy(type(uint256).max, 0, _allowCall, _allowAllSelfCalls);
     }
 
-    function _allowCall(bytes4, uint256, StateUpdateType, address, uint256, bytes memory) private pure {}
+    function _allowCall(uint256, StateUpdateType, address, uint256, bytes memory) private pure {}
 
-    function _allowAllSelfCalls(bytes4, bytes4) private pure returns (bool) {
+    function _allowAllSelfCalls(bytes4) private pure returns (bool) {
         return true;
     }
 
     /// @dev An `allowSelfCall` that rejects every self-call: the safe choice for a `CallPolicy`
     ///      built by hand.
-    function _rejectSelfCalls(bytes4, bytes4) internal pure returns (bool) {
+    function _rejectSelfCalls(bytes4) internal pure returns (bool) {
         return false;
     }
 
@@ -499,7 +496,7 @@ library StateChangeHandlerLib {
         bytes memory data
     ) private {
         if (value != 0) _countValue(policy, index, target, value);
-        policy.authorize(policy.targetFunction, index, kind, target, value, data);
+        policy.authorize(index, kind, target, value, data);
     }
 
     /// @dev Adds `value` to the policy's total, or reverts once it passes the cap. Value sent to
@@ -522,7 +519,7 @@ library StateChangeHandlerLib {
         uint256 length = data.length;
         bytes4 selector = bytes4(data); // zero-padded when shorter than 4 bytes
         bool wellFormed = length == 0 || (length >= 4 && selector != bytes4(0));
-        require(wellFormed && policy.allowSelfCall(policy.targetFunction, selector), SelfCall(index, selector));
+        require(wellFormed && policy.allowSelfCall(selector), SelfCall(index, selector));
     }
 
     /// @dev The STORE check of an unguarded run: none.
