@@ -2410,11 +2410,12 @@ library OutgoingRateLimit {
 ///      anything else the token implements, so the library reads `balanceOf(this)` for every
 ///      listed token right before the program's first op that runs code (`beforeOp`, from
 ///      `_authorizeCall`) and again when the program ends (`endProgram`), and charges the net
-///      decrease. A program that runs no code can't move tokens and reads nothing.
+///      decrease. A program that runs no code can't move tokens (see below for this contract
+///      itself) and reads nothing.
 ///
 ///      An approval moves nothing until it is used, possibly after the program. So `beforeOp`
-///      also records every `approve(spender, amount)` and `increaseAllowance(spender, amount)`
-///      call to a listed token, with the spender's allowance before it, and `endProgram` charges
+///      also records every `approve`, `increaseAllowance` and `decreaseAllowance` call to a
+///      listed token, with the spender's allowance before it, and `endProgram` charges
 ///      any allowance left above that. Approving the same spender again keeps one record, with
 ///      the lowest allowance seen before its approvals, so an allowance left standing is charged
 ///      once however many times it was set. Approving a router that then pulls the tokens is charged
@@ -2430,10 +2431,17 @@ library OutgoingRateLimit {
 ///      program's charge is its net decrease, tokens it receives count against those it sends,
 ///      and a re-entered frame's decrease is charged both to itself and to the frame around it.
 ///
-///      Because receipts offset sends, a program can pull tokens in from users who approved this
-///      contract, or unwind a position held in an unlisted token (an aToken, an LP or staking
-///      token), and send the proceeds out uncharged. List position tokens too, and reject
-///      `transferFrom` from third parties in `_authorizeCall`.
+///      Because receipts offset sends, a program could pull tokens in from users who approved
+///      this contract and send them on uncharged, so `beforeOp` flags a `transferFrom` on a listed
+///      token from anyone but this contract. It can still unwind a position held in an unlisted
+///      token (an aToken, an LP or staking token) and send the proceeds out uncharged: list
+///      position tokens too. Users' allowances on unlisted tokens aren't guarded at all.
+///
+///      A token is recognized by the address it is listed under. Don't list a token that can also
+///      be reached through a second address sharing its balances and allowances (a legacy proxy
+///      or alias): calls to that address aren't seen as calls to the token. Don't list this
+///      contract itself either: the snapshot is taken at the first op that runs code, so `STORE`
+///      ops before it could move its own token balance unmeasured.
 ///
 ///      The budgets live in the SDK's protected config namespace (`GasKillerSDK._tokenLimits()`),
 ///      so a signed program can't refill them with a `STORE`. All of the contract's programs
@@ -2564,8 +2572,10 @@ library TokenRateLimit {
     /// @notice Call from `_authorizeCall`, before every op that runs code. Takes the snapshot on
     ///         the program's first such op and records approvals of listed tokens.
     /// @return unrecognized True for a `CALL` to a listed token with a selector other than
-    ///         `transfer`, `transferFrom`, `approve`, `increaseAllowance` or `decreaseAllowance`
-    ///         (or calldata too short to carry one). **Reject the op when it is true**, unless you
+    ///         `transfer`, `approve`, `increaseAllowance`, `decreaseAllowance`, or `transferFrom`
+    ///         from this contract (or calldata too short to carry its arguments): a `transferFrom`
+    ///         from anyone else moves tokens users approved this contract for, which its balance
+    ///         doesn't show. **Reject the op when it is true**, unless you
     ///         know what that function does: a token can grant an allowance some other way
     ///         (`increaseApproval`, ERC-777 `authorizeOperator`, `approveAndCall`) that moves
     ///         nothing during the program, so it would never be charged. The drop-ins revert with
@@ -2588,23 +2598,27 @@ library TokenRateLimit {
         }
         if (kind != StateUpdateType.CALL) return false;
         bytes4 selector = bytes4(data); // zero-padded when shorter than 4 bytes
-        // Moves measured through the balance, or lowers an allowance: fine on any target, so a
+        // Moves this contract's tokens, measured through the balance: fine on any target, so a
         // transfer skips the lookup below.
-        if (
-            data.length >= 4 && (selector == _TRANSFER || selector == _TRANSFER_FROM || selector == _DECREASE_ALLOWANCE)
-        ) {
-            return false;
-        }
+        if (data.length >= 4 && selector == _TRANSFER) return false;
         uint256 n = (head >> 1) & 0xff;
         uint256 index;
         while (index < n && _tload(r + 1 + 3 * index) != uint160(target)) ++index;
         if (index == n) return false;
-        if ((selector != _APPROVE && selector != _INCREASE_ALLOWANCE) || data.length < 0x44) return true;
-        address spender;
+        if (data.length < 0x44) return true;
+        // The first argument: `transferFrom`'s owner, or the spender of an allowance call.
+        address account;
         assembly ("memory-safe") {
-            spender := and(mload(add(data, 0x24)), 0xffffffffffffffffffffffffffffffffffffffff)
+            account := and(mload(add(data, 0x24)), 0xffffffffffffffffffffffffffffffffffffffff)
         }
-        uint256 current = IERC20(target).allowance(address(this), spender);
+        // From this contract it is measured through the balance. From anyone else it moves tokens
+        // users approved this contract for, which the balance doesn't see (or sees offset by an
+        // equal send), so it is flagged.
+        if (selector == _TRANSFER_FROM) return account != address(this);
+        // `decreaseAllowance` is recorded like an approval: on a token that subtracts unchecked,
+        // or gives the selector another meaning, it could raise the allowance.
+        if (selector != _APPROVE && selector != _INCREASE_ALLOWANCE && selector != _DECREASE_ALLOWANCE) return true;
+        uint256 current = IERC20(target).allowance(address(this), account);
         // One record per (token, spender), holding the lowest allowance seen before any of its
         // approvals; `endProgram` charges what's left above that. A record per approval would
         // charge an allowance left standing once per approval. Taking the lowest, not the first,
@@ -2613,10 +2627,10 @@ library TokenRateLimit {
         // extra approval can only raise the charge.
         uint256 end = r + _APPROVALS + 3 * (head >> 16);
         uint256 slot = r + _APPROVALS;
-        while (slot < end && (_tload(slot) != index || _tload(slot + 1) != uint160(spender))) slot += 3;
+        while (slot < end && (_tload(slot) != index || _tload(slot + 1) != uint160(account))) slot += 3;
         if (slot == end) {
             _tstore(slot, index);
-            _tstore(slot + 1, uint160(spender));
+            _tstore(slot + 1, uint160(account));
             _tstore(slot + 2, current);
             _tstore(r, head + (1 << 16));
         } else if (current < _tload(slot + 2)) {
@@ -2974,9 +2988,10 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
 ///      `_beforeLimitedProgram` and `_afterLimitedProgram`.
 ///
 ///      A signed `CALL` to a listed token is rejected with `TokenRateLimit.UnrecognizedTokenCall`
-///      unless it is `transfer`, `transferFrom`, `approve`, `increaseAllowance` or
-///      `decreaseAllowance`, or `_allowTokenCall` allows it: any other function could grant an
-///      allowance the limit doesn't see.
+///      unless it is `transfer`, `approve`, `increaseAllowance`, `decreaseAllowance` or a
+///      `transferFrom` from this contract, or `_allowTokenCall` allows it: any other function
+///      could grant an allowance the limit doesn't see, and a `transferFrom` from anyone else
+///      moves tokens users approved this contract for, which its balance doesn't show.
 abstract contract GasKillerTokenRateLimit is GasKillerOutgoingRateLimit {
     /// @param ethLimit Most wei signed programs may send in one `ethPeriod`.
     /// @param ethPeriod Seconds over which the full `ethLimit` refills.
