@@ -144,9 +144,14 @@ library TokenRateLimit {
             require(n < MAX_TOKENS, TooManyRateLimitedTokens());
             t.count = n + 1;
         } else {
-            (uint256 held, uint256 heldSince) = _refilled(t.buckets[i]);
-            // Below the new limit, keep the refill's carried-over remainder, as `_spend` does.
-            if (held < available) (available, updated) = (held, heldSince);
+            GasKillerSDK.TokenBucket memory b = t.buckets[i];
+            (uint256 held, uint256 heldSince) = _refilled(b);
+            if (held < available) {
+                available = held;
+                // The carried-over remainder is time accrued at the old rate, so keep it only
+                // while the rate is the same: at a higher one it would credit at once.
+                if (limit == b.limit && period == b.period) updated = heldSince;
+            }
         }
         t.buckets[i] =
             GasKillerSDK.TokenBucket(token, uint32(period), uint32(updated), uint128(limit), uint128(available));

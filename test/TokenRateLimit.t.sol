@@ -573,6 +573,17 @@ contract TokenRateLimitTest is Test {
         v.setTokenLimit(address(0x1234), 100, 1 hours);
     }
 
+    /// Raising a token's limit doesn't credit the time accrued at the old rate at the new one.
+    function test_raisingATokenLimitDoesNotCreditOldTimeAtTheNewRate() public {
+        v.setTokenLimit(address(token), 1, 1 days);
+        _send(1, "");
+        vm.warp(block.timestamp + 23 hours);
+        v.setTokenLimit(address(token), 240, 1 days);
+        assertEq(_available(), 0);
+        vm.warp(block.timestamp + 1 hours);
+        assertEq(_available(), 10);
+    }
+
     /// Re-setting a token's limit keeps the refill's carried-over remainder.
     function test_changingATokenLimitKeepsTheRefillRemainder() public {
         v.setTokenLimit(address(token), 10, 1 days);

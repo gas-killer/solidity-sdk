@@ -343,6 +343,17 @@ contract GasKillerOutgoingRateLimitTest is Test {
         assertEq(_available(t), 1);
     }
 
+    /// Raising the limit doesn't credit the time already accrued at the old rate at the new one.
+    function test_raisingTheLimitDoesNotCreditOldTimeAtTheNewRate() public {
+        t.setLimit(1, 1 days);
+        _drain(t, 1, "");
+        vm.warp(block.timestamp + 23 hours); // nothing accrued yet at 1 wei a day
+        t.setLimit(1 ether, 1 days);
+        assertEq(_available(t), 0);
+        vm.warp(block.timestamp + 1 hours);
+        assertEq(_available(t), uint256(1 ether) / 24);
+    }
+
     /// Lowering the limit during a drain doesn't hand out a fresh budget.
     function test_loweringTheLimitDoesNotRefill() public {
         _drain(t, 1 ether, "");

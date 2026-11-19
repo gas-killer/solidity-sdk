@@ -52,8 +52,12 @@ library OutgoingRateLimit {
                 word := sload(b.slot)
             }
             (uint256 held, uint256 heldSince) = _refilled(word);
-            // Below the new limit, keep the refill's carried-over remainder, as `spend` does.
-            if (held < available) (available, updated) = (held, heldSince);
+            if (held < available) {
+                available = held;
+                // The carried-over remainder is time accrued at the old rate, so keep it only
+                // while the rate is the same: at a higher one it would credit at once.
+                if (limit == b.limit && period == b.period) updated = heldSince;
+            }
         }
         b.limit = uint96(limit);
         b.available = uint96(available);
