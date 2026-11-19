@@ -64,7 +64,7 @@ contract RateLimitedPolicedTreasury is PolicedTreasury {
         bytes memory data
     ) internal override {
         super._authorizeCall(targetFunction, index, kind, target, value, data);
-        if (target != address(this)) OutgoingRateLimit.spend(_outgoingBucket(), index, value);
+        OutgoingRateLimit.spend(_outgoingBucket(), index, target, value);
     }
 }
 

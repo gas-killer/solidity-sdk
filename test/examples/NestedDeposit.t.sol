@@ -33,11 +33,11 @@ contract RateLimitedGateway is DepositGateway {
         (a,,) = OutgoingRateLimit.allowance(_outgoingBucket());
     }
 
-    function _authorizeCall(bytes4, uint256 index, StateUpdateType, address, uint256 value, bytes memory)
+    function _authorizeCall(bytes4, uint256 index, StateUpdateType, address target, uint256 value, bytes memory)
         internal
         override
     {
-        OutgoingRateLimit.spend(_outgoingBucket(), index, value);
+        OutgoingRateLimit.spend(_outgoingBucket(), index, target, value);
     }
 }
 

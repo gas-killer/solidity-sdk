@@ -377,11 +377,19 @@ function _allowSelfCall(bytes4, bytes4 selector) internal pure override returns 
 }
 ```
 
-- **Scoping by tracked function.** The first argument, `targetFunction`, is the selector the
-  transition was signed for, so a flat consumer can allow a self-call only while a given tracked
-  function settles. In a nested callee's frame it is zero, since the tree binds a callee's call by
-  calldata hash only. A `GasKillerNestedSDK` contract that scopes by it must also allow the selector
-  for `bytes4(0)`, which allows it for every nested frame on the contract.
+- **Scoping by tracked function isn't a security boundary.** The first argument, `targetFunction`,
+  is the selector the transition was signed for. The quorum signs it and nothing checks it against
+  the program, so a compromised quorum can claim whichever tracked function you trust most, or zero
+  (a nested callee's frame, which a root frame can open on your own contract with a `NESTED` op to
+  itself). Treat a selector allowed for any `targetFunction` as allowed for every program. Scoping
+  only keeps an honest program for one function away from another's self-call. In a nested
+  callee's frame `targetFunction` is zero, since the tree binds a callee's call by calldata hash
+  only, so a `GasKillerNestedSDK` contract that scopes by it must also allow the selector for
+  `bytes4(0)`.
+- **An allowed function runs outside the policy.** It runs natively, so its own calls and any ETH
+  it sends on, including the self-call's value, bypass `_authorizeCall`, `_maxOutgoingValue` and the
+  rate limits below, with arguments the quorum chooses. Allow only functions that are safe with any
+  arguments, or that enforce their own limits.
 - **Selector zero** means empty calldata, a plain ETH transfer to the contract. Other calldata under
   4 bytes, and calldata with selector `0x00000000` and a payload, is always rejected: it would land
   in the fallback.
@@ -392,6 +400,11 @@ function _allowSelfCall(bytes4, bytes4 selector) internal pure override returns 
 - **Only `address(this)`.** Another contract that trusts yours as `msg.sender` (a vault gated
   `onlyRouter`, a sibling in a nested tree, a `ProxyAdmin` your contract owns) is reached by an
   ordinary `CALL`. The default doesn't cover it: restrict those calls in `_authorizeCall`.
+- **Upgrading.** Earlier SDK versions let every self-call through. If a tracked function of yours
+  uses `this.foo()` or `try this.foo()`, override `_allowSelfCall` in the same upgrade that brings
+  in this version. Otherwise its transitions revert with `SelfCall`, and because the transition
+  counter only advances on settlement, every later transition waits behind them until you deploy
+  the override.
 
 **The other hooks are off by default.** `_authorizeCall` and `_maxOutgoingValue` allow everything
 unless you override them. A consumer that makes no external calls and holds nothing has nothing
@@ -419,7 +432,9 @@ function _authorizeCall(bytes4, uint256 index, StateUpdateType kind, address tar
 `CREATE`, `CREATE2` and `NESTED` values. It is read once per program, and a program that would pass it
 reverts with `OutgoingValueExceeded(index, total, cap)` at the op that passes it, before that op
 runs. The total counts what the program sends, whatever `msg.value` brought in. Value an allowed
-self-call sends to your own contract stays in it and doesn't count.
+self-call sends to your own contract stays in it and doesn't count. Like `_allowSelfCall`, the cap
+gets a `targetFunction` the quorum chooses, so against a compromised quorum the effective cap is the
+largest it returns for any selector, zero included.
 
 - **Batches and trees.** Each transition of a `verifyAndUpdateBatch` is checked and capped on its
   own. In a nested tree, each frame runs its own contract's policy: the root frame's hooks get the
@@ -460,7 +475,7 @@ function _authorizeCall(bytes4 fn, uint256 index, StateUpdateType kind, address 
     override
 {
     super._authorizeCall(fn, index, kind, target, value, data);
-    OutgoingRateLimit.spend(_outgoingBucket(), index, value);
+    OutgoingRateLimit.spend(_outgoingBucket(), index, target, value);
 }
 ```
 

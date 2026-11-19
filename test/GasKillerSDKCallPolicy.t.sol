@@ -43,8 +43,8 @@ contract Treasury is GasKillerSDK {
 }
 
 /// A treasury whose tracked function `FN` calls `this.setBeneficiary`: it allows that one
-/// selector, for that one tracked function. Scoping by `targetFunction` only suits flat
-/// settlement; a nested frame sees zero.
+/// selector, for that one tracked function. The scoping keeps honest programs for other
+/// functions out; it doesn't stop a malicious quorum, which can sign any `targetFunction`.
 contract SelfCallingTreasury is Treasury {
     bytes4 public immutable fn;
 

@@ -9,9 +9,9 @@ import {GasKillerSDK} from "../GasKillerSDK.sol";
 ///         drain at most that instead of the whole balance at once.
 /// @dev Runs on the SDK's `OutgoingBucket` (`GasKillerSDK._outgoingBucket()`), which lives in the
 ///      SDK's protected config namespace: a signed program can't refill it with a `STORE`. Call
-///      `spend` from `_authorizeCall` for every op whose target isn't the contract itself (an
-///      allowed self-call keeps its value); ops that send nothing return straight away. The
-///      drop-in contracts in `src/extensions/GasKillerOutgoingRateLimit.sol` do exactly that.
+///      `spend` from `_authorizeCall` for every op. It skips ops that send nothing and ops whose
+///      target is the contract itself (an allowed self-call keeps its value). The drop-in
+///      contracts in `src/extensions/GasKillerOutgoingRateLimit.sol` do exactly that.
 ///
 ///      All of a contract's programs share the bucket, whether they settle alone, in a batch or
 ///      as frames of a nested tree. Only value sent by signed programs counts: the contract's own
@@ -49,11 +49,13 @@ library OutgoingRateLimit {
     }
 
     /// @notice Spends `value` from the budget, or reverts with `OutgoingRateLimitExceeded`.
+    ///         Spends nothing when `value` is zero or `target` is the running contract itself:
+    ///         value an allowed self-call sends stays in the contract.
     /// @dev One `SLOAD` and one `SSTORE` of the packed slot. Solidity packs the struct from the
     ///      low bits up: `limit` (0-95), `available` (96-191), `period` (192-223), `updated`
     ///      (224-255). `test_bucketPackingMatchesTheStruct` pins that.
-    function spend(GasKillerSDK.OutgoingBucket storage b, uint256 index, uint256 value) internal {
-        if (value == 0) return;
+    function spend(GasKillerSDK.OutgoingBucket storage b, uint256 index, address target, uint256 value) internal {
+        if (value == 0 || target == address(this)) return;
         uint256 word;
         assembly ("memory-safe") {
             word := sload(b.slot)
