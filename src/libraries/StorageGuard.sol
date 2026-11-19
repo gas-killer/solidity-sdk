@@ -4,7 +4,9 @@ pragma solidity ^0.8.27;
 /// @title StorageGuard
 /// @notice Checks a signed program's `STORE` writes against a denylist of protected storage
 ///         ranges, so a quorum-signed update cannot overwrite slots such as an `Ownable` owner,
-///         the `StateTracker` counter, the SDK's own configuration or EIP-1967 proxy slots.
+///         the `StateTracker` counter, the SDK's own configuration or EIP-1967 proxy slots. The
+///         SDK protects its own counter and configuration; anything else, proxy slots included,
+///         is protected only if the consumer lists it in `_protectedRanges`.
 ///         `StateChangeHandlerLib._run` calls `advance` right before every STORE executes.
 /// @dev The list denies rather than allows. Honest writes to mappings and dynamic arrays land on
 ///      keccak-derived slots spread across the whole slot space, which an allowlist of ranges

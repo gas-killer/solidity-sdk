@@ -237,6 +237,26 @@ function _protectedRanges() internal pure override returns (StorageGuard.Protect
 }
 ```
 
+> **Upgradeable contracts: protect the proxy slots yourself.** The SDK protects only its own
+> counter and configuration. Behind a UUPS, transparent or beacon proxy, a signed `STORE` to the
+> EIP-1967 implementation slot replaces your contract's code, and with it every protection, policy
+> and rate limit. List the EIP-1967 slots (they sort between the SDK's two ranges):
+>
+> ```solidity
+> bytes32 constant IMPLEMENTATION = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+> bytes32 constant BEACON = 0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50;
+> bytes32 constant ADMIN = 0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103;
+>
+> function _protectedRanges() internal pure override returns (StorageGuard.ProtectedRange[] memory r) {
+>     r = new StorageGuard.ProtectedRange[](3);
+>     r[0] = StorageGuard.ProtectedRange(uint256(IMPLEMENTATION), uint256(IMPLEMENTATION), StorageGuard.FULL);
+>     r[1] = StorageGuard.ProtectedRange(uint256(BEACON), uint256(BEACON), StorageGuard.FULL);
+>     r[2] = StorageGuard.ProtectedRange(uint256(ADMIN), uint256(ADMIN), StorageGuard.FULL);
+> }
+> ```
+>
+> A tracked function that upgrades the contract then can't be settled through Gas Killer.
+
 - `StorageGuard.FULL` protects every bit of every slot in the range. A narrower mask, on a single
   slot, protects part of a packed slot, such as an owner address that shares its slot with a counter.
 - The SDK merges your list with its own and validates the result once, in its constructor. A list
@@ -504,7 +524,8 @@ function _authorizeCall(uint256 index, StateUpdateType kind, address target, uin
   `OutgoingRateLimit.set`) fills the bucket. A later one keeps what it holds, capped at the new limit: lowering the limit during a drain doesn't
   hand out a fresh budget, and raising it refills at the new rate from there. Call it from the constructor, an initializer or an admin function,
   never from a `trackState` function: like the SDK's config setters, a program carrying that write
-  can never settle. Behind a proxy, set it in the initializer; until then the budget is empty and
+  can never settle. Behind a proxy, pass `(0, 0)` to the constructor and set it in the initializer;
+  until then the budget is empty and
   every op that sends value reverts. `gasKillerOutgoingAllowance()` returns what is available now,
   the limit and the period.
 - **Cost.** About 665 gas per op that sends value, plus about 5,000 once per settlement for the

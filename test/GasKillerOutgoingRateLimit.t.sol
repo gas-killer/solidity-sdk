@@ -65,11 +65,15 @@ contract RateLimitedPolicedTreasury is PolicedTreasury {
 }
 
 /// Its budget never set, as a proxy's storage is before its initializer runs.
+/// Deployed as an implementation behind a proxy would be: `(0, 0)` sets nothing, and the
+/// initializer sets the budget.
 contract UnsetRateLimitTreasury is GasKillerOutgoingRateLimit {
-    constructor(address registry) GasKillerOutgoingRateLimit(1, 1) {
+    constructor(address registry) GasKillerOutgoingRateLimit(0, 0) {
         _setSchnorrRegistry(registry);
-        GasKillerSDK.OutgoingBucket storage b = _outgoingBucket();
-        (b.limit, b.available, b.period, b.updated) = (0, 0, 0, 0);
+    }
+
+    function initialize(uint256 limit, uint256 period) external {
+        _setOutgoingRateLimit(limit, period);
     }
 
     receive() external payable {}
@@ -303,11 +307,17 @@ contract GasKillerOutgoingRateLimitTest is Test {
         assertEq(word >> 224, block.timestamp, "updated");
     }
 
+    /// `(0, 0)` leaves the budget unset, which sends nothing until the initializer sets it.
     function test_unsetBudgetSendsNothing() public {
         UnsetRateLimitTreasury u = new UnsetRateLimitTreasury(address(registry));
+        (uint256 available, uint256 limit, uint256 period) = u.gasKillerOutgoingAllowance();
+        assertEq(available + limit + period, 0);
         vm.deal(address(u), 1 ether);
         vm.warp(block.timestamp + 365 days);
         _drain(u, 1, _exceeded(1, 1, 0));
+        u.initialize(0.5 ether, 1 days);
+        _drain(u, 0.5 ether, "");
+        assertEq(_available(u), 0);
     }
 
     function test_zeroLimitSendsNothing() public {

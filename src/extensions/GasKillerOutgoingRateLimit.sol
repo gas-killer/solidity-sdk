@@ -21,10 +21,11 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
     /// @param limit Most wei signed programs may send in one `period`; zero sends none.
     /// @param period Seconds over which the full `limit` refills.
     /// @dev Sets the budget in the deploying contract's own storage. **Behind a proxy that is the
-    ///      implementation, not the proxy**: call `_setOutgoingRateLimit` from the initializer, or
-    ///      the proxy's budget stays empty and every op that sends value reverts.
+    ///      implementation, not the proxy**: pass `(0, 0)`, which sets nothing, and call
+    ///      `_setOutgoingRateLimit` from the initializer, or the proxy's budget stays empty and
+    ///      every op that sends value reverts.
     constructor(uint256 limit, uint256 period) {
-        OutgoingRateLimit.set(_outgoingBucket(), limit, period);
+        if (limit != 0 || period != 0) OutgoingRateLimit.set(_outgoingBucket(), limit, period);
     }
 
     /// @notice The budget: wei signed programs may send now, the limit and the period.
@@ -72,10 +73,10 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
 abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
     /// @param limit Most wei signed programs may send in one `period`; zero sends none.
     /// @param period Seconds over which the full `limit` refills.
-    /// @dev Behind a proxy, call `_setOutgoingRateLimit` from the initializer, as for
-    ///      `GasKillerOutgoingRateLimit`.
+    /// @dev Behind a proxy, pass `(0, 0)` and call `_setOutgoingRateLimit` from the
+    ///      initializer, as for `GasKillerOutgoingRateLimit`.
     constructor(uint256 limit, uint256 period) {
-        OutgoingRateLimit.set(_outgoingBucket(), limit, period);
+        if (limit != 0 || period != 0) OutgoingRateLimit.set(_outgoingBucket(), limit, period);
     }
 
     /// @notice The budget: wei signed programs may send now, the limit and the period.

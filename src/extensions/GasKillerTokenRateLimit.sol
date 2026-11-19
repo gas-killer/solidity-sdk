@@ -25,8 +25,8 @@ import {GasKillerOutgoingRateLimit, GasKillerNestedOutgoingRateLimit} from "./Ga
 abstract contract GasKillerTokenRateLimit is GasKillerOutgoingRateLimit {
     /// @param ethLimit Most wei signed programs may send in one `ethPeriod`.
     /// @param ethPeriod Seconds over which the full `ethLimit` refills.
-    /// @dev Behind a proxy, set the ETH limit and the token limits from the initializer (see
-    ///      `GasKillerOutgoingRateLimit`'s constructor).
+    /// @dev Behind a proxy, pass `(0, 0)` and set the ETH limit and the token limits from the
+    ///      initializer (see `GasKillerOutgoingRateLimit`'s constructor).
     constructor(uint256 ethLimit, uint256 ethPeriod) GasKillerOutgoingRateLimit(ethLimit, ethPeriod) {}
 
     /// @notice The budget for `token`: what signed programs may move out now, the limit and the
@@ -95,7 +95,8 @@ abstract contract GasKillerTokenRateLimit is GasKillerOutgoingRateLimit {
 abstract contract GasKillerNestedTokenRateLimit is GasKillerNestedOutgoingRateLimit {
     /// @param ethLimit Most wei signed programs may send in one `ethPeriod`.
     /// @param ethPeriod Seconds over which the full `ethLimit` refills.
-    /// @dev Behind a proxy, set the limits from the initializer, as for `GasKillerTokenRateLimit`.
+    /// @dev Behind a proxy, pass `(0, 0)` and set the limits from the initializer, as for
+    ///      `GasKillerTokenRateLimit`.
     constructor(uint256 ethLimit, uint256 ethPeriod) GasKillerNestedOutgoingRateLimit(ethLimit, ethPeriod) {}
 
     /// @notice The budget for `token`: what signed programs may move out now, the limit and the
