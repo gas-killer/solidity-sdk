@@ -39,6 +39,28 @@ contract TokenVault is GasKillerTokenRateLimit {
     function clearTokenLimit(address token) external {
         _clearTokenRateLimit(token);
     }
+
+    /// `mint` grants no allowance, so it is safe to allow; the inflow tests use it.
+    function _allowTokenCall(address, bytes4 selector) internal pure override returns (bool) {
+        return selector == MintableToken.mint.selector;
+    }
+}
+
+/// A consumer policy that allows everything and calls no `super`: the limits still apply,
+/// because the drop-in runs them outside the overridable hook.
+contract PermissiveTokenVault is GasKillerTokenRateLimit {
+    uint256 public seen;
+
+    constructor(address registry, address token) GasKillerTokenRateLimit(type(uint96).max, 1) {
+        _setSchnorrRegistry(registry);
+        _setTokenRateLimit(token, 100, 1 hours);
+    }
+
+    function _authorizeLimitedCall(uint256, StateUpdateType, address, uint256, bytes memory) internal override {
+        ++seen;
+    }
+
+    function _afterLimitedProgram() internal override {}
 }
 
 /// The nested drop-in.
@@ -273,6 +295,56 @@ contract TokenRateLimitTest is Test {
         }
         assertGe(_available(), 1000 - 300 + 208 - 4);
         assertLe(_available(), 1000 - 300 + 208);
+    }
+
+    /// Any other function on a listed token could grant an allowance the limit can't see, so it
+    /// is rejected: here the older OpenZeppelin `increaseApproval` and ERC-777 `authorizeOperator`.
+    function test_unrecognizedTokenCallIsRejected() public {
+        bytes4[2] memory selectors =
+            [bytes4(keccak256("increaseApproval(address,uint256)")), bytes4(keccak256("authorizeOperator(address)"))];
+        for (uint256 i = 0; i < 2; ++i) {
+            Program memory p = _tracked(1);
+            _call(p, address(token), abi.encodeWithSelector(selectors[i], ATTACKER, type(uint256).max));
+            _settle(
+                p,
+                abi.encodeWithSelector(TokenRateLimit.UnrecognizedTokenCall.selector, 1, address(token), selectors[i])
+            );
+        }
+    }
+
+    /// Calldata too short for a selector reaches the token's fallback, so it is rejected too.
+    function test_emptyCalldataToAListedTokenIsRejected() public {
+        Program memory p = _tracked(1);
+        _call(p, address(token), "");
+        _settle(p, abi.encodeWithSelector(TokenRateLimit.UnrecognizedTokenCall.selector, 1, address(token), bytes4(0)));
+    }
+
+    /// Unlisted targets aren't restricted: any function may be called on them.
+    function test_unrecognizedCallToAnUnlistedTokenIsAllowed() public {
+        Program memory p = _tracked(1);
+        _call(p, address(other), abi.encodeCall(MintableToken.mint, (ATTACKER, 5)));
+        _settle(p, "");
+        assertEq(other.balanceOf(ATTACKER), 5);
+    }
+
+    /// `decreaseAllowance` is recognized: it only lowers an allowance.
+    function test_decreaseAllowanceIsRecognized() public {
+        v.approveNatively(token, ATTACKER, 30);
+        Program memory p = _tracked(1);
+        _call(p, address(token), abi.encodeWithSignature("decreaseAllowance(address,uint256)", ATTACKER, 10));
+        _settle(p, "");
+        assertEq(token.allowance(address(v), ATTACKER), 20);
+        assertEq(_available(), 100, "nothing charged");
+    }
+
+    /// A consumer's call policy that calls no `super` can't switch the limit off.
+    function test_consumerPolicyCannotSkipTheLimit() public {
+        PermissiveTokenVault pv = new PermissiveTokenVault(address(registry), address(token));
+        token.mint(address(pv), 1000);
+        v = TokenVault(address(pv)); // the helpers settle against `v`
+        _send(150, _exceeded(150, 100));
+        _send(100, "");
+        assertEq(pv.seen(), 1, "the consumer's hook still ran");
     }
 
     /// Only the increase over the allowance the spender already had is charged.

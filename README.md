@@ -467,7 +467,14 @@ contract Vault is GasKillerOutgoingRateLimit {
 }
 ```
 
-Use `GasKillerNestedOutgoingRateLimit` in place of `GasKillerNestedSDK`. A contract that already
+Use `GasKillerNestedOutgoingRateLimit` in place of `GasKillerNestedSDK`.
+
+**In a rate-limited contract, write your call policy in `_authorizeLimitedCall`.** It takes the same
+arguments as `_authorizeCall` and runs before the op is charged. The drop-in finalizes
+`_authorizeCall`, so overriding it is a compile error: otherwise an override that forgot `super`
+would switch the limit off without any error.
+
+A contract that already
 inherits another SDK base (Solidity would otherwise ask it to re-override every function the two
 paths both touch) can call the `OutgoingRateLimit` library from its own `_authorizeCall` instead:
 
@@ -506,7 +513,7 @@ function _authorizeCall(uint256 index, StateUpdateType kind, address target, uin
 `GasKillerTokenRateLimit` (and `GasKillerNestedTokenRateLimit`) extends the ETH limit with
 per-token budgets: for each ERC-20 you list, signed programs may move out at most `limit` per
 `period`, refilling continuously. Up to 8 tokens; unlisted tokens aren't limited, so restrict
-those in `_authorizeCall` if you hold any. It is a separate base so a contract that only limits ETH
+those in `_authorizeLimitedCall` if you hold any. It is a separate base so a contract that only limits ETH
 doesn't pay for it.
 
 ```solidity
@@ -531,14 +538,23 @@ open: a program can pull tokens in from users who approved your contract (`trans
 x)`) and send them on, or unwind a position you hold in a form you haven't listed (an aToken, an LP
 or staking token) into a listed token and send that, and neither is charged. List the tokens your
 positions are held in as well, and reject `transferFrom` from anyone but your contract in
-`_authorizeCall`.
+`_authorizeLimitedCall`.
 
 **Approvals.** An approval moves nothing until it is used, possibly long after the program. So an
 `approve` or `increaseAllowance` call to a listed token is recorded with the spender's allowance
 before it, and at the end any allowance left above that is charged in full. Approving a router that
 pulls the tokens in the same program is charged once, through the balance; an approval left
 standing is charged, and an unlimited one always exceeds the budget. Other ways of granting an
-allowance aren't seen, such as `approveAndCall` or Permit2: reject them in `_authorizeCall`.
+allowance aren't seen by the balance check, so a signed `CALL` to a listed token is rejected with
+`TokenRateLimit.UnrecognizedTokenCall` unless it is `transfer`, `transferFrom`, `approve`,
+`increaseAllowance` or `decreaseAllowance`: anything else (`increaseApproval`, ERC-777
+`authorizeOperator`, `approveAndCall`) might grant an allowance the limit can't charge. To allow a
+function you know is safe, such as WETH's `withdraw`, override `_allowTokenCall(token, selector)`.
+An allowance system outside the token, such as Permit2, isn't seen at all: reject calls to it in
+`_authorizeLimitedCall`.
+
+The token drop-in also finalizes `_beforeProgram` and `_afterProgram`; use `_beforeLimitedProgram`
+and `_afterLimitedProgram` instead.
 
 - The budgets live in the SDK's protected config namespace, like the ETH budget.
 - A program that runs no code can't move tokens, so it reads no balances.
@@ -550,6 +566,8 @@ allowance aren't seen, such as `approveAndCall` or Permit2: reject them in `_aut
   again to the frame around it: conservative, never under-counted.
 - A contract that already inherits another SDK base can use the `TokenRateLimit` library directly:
   `begin` in `_beforeProgram`, `beforeOp` in `_authorizeCall`, `endProgram` in `_afterProgram`.
+  Reject the op when `beforeOp` returns true (an unrecognized call to a listed token), and make sure
+  no override can skip these calls.
 - **Cost.** For a program with one token `transfer`, about +4,200 with no tokens listed, +9,300 with
   one and +20,600 with four. Each listed token costs two `balanceOf` calls and a budget read and
   write per settlement that runs code.
