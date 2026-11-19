@@ -15,7 +15,8 @@ import {GasKillerSDK} from "../GasKillerSDK.sol";
 ///
 ///      All of a contract's programs share the bucket, whether they settle alone, in a batch or
 ///      as frames of a nested tree. Only value sent by signed programs counts: the contract's own
-///      functions, called natively, spend nothing. It limits ETH only; a token transfer moves no
+///      functions, called natively, spend nothing, so a balance a program credits with a `STORE`
+///      and the contract later pays out isn't limited. It limits ETH only; a token transfer moves no
 ///      value, so restrict those in `_authorizeCall`. Timestamps are kept in 32 bits, which holds
 ///      until 2106.
 library OutgoingRateLimit {

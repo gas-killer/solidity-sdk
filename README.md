@@ -363,6 +363,18 @@ contract holds, and send its ETH through the value of a `CALL`, `CREATE`, `CREAT
 Settlement rejects calls to your own contract by default and gives you hooks to restrict the rest.
 They all run before the op does, and a revert in any of them reverts the whole transition.
 
+**What these limits cover, and what they don't.** The call policy and the rate limits below see only
+what a program's own ops do. A compromised quorum can also `STORE` into your contract's own state,
+for example crediting itself a large balance in a mapping (mapping entries can't be protected, see
+[Protected storage](#protected-storage)), and then withdraw through your contract's normal functions
+in a later transaction. Nothing here sees that. For a contract whose payouts follow its own balances,
+such as a vault, an AMM or a staking pool, these limits close the direct route only; bounding the
+indirect one means having your own payout functions spend from the same budget as well.
+
+None of the hooks is told which tracked function a transition is for. The quorum names that
+function and nothing checks it against the program, so a rule that depended on it would only look
+narrower than it is: every hook has to be safe for any program.
+
 **Self-calls are rejected by default.** A `CALL` from a signed program to your own contract runs
 with `msg.sender == address(this)`, so it would reach self-gated functions (self-governed setters,
 `onlyGovernance`-style admin) and could run a tracked function natively, bumping the transition
@@ -372,20 +384,12 @@ affected. gas-analyzer does emit a tracked function's `this.foo()`, including `t
 a self-`CALL`, so if your tracked functions do that, allow those selectors and only those:
 
 ```solidity
-function _allowSelfCall(bytes4, bytes4 selector) internal pure override returns (bool) {
+function _allowSelfCall(bytes4 selector) internal pure override returns (bool) {
     return selector == this.doThing.selector;
 }
 ```
 
-- **Scoping by tracked function isn't a security boundary.** The first argument, `targetFunction`,
-  is the selector the transition was signed for. The quorum signs it and nothing checks it against
-  the program, so a compromised quorum can claim whichever tracked function you trust most, or zero
-  (a nested callee's frame, which a root frame can open on your own contract with a `NESTED` op to
-  itself). Treat a selector allowed for any `targetFunction` as allowed for every program. Scoping
-  only keeps an honest program for one function away from another's self-call. In a nested
-  callee's frame `targetFunction` is zero, since the tree binds a callee's call by calldata hash
-  only, so a `GasKillerNestedSDK` contract that scopes by it must also allow the selector for
-  `bytes4(0)`.
+- **One list for every program.** Root frames and nested callee frames use the same list.
 - **An allowed function runs outside the policy.** It runs natively, so its own calls and any ETH
   it sends on, including the self-call's value, bypass `_authorizeCall`, `_maxOutgoingValue` and the
   rate limits below, with arguments the quorum chooses. Allow only functions that are safe with any
@@ -411,7 +415,7 @@ unless you override them. A consumer that makes no external calls and holds noth
 more to restrict. One that holds value should write a policy.
 
 **`_authorizeCall`** is called before every `CALL`, `CREATE`, `CREATE2` and `NESTED` op with the
-signed selector, the op's position, its kind, its target, its value and its data (a `CALL`'s
+op's position, its kind, its target, its value and its data (a `CALL`'s
 calldata, or the initcode of a deployment, whose target is zero since the address isn't known yet).
 Revert to reject the op. It is code rather than a list because a signed program doesn't carry the
 user's arguments or `msg.sender`, and honest programs often call targets known only at run time,
@@ -419,7 +423,7 @@ such as a user-supplied token or the caller being paid out. It isn't `view`, so 
 don't declare your override `view` if you might later combine it with the rate limit below.
 
 ```solidity
-function _authorizeCall(bytes4, uint256 index, StateUpdateType kind, address target, uint256, bytes memory data)
+function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256, bytes memory data)
     internal
     override
 {
@@ -428,28 +432,28 @@ function _authorizeCall(bytes4, uint256 index, StateUpdateType kind, address tar
 }
 ```
 
-**`_maxOutgoingValue(targetFunction)`** caps the wei one program may send, summed over its `CALL`,
-`CREATE`, `CREATE2` and `NESTED` values. It is read once per program, and a program that would pass it
-reverts with `OutgoingValueExceeded(index, total, cap)` at the op that passes it, before that op
-runs. The total counts what the program sends, whatever `msg.value` brought in. Value an allowed
-self-call sends to your own contract stays in it and doesn't count. Like `_allowSelfCall`, the cap
-gets a `targetFunction` the quorum chooses, so against a compromised quorum the effective cap is the
-largest it returns for any selector, zero included.
+**`_maxOutgoingValue()`** caps the wei one program may send, summed over its `CALL`, `CREATE`,
+`CREATE2` and `NESTED` values. It is read once per program, and a program that would pass it reverts
+with `OutgoingValueExceeded(index, total, cap)` at the op that passes it, before that op runs. The
+total counts what the program sends, whatever `msg.value` brought in. Value an allowed self-call
+sends to your own contract stays in it and doesn't count. **It isn't a drain bound:** a compromised
+quorum can sign any number of transitions, or batch items, each capped on its own. It catches an
+honest program sending more than intended; to bound outflow over time, use a rate limit below.
 
 - **Batches and trees.** Each transition of a `verifyAndUpdateBatch` is checked and capped on its
-  own. In a nested tree, each frame runs its own contract's policy: the root frame's hooks get the
-  signed selector, and a callee's frame gets zero, since the tree binds a callee's call by calldata
-  hash only. A `NESTED` op's target and value go through the parent's policy; the callee checks its
-  own frame.
+  own. In a nested tree, each frame runs its own contract's policy. A `NESTED` op's target and value
+  go through the parent's policy; the callee checks its own frame.
 - **Opting out of protected storage** doesn't turn the call policy off.
 
 ### Rate-limiting outgoing ETH
 
-`_maxOutgoingValue` caps one program. To bound what a compromised quorum can drain over time, across
-any number of programs, add the optional outgoing rate limit: a token bucket that holds at most
-`limit` wei and refills continuously, a full `limit` every `period` seconds. Every op that sends value
-out of the contract spends from it (an allowed self-call's value stays and spends nothing), and one that would send more than the bucket holds reverts the transition with
-`OutgoingRateLimitExceeded(index, value, available)` before it runs.
+`_maxOutgoingValue` caps one program. To bound what signed programs can send over time, across any
+number of programs, add the optional outgoing rate limit: a token bucket that holds at most `limit`
+wei and refills continuously, a full `limit` every `period` seconds. Every op that sends value out of
+the contract spends from it (an allowed self-call's value stays and spends nothing), and one that
+would send more than the bucket holds reverts the transition with
+`OutgoingRateLimitExceeded(index, value, available)` before it runs. Because the bucket starts full
+and refills continuously, up to about twice `limit` can leave within one `period`.
 
 Inherit the drop-in instead of the SDK base:
 
@@ -470,11 +474,11 @@ paths both touch) can call the `OutgoingRateLimit` library from its own `_author
 ```solidity
 constructor() { OutgoingRateLimit.set(_outgoingBucket(), 10 ether, 1 days); }
 
-function _authorizeCall(bytes4 fn, uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
+function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
     internal
     override
 {
-    super._authorizeCall(fn, index, kind, target, value, data);
+    super._authorizeCall(index, kind, target, value, data);
     OutgoingRateLimit.spend(_outgoingBucket(), index, target, value);
 }
 ```
@@ -485,6 +489,8 @@ function _authorizeCall(bytes4 fn, uint256 index, StateUpdateType kind, address 
   frames alike. A `NESTED` op's value spends the parent's bucket; a callee with its own limit spends
   its own.
 - **Signed programs only.** The contract's own functions, called natively, spend nothing from it.
+  So a quorum that credits itself a balance with a `STORE` and withdraws through your own
+  `withdraw()` isn't limited: see [What these limits cover](#restricting-calls).
 - **ETH only.** A token transfer sends no value; see per-token limits below.
 - **Changing the limit.** `_setOutgoingRateLimit(limit, period)` (or `OutgoingRateLimit.set`)
   resets the bucket to full. Call it from the constructor, an initializer or an admin function,
@@ -492,7 +498,7 @@ function _authorizeCall(bytes4 fn, uint256 index, StateUpdateType kind, address 
   can never settle. Behind a proxy, set it in the initializer; until then the budget is empty and
   every op that sends value reverts. `gasKillerOutgoingAllowance()` returns what is available now,
   the limit and the period.
-- **Cost.** About 655 gas per op that sends value, plus about 5,000 once per settlement for the
+- **Cost.** About 665 gas per op that sends value, plus about 5,000 once per settlement for the
   first (cold) read and write of the budget slot. Ops that send nothing pay nothing extra.
 
 ### Rate-limiting outgoing tokens
@@ -520,7 +526,12 @@ Pass `type(uint96).max` as the ETH limit to leave ETH effectively unlimited.
 `transferFrom` by a contract holding an allowance (a router pulling during a signed `CALL`), or
 through whatever else the token implements, so the limit reads `balanceOf(this)` for every listed
 token right before the program's first op that runs code, and again when the program ends, and
-charges the decrease. Tokens the program receives offset tokens it sends.
+charges the decrease. Tokens the program receives offset tokens it sends, which leaves two routes
+open: a program can pull tokens in from users who approved your contract (`transferFrom(user, this,
+x)`) and send them on, or unwind a position you hold in a form you haven't listed (an aToken, an LP
+or staking token) into a listed token and send that, and neither is charged. List the tokens your
+positions are held in as well, and reject `transferFrom` from anyone but your contract in
+`_authorizeCall`.
 
 **Approvals.** An approval moves nothing until it is used, possibly long after the program. So an
 `approve` or `increaseAllowance` call to a listed token is recorded with the spender's allowance
@@ -550,19 +561,24 @@ m zero-value `CALL`s to a warm, empty contract, against the same settlement befo
 
 | m `CALL`s | Before | Default policy | Small policy |
 |---|---|---|---|
-| 1 | 33,576 | +548 (+1.6%) | +590 (+1.8%) |
-| 8 | 47,166 | +1,931 (+4.1%) | +2,281 (+4.8%) |
-| 32 | 94,129 | +6,672 (+7.1%) | +8,078 (+8.6%) |
+| 1 | 33,576 | +446 (+1.3%) | +488 (+1.5%) |
+| 8 | 47,166 | +1,738 (+3.7%) | +2,088 (+4.4%) |
+| 32 | 94,129 | +6,164 (+6.5%) | +7,570 (+8.0%) |
 
-That is about 200 gas per op with the hooks left as they are (about 43 of it the self-call check),
-about 240 with a one-target check and a cap, and about 350 per program. An allowed self-call costs
-about 38 more for a one-selector `_allowSelfCall` than for one that allows everything. A program of
+That is about 185 gas per op with the hooks left as they are (about 43 of it the self-call check),
+about 230 with a one-target check and a cap, and about 260 per program. An allowed self-call costs
+about 37 more for a one-selector `_allowSelfCall` than for one that allows everything. A program of
 `STORE`s only pays the per-program part and about 3 gas per op. A real `CALL` pays a cold account
 access (2,600) and its callee's work, so the share is smaller than against this empty callee.
 
-**Not covered:** checking a call's arguments against what the user asked for. The program doesn't
-carry the user's input, so `transfer(to, amount)` is judged on its own: the policy can pin `to` to a
-known payee, but can't tell a legitimate payout to an arbitrary user from theft.
+**Not covered:**
+- Checking a call's arguments against what the user asked for. The program doesn't carry the user's
+  input, so `transfer(to, amount)` is judged on its own: the policy can pin `to` to a known payee,
+  but can't tell a legitimate payout to an arbitrary user from theft.
+- Value that leaves through your contract's own functions after a program has written its state,
+  such as a balance a `STORE` credited (see [What these limits cover](#restricting-calls)).
+- Checking that a program is what the tracked function would have produced. That is what the
+  quorum attests; only a fraud or validity proof of the execution would remove that trust.
 
 ## Repository Structure
 

@@ -32,10 +32,16 @@ import {StateUpdateType} from "../StateChangeHandlerLib.sol";
 ///      program's charge is its net decrease, tokens it receives count against those it sends,
 ///      and a re-entered frame's decrease is charged both to itself and to the frame around it.
 ///
+///      Because receipts offset sends, a program can pull tokens in from users who approved this
+///      contract, or unwind a position held in an unlisted token (an aToken, an LP or staking
+///      token), and send the proceeds out uncharged. List position tokens too, and reject
+///      `transferFrom` from third parties in `_authorizeCall`.
+///
 ///      The budgets live in the SDK's protected config namespace (`GasKillerSDK._tokenLimits()`),
 ///      so a signed program can't refill them with a `STORE`. All of the contract's programs
 ///      share them. Only signed programs are charged: the contract's own functions, called
-///      natively, are not.
+///      natively, are not, so a balance a program credits with a `STORE` and the contract later
+///      pays out isn't charged either.
 library TokenRateLimit {
     /// @notice A program's net outflow of `token`, with allowances it left standing, exceeds the
     ///         token's budget.

@@ -42,18 +42,12 @@ contract Treasury is GasKillerSDK {
     uint256 public limit; // slot 1
 }
 
-/// A treasury whose tracked function `FN` calls `this.setBeneficiary`: it allows that one
-/// selector, for that one tracked function. The scoping keeps honest programs for other
-/// functions out; it doesn't stop a malicious quorum, which can sign any `targetFunction`.
+/// A treasury whose tracked functions call `this.setBeneficiary`: it allows that one selector.
 contract SelfCallingTreasury is Treasury {
-    bytes4 public immutable fn;
+    constructor(address registry) Treasury(registry) {}
 
-    constructor(address registry, bytes4 fn_) Treasury(registry) {
-        fn = fn_;
-    }
-
-    function _allowSelfCall(bytes4 targetFunction, bytes4 selector) internal view override returns (bool) {
-        return targetFunction == fn && selector == this.setBeneficiary.selector;
+    function _allowSelfCall(bytes4 selector) internal pure override returns (bool) {
+        return selector == this.setBeneficiary.selector;
     }
 }
 
@@ -67,11 +61,11 @@ contract DepositingTreasury is Treasury {
         deposits += msg.value;
     }
 
-    function _allowSelfCall(bytes4, bytes4 selector) internal pure override returns (bool) {
+    function _allowSelfCall(bytes4 selector) internal pure override returns (bool) {
         return selector == this.deposit.selector;
     }
 
-    function _maxOutgoingValue(bytes4) internal pure override returns (uint256) {
+    function _maxOutgoingValue() internal pure override returns (uint256) {
         return 0;
     }
 }
@@ -85,7 +79,7 @@ contract ZeroAllowingTreasury is Treasury {
         beneficiary = address(0xBAD);
     }
 
-    function _allowSelfCall(bytes4, bytes4 selector) internal pure override returns (bool) {
+    function _allowSelfCall(bytes4 selector) internal pure override returns (bool) {
         return selector == bytes4(0) || selector == bytes4(0xaabbcc00);
     }
 }
@@ -105,14 +99,11 @@ contract PolicedTreasury is Treasury {
         payee = payee_;
     }
 
-    function _authorizeCall(
-        bytes4,
-        uint256 index,
-        StateUpdateType kind,
-        address target,
-        uint256 value,
-        bytes memory data
-    ) internal virtual override {
+    function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
+        internal
+        virtual
+        override
+    {
         if (kind == StateUpdateType.CREATE || kind == StateUpdateType.CREATE2) {
             revert NoDeployments(index);
         }
@@ -127,7 +118,7 @@ contract PolicedTreasury is Treasury {
         }
     }
 
-    function _maxOutgoingValue(bytes4) internal pure override returns (uint256) {
+    function _maxOutgoingValue() internal pure override returns (uint256) {
         return 1 ether;
     }
 }
@@ -141,23 +132,18 @@ contract UnguardedPolicedTreasury is PolicedTreasury {
     }
 }
 
-/// Only a value cap, which depends on the signed selector.
+/// Only a value cap: 1 ether per program.
 contract CappedTreasury is Treasury {
-    bytes4 public immutable capped;
+    constructor(address registry) Treasury(registry) {}
 
-    constructor(address registry, bytes4 capped_) Treasury(registry) {
-        capped = capped_;
-    }
-
-    function _maxOutgoingValue(bytes4 targetFunction) internal view override returns (uint256) {
-        return targetFunction == capped ? 1 ether : 0;
+    function _maxOutgoingValue() internal pure override returns (uint256) {
+        return 1 ether;
     }
 }
 
 /// Records every op its hook sees.
 contract RecordingTreasury is Treasury {
     struct Seen {
-        bytes4 targetFunction;
         uint256 index;
         StateUpdateType kind;
         address target;
@@ -173,15 +159,11 @@ contract RecordingTreasury is Treasury {
         return _seen;
     }
 
-    function _authorizeCall(
-        bytes4 targetFunction,
-        uint256 index,
-        StateUpdateType kind,
-        address target,
-        uint256 value,
-        bytes memory data
-    ) internal override {
-        _seen.push(Seen(targetFunction, index, kind, target, value, keccak256(data)));
+    function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
+        internal
+        override
+    {
+        _seen.push(Seen(index, kind, target, value, keccak256(data)));
     }
 }
 
@@ -453,7 +435,7 @@ contract GasKillerSDKCallPolicyTest is Test {
     }
 
     function test_allowedSelfCallSettles() public {
-        SelfCallingTreasury t = new SelfCallingTreasury(address(registry), FN);
+        SelfCallingTreasury t = new SelfCallingTreasury(address(registry));
         _funded(t);
         Program memory p = _tracked(t, 1);
         _call(p, address(t), 0, abi.encodeCall(Treasury.setBeneficiary, (PAYEE)));
@@ -464,7 +446,7 @@ contract GasKillerSDKCallPolicyTest is Test {
 
     /// Allowing one selector doesn't open the contract's other self-gated functions.
     function test_allowListLeavesOtherSelectorsClosed() public {
-        SelfCallingTreasury t = new SelfCallingTreasury(address(registry), FN);
+        SelfCallingTreasury t = new SelfCallingTreasury(address(registry));
         _funded(t);
         Program memory p = _tracked(t, 1);
         _call(p, address(t), 0, abi.encodeCall(Treasury.setLimit, (1)));
@@ -472,13 +454,14 @@ contract GasKillerSDKCallPolicyTest is Test {
         assertEq(t.limit(), 0);
     }
 
-    /// The allow-list can depend on the tracked function the transition was signed for.
-    function test_allowListDependsOnTheSignedSelector() public {
-        SelfCallingTreasury t = new SelfCallingTreasury(address(registry), FN);
+    /// The allow-list is the same whichever tracked function the quorum names.
+    function test_allowListAppliesWhateverTheSignedSelector() public {
+        SelfCallingTreasury t = new SelfCallingTreasury(address(registry));
         _funded(t);
         Program memory p = _tracked(t, 1);
         _call(p, address(t), 0, abi.encodeCall(Treasury.setBeneficiary, (PAYEE)));
-        _settle(t, p, bytes4(keccak256("other()")), _selfCall(1, Treasury.setBeneficiary.selector));
+        _settle(t, p, bytes4(keccak256("other()")), "");
+        assertEq(t.beneficiary(), PAYEE);
     }
 
     // ---------------------------------------------------------------- value cap
@@ -499,7 +482,7 @@ contract GasKillerSDKCallPolicyTest is Test {
     }
 
     function test_capCountsEveryValueOpInTheProgram() public {
-        CappedTreasury t = new CappedTreasury(address(registry), FN);
+        CappedTreasury t = new CappedTreasury(address(registry));
         _funded(t);
         Program memory p = _tracked(t, 3);
         _call(p, ATTACKER, 0.6 ether, "");
@@ -510,7 +493,7 @@ contract GasKillerSDKCallPolicyTest is Test {
     }
 
     function test_capIncludesCreate2() public {
-        CappedTreasury t = new CappedTreasury(address(registry), FN);
+        CappedTreasury t = new CappedTreasury(address(registry));
         _funded(t);
         Program memory p = _tracked(t, 2);
         _create(p, 0.5 ether);
@@ -519,7 +502,7 @@ contract GasKillerSDKCallPolicyTest is Test {
     }
 
     function test_programExactlyAtTheCapSettles() public {
-        CappedTreasury t = new CappedTreasury(address(registry), FN);
+        CappedTreasury t = new CappedTreasury(address(registry));
         _funded(t);
         Program memory p = _tracked(t, 3);
         _call(p, ATTACKER, 0.6 ether, "");
@@ -530,23 +513,25 @@ contract GasKillerSDKCallPolicyTest is Test {
         assertEq(address(t).balance, 9 ether);
     }
 
-    function test_capDependsOnTheSignedSelector() public {
-        CappedTreasury t = new CappedTreasury(address(registry), FN);
+    /// The cap is the same whichever tracked function the quorum names.
+    function test_capIsTheSameWhateverTheSignedSelector() public {
+        CappedTreasury t = new CappedTreasury(address(registry));
         _funded(t);
         Program memory p = _tracked(t, 2);
-        _call(p, ATTACKER, 0, ""); // zero value doesn't count against a zero cap
+        _call(p, ATTACKER, 1 ether, "");
         _call(p, ATTACKER, 1, "");
-        _settle(t, p, bytes4(0x12345678), _exceeded(2, 1, 0));
+        _settle(t, p, bytes4(0x12345678), _exceeded(2, 1 ether + 1, 1 ether));
 
         p = _tracked(t, 1);
-        _call(p, ATTACKER, 1, "");
-        _settle(t, p, FN, "");
-        assertEq(ATTACKER.balance, 1);
+        _call(p, ATTACKER, 1 ether, "");
+        _settle(t, p, bytes4(0x12345678), "");
+        assertEq(ATTACKER.balance, 1 ether);
     }
 
     /// Each transition of a batch starts from zero: two items each at the cap settle together.
+    /// The cap therefore bounds one program, not what a quorum can send in total.
     function test_batchCapsEachTransitionOnItsOwn() public {
-        CappedTreasury t = new CappedTreasury(address(registry), FN);
+        CappedTreasury t = new CappedTreasury(address(registry));
         _funded(t);
         TaskSubmission[] memory subs = new TaskSubmission[](2);
         for (uint256 i = 0; i < 2; ++i) {
@@ -602,7 +587,6 @@ contract GasKillerSDKCallPolicyTest is Test {
         uint256 value,
         bytes32 dataHash
     ) internal pure {
-        assertEq(s.targetFunction, FN, "targetFunction");
         assertEq(s.index, index, "index");
         assertEq(uint8(s.kind), uint8(kind), "kind");
         assertEq(s.target, target, "target");

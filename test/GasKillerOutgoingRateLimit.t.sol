@@ -30,7 +30,7 @@ contract RateLimitedTreasury is GasKillerOutgoingRateLimit {
         deposits += msg.value;
     }
 
-    function _allowSelfCall(bytes4, bytes4 selector) internal view override returns (bool) {
+    function _allowSelfCall(bytes4 selector) internal view override returns (bool) {
         return selector == this.deposit.selector;
     }
 
@@ -55,15 +55,11 @@ contract RateLimitedPolicedTreasury is PolicedTreasury {
         OutgoingRateLimit.set(_outgoingBucket(), 1 ether, 1 hours);
     }
 
-    function _authorizeCall(
-        bytes4 targetFunction,
-        uint256 index,
-        StateUpdateType kind,
-        address target,
-        uint256 value,
-        bytes memory data
-    ) internal override {
-        super._authorizeCall(targetFunction, index, kind, target, value, data);
+    function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
+        internal
+        override
+    {
+        super._authorizeCall(index, kind, target, value, data);
         OutgoingRateLimit.spend(_outgoingBucket(), index, target, value);
     }
 }

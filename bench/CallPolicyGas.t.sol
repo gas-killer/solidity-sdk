@@ -46,7 +46,7 @@ contract PolicedCaller is DefaultCaller {
 
     constructor(address registry) DefaultCaller(registry) {}
 
-    function _authorizeCall(bytes4, uint256 index, StateUpdateType, address target, uint256, bytes memory)
+    function _authorizeCall(uint256 index, StateUpdateType, address target, uint256, bytes memory)
         internal
         pure
         override
@@ -54,7 +54,7 @@ contract PolicedCaller is DefaultCaller {
         if (target == address(0xdead)) revert Denied(index);
     }
 
-    function _maxOutgoingValue(bytes4) internal pure override returns (uint256) {
+    function _maxOutgoingValue() internal pure override returns (uint256) {
         return 1 ether;
     }
 }
@@ -73,7 +73,7 @@ contract SelfCaller is DefaultCaller {
         ++pings;
     }
 
-    function _allowSelfCall(bytes4, bytes4 selector) internal view override returns (bool) {
+    function _allowSelfCall(bytes4 selector) internal view override returns (bool) {
         return allowAll || selector == this.ping.selector;
     }
 }
@@ -93,43 +93,43 @@ contract RateLimitedCaller is GasKillerOutgoingRateLimit {
 ///         settlement before the call policy (#108's tree, 0944508):
 ///
 ///           m   | before | default policy  | small policy
-///           1   | 33,576 | +548 (+1.6%)    | +590 (+1.8%)
-///           8   | 47,166 | +1,931 (+4.1%)  | +2,281 (+4.8%)
-///           32  | 94,129 | +6,672 (+7.1%)  | +8,078 (+8.6%)
+///           1   | 33,576 | +446 (+1.3%)    | +488 (+1.5%)
+///           8   | 47,166 | +1,738 (+3.7%)  | +2,088 (+4.4%)
+///           32  | 94,129 | +6,164 (+6.5%)  | +7,570 (+8.0%)
 ///
-///         About 200 gas per CALL with the default policy (about 43 of it the self-call address
-///         check), about 240 with the small one, and about 350 fixed per program (building the
+///         About 185 gas per CALL with the default policy (about 43 of it the self-call address
+///         check), about 230 with the small one, and about 260 fixed per program (building the
 ///         policy and reading the cap). A program of STOREs only pays the fixed part and about 3
-///         gas per op (`SettlementGas.t.sol`). Against a
-///         real CALL, which pays a cold account access (2,600) and the callee's own work, the
-///         share is smaller than against this empty, warm callee.
+///         gas per op (`SettlementGas.t.sol`). Against a real CALL, which pays a cold account
+///         access (2,600) and the callee's own work, the share is smaller than against this empty,
+///         warm callee.
 ///
 ///         `test_rateLimit`: the same with 1-wei CALLs, without and with `GasKillerOutgoingRateLimit`
 ///         (1 ether per hour):
 ///
 ///           m   | default | rate limited
-///           1   |  41,051 | +666 (+1.6%)
-///           8   | 104,513 | +5,244 (+5.0%)
-///           32  | 322,465 | +20,940 (+6.5%)
+///           1   |  40,946 | +678 (+1.7%)
+///           8   | 104,296 | +5,340 (+5.1%)
+///           32  | 321,861 | +21,324 (+6.6%)
 ///
-///         About 655 gas per op that sends value. The consumer is deployed in the same transaction,
+///         About 665 gas per op that sends value. The consumer is deployed in the same transaction,
 ///         so the budget slot is already warm here; a real settlement also pays about 5,000 once,
 ///         for the first read (2,100, cold) and write (2,900) of the slot.
 ///
 ///         `test_tokenLimit`: the counter copy plus one ERC-20 `transfer`, for a consumer with no
-///         limits (59,248) and for `GasKillerTokenRateLimit` listing k tokens: k = 0 +4,229 (+7.1%),
-///         k = 1 +9,312 (+15.7%), k = 4 +20,570 (+34.7%). Each listed token costs two `balanceOf`
+///         limits (59,146) and for `GasKillerTokenRateLimit` listing k tokens: k = 0 +4,196 (+7.1%),
+///         k = 1 +9,279 (+15.7%), k = 4 +20,538 (+34.7%). Each listed token costs two `balanceOf`
 ///         calls and a budget read and write; a program that runs no code reads no balances.
 ///
 ///         `test_selfCalls`: the counter copy plus m allowed CALLs to the consumer's own `ping()`,
 ///         allowing every self-call or a one-selector list:
 ///
 ///           m   | allow all | one-selector list
-///           1   |  57,003   | +38
-///           8   |  78,531   | +304
-///           32  | 152,856   | +1,216
+///           1   |  56,889   | +37
+///           8   |  78,234   | +296
+///           32  | 151,931   | +1,184
 ///
-///         About 38 gas per self-call to compare the selector with a one-entry list, on top of
+///         About 37 gas per self-call to compare the selector with a one-entry list, on top of
 ///         about 90 to reject malformed calldata before the hook is asked.
 ///
 ///         Run with `FOUNDRY_PROFILE=gas forge test --match-contract CallPolicyGas -vv`.

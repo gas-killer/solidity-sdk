@@ -76,9 +76,7 @@ abstract contract GasKillerNestedSDK is GasKillerSDK, IGasKillerNested {
             .verifyAndApprove(
                 submission.root, address(this), submission.expiryBlock, submission.expiryProof, submission.sig
             );
-        _runProgram(
-            submission.storageUpdates, submission.targetFunction, NestedContext(submission.root, submission.children, 0)
-        );
+        _runProgram(submission.storageUpdates, NestedContext(submission.root, submission.children, 0));
     }
 
     function _applyFrame(bytes32 root, bytes32 expectedLeaf, bytes calldata encodedWitness) private trackState {
@@ -94,21 +92,20 @@ abstract contract GasKillerNestedSDK is GasKillerSDK, IGasKillerNested {
         require(leaf == expectedLeaf, LeafMismatch(expectedLeaf, leaf));
         require(IGasKillerNested(msg.sender).pendingChild() == leaf, NotPendingChild(msg.sender, leaf));
         require(NestedFrames.isMember(witness.proof, root, leaf), NotTreeMember(leaf));
-        // The tree binds a callee's call by calldata hash only, so there's no selector to hand on.
-        _runProgram(witness.storageUpdates, bytes4(0), NestedContext(root, witness.children, 0));
+        _runProgram(witness.storageUpdates, NestedContext(root, witness.children, 0));
     }
 
     /// @dev Builds the range list for each frame, including a contract's repeat frames in a cycle,
     ///      which are separate calls. Building it is cheaper than caching it in transient storage
     ///      across them: about 670 gas with no consumer ranges and 2,170 with four, against
     ///      1,000 and 2,940 just to read the cached words back.
-    function _runProgram(bytes memory storageUpdates, bytes4 targetFunction, NestedContext memory ctx) private {
+    function _runProgram(bytes memory storageUpdates, NestedContext memory ctx) private {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        CallPolicy memory policy = _callPolicy(targetFunction);
-        _beforeProgram(targetFunction);
+        CallPolicy memory policy = _callPolicy();
+        _beforeProgram();
         if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args, policy, ctx);
         else StateChangeHandlerLib._runStateUpdatesPrevalidated(types, args, _settlementRanges(), policy, ctx);
-        _afterProgram(targetFunction);
+        _afterProgram();
     }
 
     /// @dev Nested settlement reverts against a registry without `ISchnorrApprovalRegistry`, and

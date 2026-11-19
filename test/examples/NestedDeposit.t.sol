@@ -17,7 +17,7 @@ import {NestedTreeBuilder} from "../utils/NestedTreeBuilder.sol";
 contract CappedGateway is DepositGateway {
     constructor(address avs, address registry, uint256 rounds) DepositGateway(avs, registry, rounds) {}
 
-    function _maxOutgoingValue(bytes4) internal pure override returns (uint256) {
+    function _maxOutgoingValue() internal pure override returns (uint256) {
         return 0.5 ether;
     }
 }
@@ -33,7 +33,7 @@ contract RateLimitedGateway is DepositGateway {
         (a,,) = OutgoingRateLimit.allowance(_outgoingBucket());
     }
 
-    function _authorizeCall(bytes4, uint256 index, StateUpdateType, address target, uint256 value, bytes memory)
+    function _authorizeCall(uint256 index, StateUpdateType, address target, uint256 value, bytes memory)
         internal
         override
     {

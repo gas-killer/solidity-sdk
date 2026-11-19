@@ -40,7 +40,6 @@ contract UnguardedCycleRelay is CycleRelay {
 
 /// One op a call-policy hook saw, recorded by the contracts below.
 struct SeenOp {
-    bytes4 targetFunction;
     uint256 index;
     StateUpdateType kind;
     address target;
@@ -58,11 +57,11 @@ contract RecordingCycleRoot is CycleRoot {
         return _seen;
     }
 
-    function _authorizeCall(bytes4 fn, uint256 index, StateUpdateType kind, address target, uint256, bytes memory)
+    function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256, bytes memory)
         internal
         override
     {
-        _seen.push(SeenOp(fn, index, kind, target));
+        _seen.push(SeenOp(index, kind, target));
     }
 }
 
@@ -76,11 +75,11 @@ contract RecordingCycleRelay is CycleRelay {
         return _seen;
     }
 
-    function _authorizeCall(bytes4 fn, uint256 index, StateUpdateType kind, address target, uint256, bytes memory)
+    function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256, bytes memory)
         internal
         override
     {
-        _seen.push(SeenOp(fn, index, kind, target));
+        _seen.push(SeenOp(index, kind, target));
     }
 }
 
@@ -207,8 +206,8 @@ contract NestedCycleTest is Test {
         root.verifyAndUpdateTree(sub);
     }
 
-    /// Each frame runs its own contract's call policy. The root frame hands it the signed
-    /// selector; a callee's frame, which the tree binds by calldata hash only, hands it zero.
+    /// Each frame runs its own contract's call policy, including the root contract's frame
+    /// re-entered by the relay.
     function test_eachFrameRunsItsOwnCallPolicy() public {
         RecordingCycleRelay recordingRelay = new RecordingCycleRelay(address(0xA75), address(registry));
         RecordingCycleRoot recordingRoot =
@@ -220,15 +219,14 @@ contract NestedCycleTest is Test {
 
         SeenOp[] memory r = recordingRoot.seen();
         assertEq(r.length, 2, "root: its NESTED op, then the re-entered frame's CALL");
-        _assertSeen(r[0], CycleRoot.start.selector, 2, StateUpdateType.NESTED, address(relay));
-        _assertSeen(r[1], bytes4(0), 1, StateUpdateType.CALL, address(observer));
+        _assertSeen(r[0], 2, StateUpdateType.NESTED, address(relay));
+        _assertSeen(r[1], 1, StateUpdateType.CALL, address(observer));
         SeenOp[] memory m = recordingRelay.seen();
         assertEq(m.length, 1, "relay: its NESTED op");
-        _assertSeen(m[0], bytes4(0), 2, StateUpdateType.NESTED, address(root));
+        _assertSeen(m[0], 2, StateUpdateType.NESTED, address(root));
     }
 
-    function _assertSeen(SeenOp memory s, bytes4 fn, uint256 index, StateUpdateType kind, address target) private pure {
-        assertEq(s.targetFunction, fn, "targetFunction");
+    function _assertSeen(SeenOp memory s, uint256 index, StateUpdateType kind, address target) private pure {
         assertEq(s.index, index, "index");
         assertEq(uint8(s.kind), uint8(kind), "kind");
         assertEq(s.target, target, "target");

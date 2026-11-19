@@ -32,15 +32,12 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
         OutgoingRateLimit.set(_outgoingBucket(), limit, period);
     }
 
-    function _authorizeCall(
-        bytes4 targetFunction,
-        uint256 index,
-        StateUpdateType kind,
-        address target,
-        uint256 value,
-        bytes memory data
-    ) internal virtual override {
-        super._authorizeCall(targetFunction, index, kind, target, value, data);
+    function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
+        internal
+        virtual
+        override
+    {
+        super._authorizeCall(index, kind, target, value, data);
         OutgoingRateLimit.spend(_outgoingBucket(), index, target, value);
     }
 }
@@ -66,15 +63,12 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
         OutgoingRateLimit.set(_outgoingBucket(), limit, period);
     }
 
-    function _authorizeCall(
-        bytes4 targetFunction,
-        uint256 index,
-        StateUpdateType kind,
-        address target,
-        uint256 value,
-        bytes memory data
-    ) internal virtual override {
-        super._authorizeCall(targetFunction, index, kind, target, value, data);
+    function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
+        internal
+        virtual
+        override
+    {
+        super._authorizeCall(index, kind, target, value, data);
         OutgoingRateLimit.spend(_outgoingBucket(), index, target, value);
     }
 }

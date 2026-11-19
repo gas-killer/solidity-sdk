@@ -11,17 +11,16 @@ import {QuorumSignature} from "../src/interface/ISchnorrApprovalRegistry.sol";
 import {SchnorrSigner} from "./utils/SchnorrSigner.sol";
 import {NestedTreeBuilder} from "./utils/NestedTreeBuilder.sol";
 
-/// A nested consumer with a self-gated setter. It allows `setBeneficiary` for one
-/// `targetFunction`, set at deployment, and records the `targetFunction` each self-call was
-/// checked under.
+/// A nested consumer with a self-gated setter, which it allows signed programs to call on
+/// itself or not, as set at deployment.
 contract NestedSelfCaller is GasKillerNestedSDK {
     address public beneficiary; // slot 0
-    bytes4 public immutable allowedFor;
+    bool public immutable allowSetter;
 
-    constructor(address registry, bytes4 allowedFor_) {
+    constructor(address registry, bool allowSetter_) {
         _setSchnorrRegistry(registry);
         _setAvsAddress(address(0xA75));
-        allowedFor = allowedFor_;
+        allowSetter = allowSetter_;
     }
 
     function setBeneficiary(address b) external {
@@ -29,8 +28,8 @@ contract NestedSelfCaller is GasKillerNestedSDK {
         beneficiary = b;
     }
 
-    function _allowSelfCall(bytes4 targetFunction, bytes4 selector) internal view override returns (bool) {
-        return targetFunction == allowedFor && selector == this.setBeneficiary.selector;
+    function _allowSelfCall(bytes4 selector) internal view override returns (bool) {
+        return allowSetter && selector == this.setBeneficiary.selector;
     }
 }
 
@@ -52,10 +51,9 @@ contract LibraryRunner {
     }
 }
 
-/// @notice Self-calls inside nested settlement. A callee's frame checks its self-calls with
-///         `targetFunction` zero, and a root frame can open such a frame on its own contract
-///         with a `NESTED` op to itself, which is why scoping `_allowSelfCall` by
-///         `targetFunction` is not a security boundary.
+/// @notice Self-calls inside nested settlement. Root frames and callee frames, including a
+///         callee frame a root opens on its own contract with a `NESTED` op to itself, check
+///         self-calls against the same list.
 contract GasKillerSDKSelfCallNestedTest is Test {
     using NestedTreeBuilder for NestedTreeBuilder.Frame[];
 
@@ -77,9 +75,8 @@ contract GasKillerSDKSelfCallNestedTest is Test {
         expiryBlock = block.number + 50;
     }
 
-    /// The root frame checks its self-call under the signed selector.
-    function test_rootFrameSelfCallUsesSignedSelector() public {
-        NestedSelfCaller t = new NestedSelfCaller(address(registry), ROOT_FN);
+    function test_rootFrameSelfCallAllowed() public {
+        NestedSelfCaller t = new NestedSelfCaller(address(registry), true);
         NestedTreeBuilder.Frame[] memory frames = new NestedTreeBuilder.Frame[](1);
         frames[0] = _frame(address(t), address(0), 0, ROOT_FN, 1);
         _op(frames[0], 0, StateUpdateType.CALL, _setBeneficiaryCall(t));
@@ -88,10 +85,10 @@ contract GasKillerSDKSelfCallNestedTest is Test {
         assertEq(t.beneficiary(), NEW_BENEFICIARY);
     }
 
-    /// A NESTED op to the contract itself opens a callee frame there, whose self-calls are
-    /// checked with `targetFunction` zero. Allowed only for `ROOT_FN`, the self-call is rejected.
-    function test_nestedSelfFrameSelfCallIsCheckedUnderZero() public {
-        NestedSelfCaller t = new NestedSelfCaller(address(registry), ROOT_FN);
+    /// A callee frame opened by a NESTED op to the contract itself is checked against the same
+    /// list: a selector the contract doesn't allow is rejected there too.
+    function test_nestedSelfFrameRejectsUnlistedSelfCall() public {
+        NestedSelfCaller t = new NestedSelfCaller(address(registry), false);
         TreeSubmission memory sub = _submission(_nestedSelfFrames(t));
 
         bytes memory reason = abi.encodeWithSelector(
@@ -100,15 +97,14 @@ contract GasKillerSDKSelfCallNestedTest is Test {
         try t.verifyAndUpdateTree(sub) {
             fail("tree settled");
         } catch (bytes memory err) {
-            assertTrue(_contains(err, reason), "callee frame's self-call rejected under zero");
+            assertTrue(_contains(err, reason), "callee frame's self-call rejected");
         }
         assertEq(t.beneficiary(), address(0));
     }
 
-    /// A selector allowed only for `bytes4(0)`, meant for nested callee frames, is reachable by
-    /// any root program for this contract through a NESTED op to itself.
-    function test_selectorAllowedForZeroIsReachableFromARootFrame() public {
-        NestedSelfCaller t = new NestedSelfCaller(address(registry), bytes4(0));
+    /// ... and a listed one settles there.
+    function test_nestedSelfFrameAllowsListedSelfCall() public {
+        NestedSelfCaller t = new NestedSelfCaller(address(registry), true);
         t.verifyAndUpdateTree(_submission(_nestedSelfFrames(t)));
         assertEq(t.beneficiary(), NEW_BENEFICIARY);
         assertEq(t.stateTransitionCount(), 2, "root frame and the self-opened frame");

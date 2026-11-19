@@ -39,26 +39,23 @@ abstract contract GasKillerTokenRateLimit is GasKillerOutgoingRateLimit {
         TokenRateLimit.clear(_tokenLimits(), token);
     }
 
-    function _beforeProgram(bytes4 targetFunction) internal virtual override {
-        super._beforeProgram(targetFunction);
+    function _beforeProgram() internal virtual override {
+        super._beforeProgram();
         TokenRateLimit.begin();
     }
 
-    function _authorizeCall(
-        bytes4 targetFunction,
-        uint256 index,
-        StateUpdateType kind,
-        address target,
-        uint256 value,
-        bytes memory data
-    ) internal virtual override {
-        super._authorizeCall(targetFunction, index, kind, target, value, data);
+    function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
+        internal
+        virtual
+        override
+    {
+        super._authorizeCall(index, kind, target, value, data);
         TokenRateLimit.beforeOp(_tokenLimits(), kind, target, data);
     }
 
-    function _afterProgram(bytes4 targetFunction) internal virtual override {
+    function _afterProgram() internal virtual override {
         TokenRateLimit.endProgram(_tokenLimits());
-        super._afterProgram(targetFunction);
+        super._afterProgram();
     }
 }
 
@@ -91,25 +88,22 @@ abstract contract GasKillerNestedTokenRateLimit is GasKillerNestedOutgoingRateLi
         TokenRateLimit.clear(_tokenLimits(), token);
     }
 
-    function _beforeProgram(bytes4 targetFunction) internal virtual override {
-        super._beforeProgram(targetFunction);
+    function _beforeProgram() internal virtual override {
+        super._beforeProgram();
         TokenRateLimit.begin();
     }
 
-    function _authorizeCall(
-        bytes4 targetFunction,
-        uint256 index,
-        StateUpdateType kind,
-        address target,
-        uint256 value,
-        bytes memory data
-    ) internal virtual override {
-        super._authorizeCall(targetFunction, index, kind, target, value, data);
+    function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
+        internal
+        virtual
+        override
+    {
+        super._authorizeCall(index, kind, target, value, data);
         TokenRateLimit.beforeOp(_tokenLimits(), kind, target, data);
     }
 
-    function _afterProgram(bytes4 targetFunction) internal virtual override {
+    function _afterProgram() internal virtual override {
         TokenRateLimit.endProgram(_tokenLimits());
-        super._afterProgram(targetFunction);
+        super._afterProgram();
     }
 }
