@@ -2066,17 +2066,7 @@ library TokenRateLimit {
         returns (bool unrecognized)
     {
         uint256 r = _region();
-        uint256 head = _tload(r);
-        if (head & 1 == 0) {
-            uint256 count = t.count;
-            for (uint256 i = 0; i < count; ++i) {
-                address token = t.buckets[i].token;
-                _tstore(r + 1 + 3 * i, uint160(token));
-                _tstore(r + 2 + 3 * i, IERC20(token).balanceOf(address(this)));
-            }
-            head = 1 | (count << 1);
-            _tstore(r, head);
-        }
+        uint256 head = _snapshot(t, r);
         if (kind != StateUpdateType.CALL) return false;
         bytes4 selector = bytes4(data); // zero-padded when shorter than 4 bytes
         // Moves this contract's tokens, measured through the balance: fine on any target, so a
@@ -2132,6 +2122,32 @@ library TokenRateLimit {
             _tstore(r, head + (1 << 16));
         } else if (current < _tload(slot + 2)) {
             _tstore(slot + 2, current);
+        }
+    }
+
+    /// @notice Takes the snapshot now, if it isn't taken yet. For a measuring window around one
+    ///         of the contract's own functions: `begin`, then `snapshot`, then `endProgram` after
+    ///         the function, which charges what it moved out.
+    /// @dev The window charges a function's net outflow of each listed token, so a balance a
+    ///      program credits with a `STORE` can't be withdrawn faster than the budget allows.
+    ///      Approvals the function grants aren't recorded: the contract's own code decides those.
+    function snapshot(GasKillerSDK.TokenLimits storage t) internal {
+        _snapshot(t, _region());
+    }
+
+    /// @dev Records `balanceOf(this)` for every listed token in region `r`, unless already done,
+    ///      and returns the region's head.
+    function _snapshot(GasKillerSDK.TokenLimits storage t, uint256 r) private returns (uint256 head) {
+        head = _tload(r);
+        if (head & 1 == 0) {
+            uint256 count = t.count;
+            for (uint256 i = 0; i < count; ++i) {
+                address token = t.buckets[i].token;
+                _tstore(r + 1 + 3 * i, uint160(token));
+                _tstore(r + 2 + 3 * i, IERC20(token).balanceOf(address(this)));
+            }
+            head = 1 | (count << 1);
+            _tstore(r, head);
         }
     }
 

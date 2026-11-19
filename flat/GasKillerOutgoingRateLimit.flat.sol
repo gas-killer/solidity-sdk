@@ -2235,6 +2235,11 @@ library OutgoingRateLimit {
     /// @param available Wei the budget held.
     error OutgoingRateLimitExceeded(uint256 index, uint256 value, uint256 available);
 
+    /// @notice A function wrapped in `limitsOutflow` sent more than the budget holds.
+    /// @param value Wei the function sent out, net of what it received.
+    /// @param available Wei the budget held.
+    error NativeOutflowRateLimitExceeded(uint256 value, uint256 available);
+
     /// @notice A limit above `type(uint96).max`, or a period of zero or above `type(uint32).max`.
     error InvalidOutgoingRateLimit();
 
@@ -2283,6 +2288,8 @@ library OutgoingRateLimit {
     ///      (224-255). `test_bucketPackingMatchesTheStruct` pins that.
     function spend(GasKillerSDK.OutgoingBucket storage b, uint256 index, address target, uint256 value) internal {
         if (value == 0 || target == address(this)) return;
+        // Inlined rather than shared with `spendNative` through `_take`: this runs on every op
+        // that sends value, and the shared helper costs about 80 gas more per op.
         uint256 word;
         assembly ("memory-safe") {
             word := sload(b.slot)
@@ -2298,6 +2305,55 @@ library OutgoingRateLimit {
         assembly ("memory-safe") {
             sstore(b.slot, word)
         }
+    }
+
+    /// @notice Spends `value` that one of the contract's own functions sent, or reverts with
+    ///         `NativeOutflowRateLimitExceeded`. Spends nothing when `value` is zero.
+    /// @dev For payout paths outside signed programs, so that a balance a program credits with a
+    ///      `STORE` can't be withdrawn faster than the budget allows. Usually reached through
+    ///      `beginNative` / `endNative`, which measure the value rather than trusting the caller
+    ///      to count every transfer.
+    function spendNative(GasKillerSDK.OutgoingBucket storage b, uint256 value) internal {
+        if (value == 0) return;
+        (bool ok, uint256 left) = _take(b, value);
+        if (!ok) revert NativeOutflowRateLimitExceeded(value, left);
+    }
+
+    /// @notice Opens a measuring window around one of the contract's own functions: returns its
+    ///         ETH balance before the function, not counting the `msg.value` it was called with.
+    function beginNative() internal view returns (uint256 baseline) {
+        return address(this).balance - msg.value;
+    }
+
+    /// @notice Closes the window `beginNative` opened: spends the net decrease of the contract's
+    ///         ETH balance since then.
+    /// @dev Net: ETH the function received offsets ETH it sent, so unwrapping WETH held by the
+    ///      contract and sending the ETH on isn't charged here; limit WETH as a token too. A
+    ///      window nested in another (one limited function calling another, possibly through a
+    ///      callback) is charged both to itself and to the window around it.
+    function endNative(GasKillerSDK.OutgoingBucket storage b, uint256 baseline) internal {
+        uint256 balance = address(this).balance;
+        if (balance < baseline) spendNative(b, baseline - balance);
+    }
+
+    /// @dev Takes `value` from the budget if it holds that much, as `spend` does inline. One
+    ///      `SLOAD`, and one `SSTORE` when it does.
+    function _take(GasKillerSDK.OutgoingBucket storage b, uint256 value) private returns (bool ok, uint256 left) {
+        uint256 word;
+        assembly ("memory-safe") {
+            word := sload(b.slot)
+        }
+        uint256 updated;
+        (left, updated) = _refilled(word);
+        if (value > left) return (false, left);
+        // Keep `limit` and `period`; replace `available` and `updated`, as `spend` does.
+        unchecked {
+            word = (word & _KEEP) | ((left - value) << 96) | (updated << 224);
+        }
+        assembly ("memory-safe") {
+            sstore(b.slot, word)
+        }
+        return (true, left);
     }
 
     /// @notice What the budget holds now, its limit and its period.
@@ -2510,6 +2566,36 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
     function _rateLimitOp(uint256 index, StateUpdateType kind, address target, bytes memory data) internal virtual {}
 
     /// @dev Final: see the contract's notes.
+    /// @notice Wrap each of this contract's own functions that can pay out ETH (or, in the token
+    ///         drop-in, a listed token) in this modifier. What the function sends out, net of what
+    ///         it receives, spends from the same budget as signed programs.
+    /// @dev Signed programs are limited by their ops, but a malicious quorum can also `STORE`
+    ///      itself a balance in this contract's state and withdraw it through an ordinary
+    ///      `withdraw()` later. Limiting the payout functions too bounds that route: honest
+    ///      withdrawals then share the budget, so size `limit` for normal traffic. Measured by
+    ///      balance (`msg.value` excluded), so every route out of the function counts, including
+    ///      callbacks. A limited function that calls another, directly or through a callback, is
+    ///      charged for both windows: conservative, never under-counted. Reverts with
+    ///      `OutgoingRateLimit.NativeOutflowRateLimitExceeded` (or
+    ///      `TokenRateLimit.TokenRateLimitExceeded`) after the function, rolling it back. In the
+    ///      token drop-in the function runs as a program does, so it can't set or clear token
+    ///      limits (`TokenRateLimit.TokenRateLimitChangedMidProgram`).
+    modifier limitsOutflow() {
+        uint256 ethBaseline = _beginOutflow();
+        _;
+        _endOutflow(ethBaseline);
+    }
+
+    /// @dev Opens the window `limitsOutflow` measures; the token drop-in extends it.
+    function _beginOutflow() internal virtual returns (uint256 ethBaseline) {
+        return OutgoingRateLimit.beginNative();
+    }
+
+    /// @dev Closes the window and charges it.
+    function _endOutflow(uint256 ethBaseline) internal virtual {
+        OutgoingRateLimit.endNative(_outgoingBucket(), ethBaseline);
+    }
+
     function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
         internal
         override
@@ -2558,6 +2644,36 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
     function _rateLimitOp(uint256 index, StateUpdateType kind, address target, bytes memory data) internal virtual {}
 
     /// @dev Final, as in `GasKillerOutgoingRateLimit`.
+    /// @notice Wrap each of this contract's own functions that can pay out ETH (or, in the token
+    ///         drop-in, a listed token) in this modifier. What the function sends out, net of what
+    ///         it receives, spends from the same budget as signed programs.
+    /// @dev Signed programs are limited by their ops, but a malicious quorum can also `STORE`
+    ///      itself a balance in this contract's state and withdraw it through an ordinary
+    ///      `withdraw()` later. Limiting the payout functions too bounds that route: honest
+    ///      withdrawals then share the budget, so size `limit` for normal traffic. Measured by
+    ///      balance (`msg.value` excluded), so every route out of the function counts, including
+    ///      callbacks. A limited function that calls another, directly or through a callback, is
+    ///      charged for both windows: conservative, never under-counted. Reverts with
+    ///      `OutgoingRateLimit.NativeOutflowRateLimitExceeded` (or
+    ///      `TokenRateLimit.TokenRateLimitExceeded`) after the function, rolling it back. In the
+    ///      token drop-in the function runs as a program does, so it can't set or clear token
+    ///      limits (`TokenRateLimit.TokenRateLimitChangedMidProgram`).
+    modifier limitsOutflow() {
+        uint256 ethBaseline = _beginOutflow();
+        _;
+        _endOutflow(ethBaseline);
+    }
+
+    /// @dev Opens the window `limitsOutflow` measures; the token drop-in extends it.
+    function _beginOutflow() internal virtual returns (uint256 ethBaseline) {
+        return OutgoingRateLimit.beginNative();
+    }
+
+    /// @dev Closes the window and charges it.
+    function _endOutflow(uint256 ethBaseline) internal virtual {
+        OutgoingRateLimit.endNative(_outgoingBucket(), ethBaseline);
+    }
+
     function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
         internal
         override
