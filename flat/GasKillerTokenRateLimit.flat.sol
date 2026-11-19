@@ -1323,9 +1323,20 @@ library StateChangeHandlerLib {
     ///      `_checkSelfCall`, so a zero-value op pays only the `value` check.
     function _countValue(CallPolicy memory policy, uint256 index, address target, uint256 value) private view {
         if (target == address(this)) return;
-        uint256 sent = policy.sent + value;
-        if (sent > policy.valueCap) revert OutgoingValueExceeded(index, sent, policy.valueCap);
-        policy.sent = sent;
+        uint256 sent = policy.sent;
+        uint256 cap = policy.valueCap;
+        // Compared against the headroom, not as `sent + value > cap`: with a cap near
+        // `type(uint256).max` the sum could overflow into a panic instead of this error.
+        // `sent > cap` is checked first, since a hand-built policy may not start `sent` at zero
+        // and the subtraction would then wrap. The reported total saturates rather than wrapping,
+        // and once both checks pass `sent + value <= cap`.
+        unchecked {
+            if (sent > cap || value > cap - sent) {
+                uint256 total = sent + value;
+                revert OutgoingValueExceeded(index, total < sent ? type(uint256).max : total, cap);
+            }
+            policy.sent = sent + value;
+        }
     }
 
     /// @dev Rejects a `CALL` to the running contract unless the policy's `allowSelfCall` allows
@@ -2315,12 +2326,13 @@ library OutgoingRateLimit {
         assembly ("memory-safe") {
             word := sload(b.slot)
         }
-        uint256 left = _refilled(word);
+        (uint256 left, uint256 updated) = _refilled(word);
         if (value > left) revert OutgoingRateLimitExceeded(index, value, left);
         // Keep `limit` and `period`; replace `available` and `updated`. `left - value` can't
-        // underflow (checked just above) and fits in 96 bits because `left` never exceeds `limit`.
+        // underflow (checked just above) and fits in 96 bits because `left` never exceeds `limit`;
+        // `updated` is a 32-bit timestamp.
         unchecked {
-            word = (word & _KEEP) | ((left - value) << 96) | (uint256(uint32(block.timestamp)) << 224);
+            word = (word & _KEEP) | ((left - value) << 96) | (updated << 224);
         }
         assembly ("memory-safe") {
             sstore(b.slot, word)
@@ -2337,24 +2349,36 @@ library OutgoingRateLimit {
         assembly ("memory-safe") {
             word := sload(b.slot)
         }
-        return (_refilled(word), uint96(word), uint32(word >> 192));
+        (available,) = _refilled(word);
+        return (available, uint96(word), uint32(word >> 192));
     }
 
     /// @dev The `limit` and `period` bits of the packed slot.
     uint256 private constant _KEEP = uint256(type(uint96).max) | (uint256(type(uint32).max) << 192);
 
-    /// @dev `available` plus the refill since `updated`, up to `limit`. An unset budget (zero
-    ///      limit and period) holds nothing.
+    /// @dev `available` plus the refill since `updated`, up to `limit`, and the timestamp to store
+    ///      with it. An unset budget (zero limit and period) holds nothing.
+    ///      The refill rounds down, so the timestamp moves forward only by the time the credited
+    ///      wei took to accrue: the remainder carries over to the next spend instead of being lost.
+    ///      Otherwise spends closer together than `period / limit` seconds would each credit
+    ///      nothing, and the budget would never refill. Once the budget is full there is nothing
+    ///      to carry, and the timestamp is now.
     ///      Unchecked: `elapsed` doesn't underflow because `updated` is never ahead of the clock
     ///      (until the 32-bit timestamp wraps in 2106), its product with a 96-bit limit fits in
-    ///      128 bits, and `period` is nonzero whenever the division runs.
-    function _refilled(uint256 word) private view returns (uint256 available) {
+    ///      128 bits, `period` is nonzero whenever the division runs, and so is `limit` when the
+    ///      budget isn't full. The carried time is under `elapsed`, so `updated` stays at or after
+    ///      its old value.
+    function _refilled(uint256 word) private view returns (uint256 available, uint256 updated) {
         unchecked {
             uint256 limit = uint96(word);
             uint256 period = uint32(word >> 192);
-            uint256 elapsed = uint32(block.timestamp) - (word >> 224);
-            available = uint96(word >> 96) + (elapsed >= period ? limit : elapsed * limit / period);
-            if (available > limit) available = limit;
+            uint256 now_ = uint32(block.timestamp);
+            uint256 elapsed = now_ - (word >> 224);
+            if (elapsed >= period) return (limit, now_);
+            uint256 accrued = elapsed * limit;
+            available = uint96(word >> 96) + accrued / period;
+            if (available >= limit) return (limit, now_);
+            updated = now_ - (accrued % period) / limit;
         }
     }
 }
@@ -2376,7 +2400,9 @@ library OutgoingRateLimit {
 ///      An approval moves nothing until it is used, possibly after the program. So `beforeOp`
 ///      also records every `approve(spender, amount)` and `increaseAllowance(spender, amount)`
 ///      call to a listed token, with the spender's allowance before it, and `endProgram` charges
-///      any allowance left above that. Approving a router that then pulls the tokens is charged
+///      any allowance left above that. Approving the same spender again keeps one record, with
+///      the lowest allowance seen before its approvals, so an allowance left standing is charged
+///      once however many times it was set. Approving a router that then pulls the tokens is charged
 ///      once, through the balance; an approval left standing is charged in full, so an unlimited
 ///      one always reverts. Other ways to grant an allowance aren't seen: another selector
 ///      (`approveAndCall`), or an allowance system outside the token, such as Permit2. Reject
@@ -2410,6 +2436,9 @@ library TokenRateLimit {
     /// @notice All `MAX_TOKENS` entries are in use.
     error TooManyRateLimitedTokens();
 
+    /// @notice `beforeOp` or `endProgram` ran outside a program: `begin` wasn't called first.
+    error TokenRateLimitNotBegun();
+
     event TokenRateLimitSet(address indexed token, uint256 limit, uint256 period);
     event TokenRateLimitCleared(address indexed token);
 
@@ -2425,10 +2454,13 @@ library TokenRateLimit {
     ///        tokens in it, bits 16 and up the number of approvals recorded;
     ///      - three words per snapshotted token i, from word `1 + 3i`: the token, its balance at
     ///        the snapshot, and the allowance increases charged to it so far;
-    ///      - three words per approval j, from word `_APPROVALS + 3j`: the token's index in the
-    ///        snapshot, the spender, and the spender's allowance before the approval.
+    ///      - three words per approved (token, spender) pair j, from word `_APPROVALS + 3j`: the
+    ///        token's index in the snapshot, the spender, and the lowest allowance the spender had
+    ///        right before any of its approvals.
     ///      `endProgram` zeroes the head and every charge word, so the region is clean for the next
     ///      program at that depth.
+    ///      Depth 0 means no program is running and has no region: its address would be `_DEPTH`
+    ///      itself, so `_region` reverts there.
     ///      `_DEPTH` is keccak256("gaskiller.TokenRateLimit.depth"), written out for assembly.
     bytes32 private constant _DEPTH = 0x4df36f89fc12c0e682f8b2d99add7fca126f9125095d9173ca32d3ee48882030;
 
@@ -2479,7 +2511,8 @@ library TokenRateLimit {
         uint256 i = _find(t, token, t.count);
         if (i == t.count) return (0, 0, 0);
         GasKillerSDK.TokenBucket memory b = t.buckets[i];
-        return (_refilled(b), b.limit, b.period);
+        (available,) = _refilled(b);
+        return (available, b.limit, b.period);
     }
 
     /// @notice Whether `token` is limited.
@@ -2525,11 +2558,24 @@ library TokenRateLimit {
         assembly ("memory-safe") {
             spender := and(mload(add(data, 0x24)), 0xffffffffffffffffffffffffffffffffffffffff)
         }
-        uint256 slot = r + _APPROVALS + 3 * (head >> 16);
-        _tstore(slot, index);
-        _tstore(slot + 1, uint160(spender));
-        _tstore(slot + 2, IERC20(target).allowance(address(this), spender));
-        _tstore(r, head + (1 << 16));
+        uint256 current = IERC20(target).allowance(address(this), spender);
+        // One record per (token, spender), holding the lowest allowance seen before any of its
+        // approvals; `endProgram` charges what's left above that. A record per approval would
+        // charge an allowance left standing once per approval. Taking the lowest, not the first,
+        // counts allowance the spender pulled between approvals as spent (the pull is charged
+        // through the balance) rather than as still standing from before the program, so an
+        // extra approval can only raise the charge.
+        uint256 end = r + _APPROVALS + 3 * (head >> 16);
+        uint256 slot = r + _APPROVALS;
+        while (slot < end && (_tload(slot) != index || _tload(slot + 1) != uint160(spender))) slot += 3;
+        if (slot == end) {
+            _tstore(slot, index);
+            _tstore(slot + 1, uint160(spender));
+            _tstore(slot + 2, current);
+            _tstore(r, head + (1 << 16));
+        } else if (current < _tload(slot + 2)) {
+            _tstore(slot + 2, current);
+        }
     }
 
     /// @notice Ends a program: charges each listed token's net outflow, plus allowances left
@@ -2586,10 +2632,10 @@ library TokenRateLimit {
         if (i == n) return;
         GasKillerSDK.TokenBucket storage s = t.buckets[i];
         GasKillerSDK.TokenBucket memory b = s;
-        uint256 left = _refilled(b);
+        (uint256 left, uint256 updated) = _refilled(b);
         if (amount > left) revert TokenRateLimitExceeded(token, amount, left);
         s.available = uint128(left - amount);
-        s.updated = uint32(block.timestamp);
+        s.updated = uint32(updated);
     }
 
     function _find(GasKillerSDK.TokenLimits storage t, address token, uint256 n) private view returns (uint256 i) {
@@ -2598,21 +2644,35 @@ library TokenRateLimit {
         }
     }
 
-    /// @dev As `OutgoingRateLimit._refilled`, with 128-bit amounts.
-    function _refilled(GasKillerSDK.TokenBucket memory b) private view returns (uint256 available) {
+    /// @dev As `OutgoingRateLimit._refilled`, with 128-bit amounts: the budget and the timestamp
+    ///      to store with it, carrying the refill's rounding remainder over to the next spend. A
+    ///      128-bit limit times a 32-bit `elapsed` fits in 160 bits.
+    function _refilled(GasKillerSDK.TokenBucket memory b) private view returns (uint256 available, uint256 updated) {
         unchecked {
-            uint256 elapsed = uint32(block.timestamp) - uint256(b.updated);
+            uint256 now_ = uint32(block.timestamp);
+            uint256 elapsed = now_ - uint256(b.updated);
             uint256 limit = b.limit;
-            available = uint256(b.available) + (elapsed >= b.period ? limit : elapsed * limit / b.period);
-            if (available > limit) available = limit;
+            uint256 period = b.period;
+            if (elapsed >= period) return (limit, now_);
+            uint256 accrued = elapsed * limit;
+            available = uint256(b.available) + accrued / period;
+            if (available >= limit) return (limit, now_);
+            updated = now_ - (accrued % period) / limit;
         }
     }
 
     /// @dev `_DEPTH + depth << 64`: an add and a shift rather than a hash, since it runs on every
-    ///      op. Regions are 2^64 words apart, far more than one program can use.
+    ///      op. Regions are 2^64 words apart, far more than one program can use. Reverts at depth
+    ///      0, whose region would overlap the depth counter: a consumer that skipped `begin` would
+    ///      otherwise overwrite it, and `endProgram` would then underflow it.
     function _region() private view returns (uint256 r) {
+        uint256 depth;
         assembly ("memory-safe") {
-            r := add(_DEPTH, shl(64, tload(_DEPTH)))
+            depth := tload(_DEPTH)
+        }
+        require(depth != 0, TokenRateLimitNotBegun());
+        unchecked {
+            r = uint256(_DEPTH) + (depth << 64);
         }
     }
 

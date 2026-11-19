@@ -1245,9 +1245,20 @@ library StateChangeHandlerLib {
     ///      `_checkSelfCall`, so a zero-value op pays only the `value` check.
     function _countValue(CallPolicy memory policy, uint256 index, address target, uint256 value) private view {
         if (target == address(this)) return;
-        uint256 sent = policy.sent + value;
-        if (sent > policy.valueCap) revert OutgoingValueExceeded(index, sent, policy.valueCap);
-        policy.sent = sent;
+        uint256 sent = policy.sent;
+        uint256 cap = policy.valueCap;
+        // Compared against the headroom, not as `sent + value > cap`: with a cap near
+        // `type(uint256).max` the sum could overflow into a panic instead of this error.
+        // `sent > cap` is checked first, since a hand-built policy may not start `sent` at zero
+        // and the subtraction would then wrap. The reported total saturates rather than wrapping,
+        // and once both checks pass `sent + value <= cap`.
+        unchecked {
+            if (sent > cap || value > cap - sent) {
+                uint256 total = sent + value;
+                revert OutgoingValueExceeded(index, total < sent ? type(uint256).max : total, cap);
+            }
+            policy.sent = sent + value;
+        }
     }
 
     /// @dev Rejects a `CALL` to the running contract unless the policy's `allowSelfCall` allows
