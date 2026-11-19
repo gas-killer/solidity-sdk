@@ -2014,7 +2014,8 @@ abstract contract GasKillerSDK is
     /// @param target The callee; zero for `CREATE`/`CREATE2`.
     /// @param value Wei the op sends.
     /// @param data The calldata of a `CALL`, the initcode of a `CREATE`/`CREATE2`, empty for a
-    ///        `NESTED` op (the callee checks its own signed frame).
+    ///        `NESTED` op (the callee checks its own signed frame). **Read it, never write it**:
+    ///        it is the buffer the op runs from, so a change would run a call nobody signed.
     function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
         internal
         virtual {}
@@ -2428,14 +2429,21 @@ library OutgoingRateLimit {
 ///      Wire it up with `begin` in `_beforeProgram`, `beforeOp` in `_authorizeCall` and
 ///      `endProgram` in `_afterProgram`; the drop-ins in `src/extensions/` do. Programs can nest on
 ///      one contract, so the per-program state is kept in transient storage per depth. A
-///      program's charge is its net decrease, tokens it receives count against those it sends,
-///      and a re-entered frame's decrease is charged both to itself and to the frame around it.
+///      program's charge is its net decrease: tokens it receives count against those it sends.
 ///
 ///      Because receipts offset sends, a program could pull tokens in from users who approved
-///      this contract and send them on uncharged, so `beforeOp` flags a `transferFrom` on a listed
-///      token from anyone but this contract. It can still unwind a position held in an unlisted
-///      token (an aToken, an LP or staking token) and send the proceeds out uncharged: list
-///      position tokens too. Users' allowances on unlisted tokens aren't guarded at all.
+///      this contract and send them on uncharged, so a `transferFrom` into this contract doesn't
+///      offset (see `beforeOp`), and one between two others is flagged. Other receipts still do:
+///      a program can unwind a position held in an unlisted token (an aToken, an LP or staking
+///      token), or borrow against collateral, and send the proceeds out uncharged. List position
+///      tokens too, and reject calls to lending and debt markets, or anything else that can pay
+///      this contract out against a future obligation, in `_authorizeCall`. Users' allowances on
+///      unlisted tokens aren't guarded at all.
+///
+///      The limit errs towards charging twice. An allowance left standing is charged when the
+///      program ends, and again through the balance when a later program has the spender pull
+///      it. A frame that re-enters this contract is charged for its outflow, and so is the
+///      frame around it.
 ///
 ///      A token is recognized by the address it is listed under. Don't list a token that can also
 ///      be reached through a second address sharing its balances and allowances (a legacy proxy
@@ -2529,6 +2537,8 @@ library TokenRateLimit {
     }
 
     /// @notice Stops limiting `token`. Same rule as `set`: never from a `trackState` function.
+    ///         Its budget is dropped: listing it again starts full. To tighten a limit during a
+    ///         drain, lower it with `set` instead.
     function clear(GasKillerSDK.TokenLimits storage t, address token) internal {
         uint256 n = t.count;
         uint256 i = _find(t, token, n);
@@ -2572,10 +2582,12 @@ library TokenRateLimit {
     /// @notice Call from `_authorizeCall`, before every op that runs code. Takes the snapshot on
     ///         the program's first such op and records approvals of listed tokens.
     /// @return unrecognized True for a `CALL` to a listed token with a selector other than
-    ///         `transfer`, `approve`, `increaseAllowance`, `decreaseAllowance`, or `transferFrom`
-    ///         from this contract (or calldata too short to carry its arguments): a `transferFrom`
-    ///         from anyone else moves tokens users approved this contract for, which its balance
-    ///         doesn't show. **Reject the op when it is true**, unless you
+    ///         `transfer`, `approve`, `increaseAllowance`, `decreaseAllowance`, or a `transferFrom`
+    ///         from or to this contract (or calldata too short to carry its arguments): a
+    ///         `transferFrom` between two others moves tokens users approved this contract for,
+    ///         which its balance doesn't show. A `transferFrom` into this contract (a deposit)
+    ///         raises the snapshot by its amount, so what it brings in offsets no send; a
+    ///         fee-on-transfer token delivers less, and the fee is charged. **Reject the op when it is true**, unless you
     ///         know what that function does: a token can grant an allowance some other way
     ///         (`increaseApproval`, ERC-777 `authorizeOperator`, `approveAndCall`) that moves
     ///         nothing during the program, so it would never be charged. The drop-ins revert with
@@ -2611,10 +2623,26 @@ library TokenRateLimit {
         assembly ("memory-safe") {
             account := and(mload(add(data, 0x24)), 0xffffffffffffffffffffffffffffffffffffffff)
         }
-        // From this contract it is measured through the balance. From anyone else it moves tokens
-        // users approved this contract for, which the balance doesn't see (or sees offset by an
-        // equal send), so it is flagged.
-        if (selector == _TRANSFER_FROM) return account != address(this);
+        if (selector == _TRANSFER_FROM) {
+            // From this contract it is measured through the balance.
+            if (account == address(this)) return false;
+            // From anyone else to anyone else it moves tokens users approved this contract for,
+            // which the balance doesn't see, so it is flagged.
+            address to;
+            uint256 amount;
+            if (data.length >= 0x64) {
+                assembly ("memory-safe") {
+                    to := and(mload(add(data, 0x44)), 0xffffffffffffffffffffffffffffffffffffffff)
+                    amount := mload(add(data, 0x64))
+                }
+            }
+            if (to != address(this)) return true;
+            // A pull into this contract, the usual deposit: raise the snapshot balance by the
+            // amount, in this program and every one around it, so the tokens received can't
+            // offset a matching send.
+            _raiseSnapshots(index, amount);
+            return false;
+        }
         // `decreaseAllowance` is recorded like an approval: on a token that subtracts unchecked,
         // or gives the selector another meaning, it could raise the allowance.
         if (selector != _APPROVE && selector != _INCREASE_ALLOWANCE && selector != _DECREASE_ALLOWANCE) return true;
@@ -2672,6 +2700,23 @@ library TokenRateLimit {
         if (head != 0) _tstore(r, 0);
         assembly ("memory-safe") {
             tstore(_DEPTH, sub(tload(_DEPTH), 1))
+        }
+    }
+
+    /// @dev Adds `amount` to the snapshot balance of token `index` at the running depth and at
+    ///      every depth around it. Each has taken its snapshot (the op that started the inner
+    ///      program ran code) and lists the same tokens, as the budgets can't change mid-program.
+    function _raiseSnapshots(uint256 index, uint256 amount) private {
+        uint256 depth;
+        assembly ("memory-safe") {
+            depth := tload(_DEPTH)
+        }
+        for (; depth != 0; --depth) {
+            uint256 at;
+            unchecked {
+                at = uint256(_DEPTH) + (depth << 64) + 2 + 3 * index;
+            }
+            _tstore(at, _add(_tload(at), amount));
         }
     }
 
@@ -2899,8 +2944,8 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
     }
 
     /// @notice Override, in place of `_authorizeCall`, to reject ops; the arguments and rules
-    ///         are `_authorizeCall`'s. Runs before the op is charged to the limit. Allows
-    ///         everything by default.
+    ///         are `_authorizeCall`'s, including that `data` must not be written. Runs before
+    ///         the op is charged to the limit. Allows everything by default.
     function _authorizeLimitedCall(
         uint256 index,
         StateUpdateType kind,
@@ -2989,9 +3034,9 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
 ///
 ///      A signed `CALL` to a listed token is rejected with `TokenRateLimit.UnrecognizedTokenCall`
 ///      unless it is `transfer`, `approve`, `increaseAllowance`, `decreaseAllowance` or a
-///      `transferFrom` from this contract, or `_allowTokenCall` allows it: any other function
-///      could grant an allowance the limit doesn't see, and a `transferFrom` from anyone else
-///      moves tokens users approved this contract for, which its balance doesn't show.
+///      `transferFrom` from or to this contract, or `_allowTokenCall` allows it: any other
+///      function could grant an allowance the limit doesn't see, and a `transferFrom` between two
+///      others moves tokens users approved this contract for, which its balance doesn't show.
 abstract contract GasKillerTokenRateLimit is GasKillerOutgoingRateLimit {
     /// @param ethLimit Most wei signed programs may send in one `ethPeriod`.
     /// @param ethPeriod Seconds over which the full `ethLimit` refills.
@@ -3020,11 +3065,13 @@ abstract contract GasKillerTokenRateLimit is GasKillerOutgoingRateLimit {
         TokenRateLimit.clear(_tokenLimits(), token);
     }
 
-    /// @notice Override to let signed programs call `selector` on the listed `token`. Rejects all
-    ///         by default. Allow only functions that can't grant an allowance or otherwise let
-    ///         tokens leave later: what they move during the program is charged through the
-    ///         balance, but what they authorize for afterwards is not.
-    function _allowTokenCall(address token, bytes4 selector) internal view virtual returns (bool) {}
+    /// @notice Override to let signed programs make a call the limit doesn't recognize to the
+    ///         listed `token`: `selector` is `data`'s first four bytes, zero when it is shorter.
+    ///         Rejects all by default. Allow only calls that can't grant an allowance or otherwise
+    ///         let tokens leave later: what they move during the program is charged through the
+    ///         balance, but what they authorize for afterwards is not. Check `data`'s arguments
+    ///         where the selector alone isn't enough.
+    function _allowTokenCall(address token, bytes4 selector, bytes memory data) internal view virtual returns (bool) {}
 
     /// @notice Override, in place of `_beforeProgram`, to act right before a signed program runs.
     function _beforeLimitedProgram() internal virtual {}
@@ -3042,7 +3089,9 @@ abstract contract GasKillerTokenRateLimit is GasKillerOutgoingRateLimit {
     function _rateLimitOp(uint256 index, StateUpdateType kind, address target, bytes memory data) internal override {
         if (TokenRateLimit.beforeOp(_tokenLimits(), kind, target, data)) {
             bytes4 selector = bytes4(data);
-            require(_allowTokenCall(target, selector), TokenRateLimit.UnrecognizedTokenCall(index, target, selector));
+            require(
+                _allowTokenCall(target, selector, data), TokenRateLimit.UnrecognizedTokenCall(index, target, selector)
+            );
         }
     }
 
@@ -3084,7 +3133,7 @@ abstract contract GasKillerNestedTokenRateLimit is GasKillerNestedOutgoingRateLi
     }
 
     /// @notice As `GasKillerTokenRateLimit._allowTokenCall`.
-    function _allowTokenCall(address token, bytes4 selector) internal view virtual returns (bool) {}
+    function _allowTokenCall(address token, bytes4 selector, bytes memory data) internal view virtual returns (bool) {}
 
     /// @notice As `GasKillerTokenRateLimit._beforeLimitedProgram`.
     function _beforeLimitedProgram() internal virtual {}
@@ -3101,7 +3150,9 @@ abstract contract GasKillerNestedTokenRateLimit is GasKillerNestedOutgoingRateLi
     function _rateLimitOp(uint256 index, StateUpdateType kind, address target, bytes memory data) internal override {
         if (TokenRateLimit.beforeOp(_tokenLimits(), kind, target, data)) {
             bytes4 selector = bytes4(data);
-            require(_allowTokenCall(target, selector), TokenRateLimit.UnrecognizedTokenCall(index, target, selector));
+            require(
+                _allowTokenCall(target, selector, data), TokenRateLimit.UnrecognizedTokenCall(index, target, selector)
+            );
         }
     }
 

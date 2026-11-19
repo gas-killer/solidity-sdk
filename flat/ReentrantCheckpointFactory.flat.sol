@@ -1547,7 +1547,8 @@ abstract contract GasKillerSDK is
     /// @param target The callee; zero for `CREATE`/`CREATE2`.
     /// @param value Wei the op sends.
     /// @param data The calldata of a `CALL`, the initcode of a `CREATE`/`CREATE2`, empty for a
-    ///        `NESTED` op (the callee checks its own signed frame).
+    ///        `NESTED` op (the callee checks its own signed frame). **Read it, never write it**:
+    ///        it is the buffer the op runs from, so a change would run a call nobody signed.
     function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
         internal
         virtual {}
