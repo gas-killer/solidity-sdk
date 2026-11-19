@@ -101,8 +101,8 @@ abstract contract GasKillerNestedSDK is GasKillerSDK, IGasKillerNested {
     ///      1,000 and 2,940 just to read the cached words back.
     function _runProgram(bytes memory storageUpdates, NestedContext memory ctx) private {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        CallPolicy memory policy = _callPolicy();
         _beforeProgram();
+        CallPolicy memory policy = _callPolicy();
         if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args, policy, ctx);
         else StateChangeHandlerLib._runStateUpdatesPrevalidated(types, args, _settlementRanges(), policy, ctx);
         _afterProgram();

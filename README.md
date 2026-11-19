@@ -541,13 +541,17 @@ uncharged. So a deposit like that doesn't offset: the amount pulled in is added 
 balance (a fee-on-transfer token's fee is charged), and a `transferFrom` between two others is
 rejected (see below). Other receipts still offset sends. A program can unwind a position you hold in
 a form you haven't listed (an aToken, an LP or staking token), or borrow against your collateral,
-and send the proceeds out uncharged. List the tokens your positions are held in, and reject calls
-to lending and debt markets (anything that can pay your contract out against a future obligation)
-in `_authorizeLimitedCall`. Users' allowances on unlisted tokens aren't guarded.
+and send the proceeds out uncharged. So can a deposit that isn't a signed op: a contract the
+program calls can call back into your own deposit function, get credited, and the tokens it brings
+in offset a send. List the tokens your positions are held in, reject calls to lending and debt
+markets (anything that can pay your contract out against a future obligation) in
+`_authorizeLimitedCall`, and if your contract takes deposits, don't let programs call untrusted
+contracts. A signed deposit is counted at its calldata amount, so a token that delivers less (a fee
+on transfer, a `false` return) is charged the difference. Users' allowances on unlisted tokens aren't guarded.
 
 A token is recognized by the address it is listed under: don't list a token that is also reachable
-through a second address sharing its balances (a legacy proxy or alias), and don't list your
-contract itself.
+through a second address sharing its balances (a legacy proxy or alias). Listing your contract
+itself reverts with `InvalidTokenRateLimit`.
 
 **Approvals.** An approval moves nothing until it is used, possibly long after the program. So an
 `approve`, `increaseAllowance` or `decreaseAllowance` call to a listed token is recorded with the
@@ -560,7 +564,8 @@ rejected with `TokenRateLimit.UnrecognizedTokenCall` unless it is `transfer`, `a
 else (`increaseApproval`, ERC-777 `authorizeOperator`, `approveAndCall`) might grant an allowance
 the limit can't charge, and a `transferFrom` between two others moves tokens the balance doesn't
 show. To allow a call you know is safe, such as WETH's `withdraw`, override
-`_allowTokenCall(token, selector, data)`; check `data`'s arguments where the selector alone isn't
+`_allowTokenCall(token, selector, data)` (an unwrap still lowers the WETH balance, so it uses up the
+WETH budget, and the ETH is charged again if sent); check `data`'s arguments where the selector alone isn't
 enough. An allowance system outside the token, such as Permit2, isn't seen at all: reject calls to
 it in `_authorizeLimitedCall`.
 
@@ -575,6 +580,7 @@ and `_afterLimitedProgram` instead.
   from a `trackState` function. As for ETH, a newly listed token starts with a full budget, and
   updating one keeps what its budget holds, capped at the new limit. Clearing a token drops its
   budget, so listing it again starts full: to tighten a limit during a drain, lower it instead.
+  Neither may run while a signed program is running (`TokenRateLimitChangedMidProgram`).
   `gasKillerTokenAllowance(token)` returns the budget.
 - The limit errs towards charging twice, never under-counting. An approval left standing is charged
   when its program ends, and the spender's later pull is charged again through the balance. In a

@@ -141,6 +141,23 @@ contract CappedTreasury is Treasury {
     }
 }
 
+/// Sets its cap in `_beforeProgram`, as transient state: the policy must see it.
+contract HookCappedTreasury is Treasury {
+    constructor(address registry) Treasury(registry) {}
+
+    function _beforeProgram() internal override {
+        assembly ("memory-safe") {
+            tstore(0, 1000000000000000000)
+        }
+    }
+
+    function _maxOutgoingValue() internal view override returns (uint256 cap) {
+        assembly ("memory-safe") {
+            cap := tload(0)
+        }
+    }
+}
+
 /// Records every op its hook sees.
 contract RecordingTreasury is Treasury {
     struct Seen {
@@ -501,6 +518,18 @@ contract GasKillerSDKCallPolicyTest is Test {
         _call(p, ATTACKER, 1 << 255, "");
         _call(p, ATTACKER, 1 << 255, "");
         _settle(t, p, _exceeded(2, type(uint256).max, type(uint256).max));
+    }
+
+    /// `_beforeProgram` runs before the cap is read, so a cap it sets applies to the program.
+    function test_capSetInBeforeProgramApplies() public {
+        HookCappedTreasury t = new HookCappedTreasury(address(registry));
+        _funded(t);
+        Program memory p = _tracked(t, 1);
+        _call(p, ATTACKER, 1 ether + 1, "");
+        _settle(t, p, _exceeded(1, 1 ether + 1, 1 ether));
+        p = _tracked(t, 1);
+        _call(p, ATTACKER, 1 ether, "");
+        _settle(t, p);
     }
 
     function test_capIncludesCreate2() public {

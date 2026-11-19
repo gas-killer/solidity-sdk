@@ -111,6 +111,17 @@ contract NestingHarness is GasKillerSDK {
         TokenRateLimit.endProgram(_tokenLimits()); // the outer one: 50, not offset
     }
 
+    /// A limit changed while a program is running, as a callback would.
+    function setMidProgram(address token) external {
+        TokenRateLimit.begin();
+        TokenRateLimit.set(_tokenLimits(), token, 50, 1 hours);
+    }
+
+    function clearMidProgram(address token) external {
+        TokenRateLimit.begin();
+        TokenRateLimit.clear(_tokenLimits(), token);
+    }
+
     function available(address token) external view returns (uint256 a) {
         (a,,) = TokenRateLimit.allowance(_tokenLimits(), token);
     }
@@ -538,6 +549,22 @@ contract TokenRateLimitTest is Test {
         token.approve(address(h), 50);
         h.nestedDeposit(token, USER, ATTACKER);
         assertEq(h.available(address(token)), 50);
+    }
+
+    /// The list can't change under a running program: a callback could otherwise reorder it
+    /// between the snapshots of nested programs, or hand a program a fresh budget.
+    function test_limitsCannotChangeMidProgram() public {
+        NestingHarness h = new NestingHarness(address(token));
+        vm.expectRevert(TokenRateLimit.TokenRateLimitChangedMidProgram.selector);
+        h.setMidProgram(address(token));
+        vm.expectRevert(TokenRateLimit.TokenRateLimitChangedMidProgram.selector);
+        h.clearMidProgram(address(token));
+    }
+
+    /// The contract can't list itself: `STORE`s before the snapshot could move its balance.
+    function test_contractCannotListItself() public {
+        vm.expectRevert(TokenRateLimit.InvalidTokenRateLimit.selector);
+        v.setTokenLimit(address(v), 100, 1 hours);
     }
 
     /// Without `begin` there is no program to record into; the library reverts rather than
