@@ -1854,15 +1854,16 @@ abstract contract GasKillerSDK is
     ///      Every CALL, CREATE, CREATE2 and NESTED goes through `_callPolicy()`.
     function _stateChangeHandler(bytes calldata storageUpdates, StorageGuard.ProtectedRange[] memory ranges) internal {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        CallPolicy memory policy = _callPolicy();
         _beforeProgram();
+        CallPolicy memory policy = _callPolicy();
         if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args, policy);
         else StateChangeHandlerLib._runStateUpdatesPrevalidated(types, args, ranges, policy);
         _afterProgram();
     }
 
     /// @notice Override to act right before a signed program runs, after it was verified.
-    ///         Does nothing by default.
+    ///         Does nothing by default. Runs before the program's call policy is built, so
+    ///         `_maxOutgoingValue` sees what it sets.
     /// @dev Paired with `_afterProgram`. Programs can nest on one contract (a nested tree can
     ///      re-enter it), so per-program state should be kept per depth, for example in
     ///      transient storage, as `TokenRateLimit` does.
@@ -2310,8 +2311,8 @@ abstract contract GasKillerNestedSDK is GasKillerSDK, IGasKillerNested {
     ///      1,000 and 2,940 just to read the cached words back.
     function _runProgram(bytes memory storageUpdates, NestedContext memory ctx) private {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        CallPolicy memory policy = _callPolicy();
         _beforeProgram();
+        CallPolicy memory policy = _callPolicy();
         if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args, policy, ctx);
         else StateChangeHandlerLib._runStateUpdatesPrevalidated(types, args, _settlementRanges(), policy, ctx);
         _afterProgram();

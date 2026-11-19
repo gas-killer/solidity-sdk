@@ -1910,15 +1910,16 @@ abstract contract GasKillerSDK is
     ///      Every CALL, CREATE, CREATE2 and NESTED goes through `_callPolicy()`.
     function _stateChangeHandler(bytes calldata storageUpdates, StorageGuard.ProtectedRange[] memory ranges) internal {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        CallPolicy memory policy = _callPolicy();
         _beforeProgram();
+        CallPolicy memory policy = _callPolicy();
         if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args, policy);
         else StateChangeHandlerLib._runStateUpdatesPrevalidated(types, args, ranges, policy);
         _afterProgram();
     }
 
     /// @notice Override to act right before a signed program runs, after it was verified.
-    ///         Does nothing by default.
+    ///         Does nothing by default. Runs before the program's call policy is built, so
+    ///         `_maxOutgoingValue` sees what it sets.
     /// @dev Paired with `_afterProgram`. Programs can nest on one contract (a nested tree can
     ///      re-enter it), so per-program state should be kept per depth, for example in
     ///      transient storage, as `TokenRateLimit` does.
@@ -2435,9 +2436,12 @@ library OutgoingRateLimit {
 ///      this contract and send them on uncharged, so a `transferFrom` into this contract doesn't
 ///      offset (see `beforeOp`), and one between two others is flagged. Other receipts still do:
 ///      a program can unwind a position held in an unlisted token (an aToken, an LP or staking
-///      token), or borrow against collateral, and send the proceeds out uncharged. List position
+///      token), or borrow against collateral, and send the proceeds out uncharged. So can a
+///      deposit that isn't a signed op: a called contract that calls back into this contract's own
+///      deposit function, which credits the depositor, offsets a send just the same. List position
 ///      tokens too, and reject calls to lending and debt markets, or anything else that can pay
-///      this contract out against a future obligation, in `_authorizeCall`. Users' allowances on
+///      this contract out against a future obligation, in `_authorizeCall`; a contract with a
+///      deposit function should not let programs call untrusted contracts. Users' allowances on
 ///      unlisted tokens aren't guarded at all.
 ///
 ///      The limit errs towards charging twice. An allowance left standing is charged when the
@@ -2447,8 +2451,8 @@ library OutgoingRateLimit {
 ///
 ///      A token is recognized by the address it is listed under. Don't list a token that can also
 ///      be reached through a second address sharing its balances and allowances (a legacy proxy
-///      or alias): calls to that address aren't seen as calls to the token. Don't list this
-///      contract itself either: the snapshot is taken at the first op that runs code, so `STORE`
+///      or alias): calls to that address aren't seen as calls to the token. `set` rejects
+///      this contract itself: the snapshot is taken at the first op that runs code, so `STORE`
 ///      ops before it could move its own token balance unmeasured.
 ///
 ///      The budgets live in the SDK's protected config namespace (`GasKillerSDK._tokenLimits()`),
@@ -2461,8 +2465,8 @@ library TokenRateLimit {
     ///         token's budget.
     error TokenRateLimitExceeded(address token, uint256 amount, uint256 available);
 
-    /// @notice A zero token, a limit above `type(uint128).max`, or a period of zero or above
-    ///         `type(uint32).max`.
+    /// @notice A zero token, this contract itself, a limit above `type(uint128).max`, or a
+    ///         period of zero or above `type(uint32).max`.
     error InvalidTokenRateLimit();
 
     /// @notice All `MAX_TOKENS` entries are in use.
@@ -2470,6 +2474,9 @@ library TokenRateLimit {
 
     /// @notice `beforeOp` or `endProgram` ran outside a program: `begin` wasn't called first.
     error TokenRateLimitNotBegun();
+
+    /// @notice `set` or `clear` ran while a program was running, through a callback.
+    error TokenRateLimitChangedMidProgram();
 
     /// @notice A signed `CALL` to a listed token with a function the limit can't account for
     ///         (see `beforeOp`). Raised by the drop-ins in `src/extensions/`.
@@ -2513,13 +2520,16 @@ library TokenRateLimit {
     ///         holds now, capped at the new limit, so lowering a limit during a drain doesn't hand
     ///         out a fresh budget.
     /// @dev **Do not call from a `trackState` function**: the budgets are protected storage, so a
-    ///      program carrying the write can never settle. Call it from a constructor, an
+    ///      program carrying the write can never settle. Reverts while a program is running
+    ///      (`TokenRateLimitChangedMidProgram`), so a callback can't change the list under it. Call it from a constructor, an
     ///      initializer or an admin function that is not `trackState`.
     function set(GasKillerSDK.TokenLimits storage t, address token, uint256 limit, uint256 period) internal {
         require(
-            token != address(0) && limit <= type(uint128).max && period != 0 && period <= type(uint32).max,
+            token != address(0) && token != address(this) && limit <= type(uint128).max && period != 0
+                && period <= type(uint32).max,
             InvalidTokenRateLimit()
         );
+        _requireNoProgram();
         uint256 n = t.count;
         uint256 i = _find(t, token, n);
         uint256 available = limit;
@@ -2540,6 +2550,7 @@ library TokenRateLimit {
     ///         Its budget is dropped: listing it again starts full. To tighten a limit during a
     ///         drain, lower it with `set` instead.
     function clear(GasKillerSDK.TokenLimits storage t, address token) internal {
+        _requireNoProgram();
         uint256 n = t.count;
         uint256 i = _find(t, token, n);
         if (i == n) return;
@@ -2586,8 +2597,10 @@ library TokenRateLimit {
     ///         from or to this contract (or calldata too short to carry its arguments): a
     ///         `transferFrom` between two others moves tokens users approved this contract for,
     ///         which its balance doesn't show. A `transferFrom` into this contract (a deposit)
-    ///         raises the snapshot by its amount, so what it brings in offsets no send; a
-    ///         fee-on-transfer token delivers less, and the fee is charged. **Reject the op when it is true**, unless you
+    ///         raises the snapshot by its amount, so what it brings in offsets no send. The
+    ///         amount is taken from the calldata before the call runs, so a token that delivers
+    ///         less (a fee on transfer, a `false` return instead of a revert) is charged the
+    ///         difference: never too little. **Reject the op when it is true**, unless you
     ///         know what that function does: a token can grant an allowance some other way
     ///         (`increaseApproval`, ERC-777 `authorizeOperator`, `approveAndCall`) that moves
     ///         nothing during the program, so it would never be charged. The drop-ins revert with
@@ -2718,6 +2731,17 @@ library TokenRateLimit {
             }
             _tstore(at, _add(_tload(at), amount));
         }
+    }
+
+    /// @dev The per-depth snapshots assume the list doesn't change mid-program: `clear` reorders
+    ///      it, so a deposit in a nested program would raise the wrong token around it, and a
+    ///      callback could hand a running program a fresh budget.
+    function _requireNoProgram() private view {
+        uint256 depth;
+        assembly ("memory-safe") {
+            depth := tload(_DEPTH)
+        }
+        require(depth == 0, TokenRateLimitChangedMidProgram());
     }
 
     /// @dev Saturating add: an unlimited allowance stays the largest charge.
@@ -2889,8 +2913,8 @@ abstract contract GasKillerNestedSDK is GasKillerSDK, IGasKillerNested {
     ///      1,000 and 2,940 just to read the cached words back.
     function _runProgram(bytes memory storageUpdates, NestedContext memory ctx) private {
         (StateUpdateType[] memory types, bytes[] memory args) = abi.decode(storageUpdates, (StateUpdateType[], bytes[]));
-        CallPolicy memory policy = _callPolicy();
         _beforeProgram();
+        CallPolicy memory policy = _callPolicy();
         if (_unsafeDisableStorageGuard()) StateChangeHandlerLib._runStateUpdatesUnguarded(types, args, policy, ctx);
         else StateChangeHandlerLib._runStateUpdatesPrevalidated(types, args, _settlementRanges(), policy, ctx);
         _afterProgram();
