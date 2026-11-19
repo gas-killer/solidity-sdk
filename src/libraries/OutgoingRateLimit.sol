@@ -61,12 +61,13 @@ library OutgoingRateLimit {
         assembly ("memory-safe") {
             word := sload(b.slot)
         }
-        uint256 left = _refilled(word);
+        (uint256 left, uint256 updated) = _refilled(word);
         if (value > left) revert OutgoingRateLimitExceeded(index, value, left);
         // Keep `limit` and `period`; replace `available` and `updated`. `left - value` can't
-        // underflow (checked just above) and fits in 96 bits because `left` never exceeds `limit`.
+        // underflow (checked just above) and fits in 96 bits because `left` never exceeds `limit`;
+        // `updated` is a 32-bit timestamp.
         unchecked {
-            word = (word & _KEEP) | ((left - value) << 96) | (uint256(uint32(block.timestamp)) << 224);
+            word = (word & _KEEP) | ((left - value) << 96) | (updated << 224);
         }
         assembly ("memory-safe") {
             sstore(b.slot, word)
@@ -83,24 +84,36 @@ library OutgoingRateLimit {
         assembly ("memory-safe") {
             word := sload(b.slot)
         }
-        return (_refilled(word), uint96(word), uint32(word >> 192));
+        (available,) = _refilled(word);
+        return (available, uint96(word), uint32(word >> 192));
     }
 
     /// @dev The `limit` and `period` bits of the packed slot.
     uint256 private constant _KEEP = uint256(type(uint96).max) | (uint256(type(uint32).max) << 192);
 
-    /// @dev `available` plus the refill since `updated`, up to `limit`. An unset budget (zero
-    ///      limit and period) holds nothing.
+    /// @dev `available` plus the refill since `updated`, up to `limit`, and the timestamp to store
+    ///      with it. An unset budget (zero limit and period) holds nothing.
+    ///      The refill rounds down, so the timestamp moves forward only by the time the credited
+    ///      wei took to accrue: the remainder carries over to the next spend instead of being lost.
+    ///      Otherwise spends closer together than `period / limit` seconds would each credit
+    ///      nothing, and the budget would never refill. Once the budget is full there is nothing
+    ///      to carry, and the timestamp is now.
     ///      Unchecked: `elapsed` doesn't underflow because `updated` is never ahead of the clock
     ///      (until the 32-bit timestamp wraps in 2106), its product with a 96-bit limit fits in
-    ///      128 bits, and `period` is nonzero whenever the division runs.
-    function _refilled(uint256 word) private view returns (uint256 available) {
+    ///      128 bits, `period` is nonzero whenever the division runs, and so is `limit` when the
+    ///      budget isn't full. The carried time is under `elapsed`, so `updated` stays at or after
+    ///      its old value.
+    function _refilled(uint256 word) private view returns (uint256 available, uint256 updated) {
         unchecked {
             uint256 limit = uint96(word);
             uint256 period = uint32(word >> 192);
-            uint256 elapsed = uint32(block.timestamp) - (word >> 224);
-            available = uint96(word >> 96) + (elapsed >= period ? limit : elapsed * limit / period);
-            if (available > limit) available = limit;
+            uint256 now_ = uint32(block.timestamp);
+            uint256 elapsed = now_ - (word >> 224);
+            if (elapsed >= period) return (limit, now_);
+            uint256 accrued = elapsed * limit;
+            available = uint96(word >> 96) + accrued / period;
+            if (available >= limit) return (limit, now_);
+            updated = now_ - (accrued % period) / limit;
         }
     }
 }

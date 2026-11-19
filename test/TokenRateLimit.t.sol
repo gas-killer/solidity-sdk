@@ -69,6 +69,15 @@ contract NestingHarness is GasKillerSDK {
     function available(address token) external view returns (uint256 a) {
         (a,,) = TokenRateLimit.allowance(_tokenLimits(), token);
     }
+
+    /// Wired without `begin`.
+    function beforeOpWithoutBegin() external {
+        TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
+    }
+
+    function endProgramWithoutBegin() external {
+        TokenRateLimit.endProgram(_tokenLimits());
+    }
 }
 
 /// @notice `TokenRateLimit` through the drop-in: net token outflow and standing allowances per
@@ -222,6 +231,50 @@ contract TokenRateLimitTest is Test {
         assertEq(_available(), 100);
     }
 
+    /// Approving the same spender again doesn't charge the allowance left standing twice: 40
+    /// pulled plus 40 standing is 80, not 40 + 40 + 40.
+    function test_reapprovingASpenderIsChargedOnce() public {
+        Program memory p = _tracked(3);
+        _call(p, address(token), abi.encodeCall(IERC20.approve, (address(puller), 40)));
+        _call(p, address(puller), abi.encodeCall(Puller.pull, (token, address(v), ATTACKER, 40)));
+        _call(p, address(token), abi.encodeCall(IERC20.approve, (address(puller), 40)));
+        _settle(p, "");
+        assertEq(_available(), 20);
+    }
+
+    /// Approving twice, then pulling the allowance: only the pull is charged.
+    function test_reapprovalThenPullIsChargedOnce() public {
+        Program memory p = _tracked(3);
+        _call(p, address(token), abi.encodeCall(IERC20.approve, (address(puller), 40)));
+        _call(p, address(token), abi.encodeCall(IERC20.approve, (address(puller), 40)));
+        _call(p, address(puller), abi.encodeCall(Puller.pull, (token, address(v), ATTACKER, 40)));
+        _settle(p, "");
+        assertEq(_available(), 60);
+    }
+
+    /// A no-op approval first can't lower the charge: the allowance the spender had before the
+    /// program, once pulled, isn't still standing, so restoring it is charged.
+    function test_extraApprovalCannotLowerTheCharge() public {
+        v.approveNatively(token, address(puller), 40);
+        Program memory p = _tracked(3);
+        _call(p, address(token), abi.encodeCall(IERC20.approve, (address(puller), 40)));
+        _call(p, address(puller), abi.encodeCall(Puller.pull, (token, address(v), ATTACKER, 40)));
+        _call(p, address(token), abi.encodeCall(IERC20.approve, (address(puller), 40)));
+        _settle(p, "");
+        assertEq(_available(), 20, "40 pulled plus 40 restored, as without the first approval");
+    }
+
+    /// As `OutgoingRateLimit`: frequent small charges don't stop the budget refilling.
+    function test_frequentChargesStillRefill() public {
+        v.setTokenLimit(address(token), 1000, 1 days);
+        for (uint256 i = 0; i < 300; ++i) {
+            vm.warp(block.timestamp + 60);
+            _send(1, "");
+        }
+        assertGe(_available(), 1000 - 300 + 208 - 4);
+        assertLe(_available(), 1000 - 300 + 208);
+    }
+
     /// Only the increase over the allowance the spender already had is charged.
     function test_onlyTheAllowanceIncreaseIsCharged() public {
         v.approveNatively(token, ATTACKER, 30);
@@ -291,6 +344,16 @@ contract TokenRateLimitTest is Test {
         token.mint(address(h), 100);
         h.nested(token, ATTACKER);
         assertEq(h.available(address(token)), 100 - 20 - 30);
+    }
+
+    /// Without `begin` there is no program to record into; the library reverts rather than
+    /// writing over its depth counter.
+    function test_withoutBeginReverts() public {
+        NestingHarness h = new NestingHarness(address(token));
+        vm.expectRevert(TokenRateLimit.TokenRateLimitNotBegun.selector);
+        h.beforeOpWithoutBegin();
+        vm.expectRevert(TokenRateLimit.TokenRateLimitNotBegun.selector);
+        h.endProgramWithoutBegin();
     }
 
     function test_nestedDropInChargesToo() public {

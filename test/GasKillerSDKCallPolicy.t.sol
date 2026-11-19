@@ -492,6 +492,17 @@ contract GasKillerSDKCallPolicyTest is Test {
         assertEq(ATTACKER.balance, 0);
     }
 
+    /// Under the default unlimited cap, a total past `type(uint256).max` is reported as the cap
+    /// error, saturated, rather than as an arithmetic panic.
+    function test_capOverflowIsTheCapError() public {
+        Treasury t = new Treasury(address(registry));
+        vm.deal(address(t), type(uint256).max);
+        Program memory p = _tracked(t, 2);
+        _call(p, ATTACKER, 1 << 255, "");
+        _call(p, ATTACKER, 1 << 255, "");
+        _settle(t, p, _exceeded(2, type(uint256).max, type(uint256).max));
+    }
+
     function test_capIncludesCreate2() public {
         CappedTreasury t = new CappedTreasury(address(registry));
         _funded(t);

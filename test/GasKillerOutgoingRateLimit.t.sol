@@ -215,6 +215,20 @@ contract GasKillerOutgoingRateLimitTest is Test {
         _drain(t, 1 ether + 1, _exceeded(1, 1 ether + 1, 1 ether));
     }
 
+    /// Spends closer together than `period / limit` seconds each refill less than one wei. The
+    /// rounding remainder carries over, so the budget still refills at its rate instead of only
+    /// draining (which it did when every spend dropped the remainder and restarted the clock).
+    function test_frequentSpendsStillRefill() public {
+        t.setLimit(1000, 1 days); // one wei per 86.4 seconds
+        for (uint256 i = 0; i < 300; ++i) {
+            vm.warp(block.timestamp + 60);
+            _drain(t, 1, "");
+        }
+        // 18,000 s refill 208 wei; carrying the remainder in whole seconds loses under 1 s per spend.
+        assertGe(_available(t), 1000 - 300 + 208 - 4);
+        assertLe(_available(t), 1000 - 300 + 208);
+    }
+
     function testFuzz_neverMoreThanLimitPlusRefill(uint256[6] memory amounts, uint32[6] memory gaps) public {
         uint256 start = block.timestamp;
         uint256 sent;
