@@ -838,19 +838,21 @@ library CallAllowList {
 
     /// @notice Reverts unless the op is allowed.
     /// @dev A `CALL` to the running contract itself is skipped: the SDK's self-call check
-    ///      (`_allowSelfCall`) has already allowed it. Calldata of 1 to 3 bytes, or of 4 or more
+    ///      (`_allowSelfCall`) has already allowed it. So is a `NESTED` op to it: the frame it
+    ///      opens is this contract's own, and each of its ops comes through this check too. Calldata of 1 to 3 bytes, or of 4 or more
     ///      starting with `0x00000000`, is rejected without asking `isAllowed`, since it would land
     ///      in a fallback that allowing the ETH-transfer case (selector zero) or a selector its
     ///      zero-padding matches doesn't mean to open.
     /// @param isAllowed The consumer's list: whether `selector` may be called on `target`.
-    /// @param allowDeployments Whether `CREATE` and `CREATE2` ops may run.
+    /// @param allowDeployments Whether `CREATE` and `CREATE2` ops may run; called only for those
+    ///        ops, so it may read storage without costing every `CALL`. `noDeployments` refuses.
     function check(
         uint256 index,
         StateUpdateType kind,
         address target,
         bytes memory data,
         function(address, bytes4) view returns (bool) isAllowed,
-        bool allowDeployments
+        function() view returns (bool) allowDeployments
     ) internal view {
         if (kind == StateUpdateType.CALL) {
             if (target == address(this)) return;
@@ -867,10 +869,16 @@ library CallAllowList {
             }
             if (!isAllowed(target, selector)) revert CallNotAllowed(index, target, selector);
         } else if (kind == StateUpdateType.NESTED) {
+            if (target == address(this)) return;
             bytes4 selector = IGasKillerNested.applyNested.selector;
             if (!isAllowed(target, selector)) revert CallNotAllowed(index, target, selector);
-        } else if (!allowDeployments) {
+        } else if (!allowDeployments()) {
             revert DeploymentNotAllowed(index);
         }
+    }
+
+    /// @notice For `check`'s `allowDeployments`: refuses every `CREATE` and `CREATE2`.
+    function noDeployments() internal pure returns (bool) {
+        return false;
     }
 }
