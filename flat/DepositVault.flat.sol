@@ -1293,9 +1293,18 @@ library StateChangeHandlerLib {
     ///      ETH-transfer case, or a selector its zero-padding matches, must not let it through.
     function _checkSelfCall(CallPolicy memory policy, uint256 index, bytes memory data) private view {
         uint256 length = data.length;
-        bytes4 selector = bytes4(data); // zero-padded when shorter than 4 bytes
-        bool wellFormed = length == 0 || (length >= 4 && selector != bytes4(0));
-        require(wellFormed && policy.allowSelfCall(selector), SelfCall(index, selector));
+        bytes4 selector;
+        if (length >= 4) {
+            // One `mload` rather than `bytes4(data)`, which costs about 240 gas more, as in
+            // `CallAllowList.check`.
+            assembly ("memory-safe") {
+                selector := and(mload(add(data, 0x20)), shl(224, 0xffffffff))
+            }
+            require(selector != bytes4(0), SelfCall(index, selector));
+        } else if (length != 0) {
+            revert SelfCall(index, bytes4(data)); // zero-padded
+        }
+        require(policy.allowSelfCall(selector), SelfCall(index, selector));
     }
 
     /// @dev The STORE check of an unguarded run: none.
