@@ -2399,19 +2399,13 @@ library OutgoingRateLimit {
     }
 
     /// @notice Opens a measuring window around one of the contract's own functions: returns its
-    ///         ETH balance before the function, not counting the `msg.value` it was called with.
-    /// @dev A self-call's `msg.value` is the contract's own ETH, not new money, so it isn't
-    ///      excluded: otherwise ETH an allowed self-call sends in, which `spend` skips, could be
-    ///      paid out uncharged. Put the window on external entry points: inside one call every
-    ///      window excludes the same `msg.value`, so a window on an internal function that runs
-    ///      after the call forwarded its `msg.value` sees a lower baseline (zero at worst, rather
-    ///      than an underflow) and under-counts. The window around it still charges the call.
+    ///         ETH balance as the function starts, the call's `msg.value` included.
+    /// @dev `msg.value` is already in the balance and isn't excluded: every window in one call
+    ///      sees the same `msg.value`, so excluding it would let one deposit offset the payout of
+    ///      each limited function the call runs. So ETH a limited function receives with its call
+    ///      and sends on is charged; only ETH that arrives during the window offsets a send.
     function beginNative() internal view returns (uint256 baseline) {
-        baseline = address(this).balance;
-        if (msg.sender == address(this)) return baseline;
-        unchecked {
-            return baseline > msg.value ? baseline - msg.value : 0;
-        }
+        return address(this).balance;
     }
 
     /// @notice Closes the window `beginNative` opened: spends the net decrease of the contract's
@@ -3108,8 +3102,9 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
     ///      itself a balance in this contract's state and withdraw it through an ordinary
     ///      `withdraw()` later. Limiting the payout functions too bounds that route: honest
     ///      withdrawals then share the budget, so size `limit` for normal traffic. Measured by
-    ///      balance (`msg.value` excluded), so every route out of the function counts, including
-    ///      callbacks. A limited function that calls another, directly or through a callback, is
+    ///      balance, so every route out of the function counts, including callbacks. The call's
+    ///      `msg.value` is in the balance before the function runs, so it doesn't offset what the
+    ///      function sends. A limited function that calls another, directly or through a callback, is
     ///      charged for both windows: conservative, never under-counted. Reverts with
     ///      `OutgoingRateLimit.NativeOutflowRateLimitExceeded` (or
     ///      `TokenRateLimit.TokenRateLimitExceeded`) after the function, rolling it back. In the
@@ -3197,8 +3192,9 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
     ///      itself a balance in this contract's state and withdraw it through an ordinary
     ///      `withdraw()` later. Limiting the payout functions too bounds that route: honest
     ///      withdrawals then share the budget, so size `limit` for normal traffic. Measured by
-    ///      balance (`msg.value` excluded), so every route out of the function counts, including
-    ///      callbacks. A limited function that calls another, directly or through a callback, is
+    ///      balance, so every route out of the function counts, including callbacks. The call's
+    ///      `msg.value` is in the balance before the function runs, so it doesn't offset what the
+    ///      function sends. A limited function that calls another, directly or through a callback, is
     ///      charged for both windows: conservative, never under-counted. Reverts with
     ///      `OutgoingRateLimit.NativeOutflowRateLimitExceeded` (or
     ///      `TokenRateLimit.TokenRateLimitExceeded`) after the function, rolling it back. In the
