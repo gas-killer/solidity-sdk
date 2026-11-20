@@ -906,9 +906,18 @@ library StateChangeHandlerLib {
     ///      ETH-transfer case, or a selector its zero-padding matches, must not let it through.
     function _checkSelfCall(CallPolicy memory policy, uint256 index, bytes memory data) private view {
         uint256 length = data.length;
-        bytes4 selector = bytes4(data); // zero-padded when shorter than 4 bytes
-        bool wellFormed = length == 0 || (length >= 4 && selector != bytes4(0));
-        require(wellFormed && policy.allowSelfCall(selector), SelfCall(index, selector));
+        bytes4 selector;
+        if (length >= 4) {
+            // One `mload` rather than `bytes4(data)`, which costs about 240 gas more, as in
+            // `CallAllowList.check`.
+            assembly ("memory-safe") {
+                selector := and(mload(add(data, 0x20)), shl(224, 0xffffffff))
+            }
+            require(selector != bytes4(0), SelfCall(index, selector));
+        } else if (length != 0) {
+            revert SelfCall(index, bytes4(data)); // zero-padded
+        }
+        require(policy.allowSelfCall(selector), SelfCall(index, selector));
     }
 
     /// @dev The STORE check of an unguarded run: none.
@@ -1902,9 +1911,10 @@ abstract contract GasKillerSDK is
 ///
 ///      The budgets live in the SDK's protected config namespace (`GasKillerSDK._tokenLimits()`),
 ///      so a signed program can't refill them with a `STORE`. All of the contract's programs
-///      share them. Only signed programs are charged: the contract's own functions, called
-///      natively, are not, so a balance a program credits with a `STORE` and the contract later
-///      pays out isn't charged either.
+///      share them. Signed programs are charged. The contract's own functions, called natively, are
+///      charged only inside a `begin` / `snapshot` / `endProgram` window (the drop-ins'
+///      `limitsOutflow`): without one, a balance a program credits with a `STORE` and the
+///      contract later pays out isn't charged.
 library TokenRateLimit {
     /// @notice A program's net outflow of `token`, with allowances it left standing, exceeds the
     ///         token's budget.
@@ -2066,17 +2076,7 @@ library TokenRateLimit {
         returns (bool unrecognized)
     {
         uint256 r = _region();
-        uint256 head = _tload(r);
-        if (head & 1 == 0) {
-            uint256 count = t.count;
-            for (uint256 i = 0; i < count; ++i) {
-                address token = t.buckets[i].token;
-                _tstore(r + 1 + 3 * i, uint160(token));
-                _tstore(r + 2 + 3 * i, IERC20(token).balanceOf(address(this)));
-            }
-            head = 1 | (count << 1);
-            _tstore(r, head);
-        }
+        uint256 head = _snapshot(t, r);
         if (kind != StateUpdateType.CALL) return false;
         bytes4 selector = bytes4(data); // zero-padded when shorter than 4 bytes
         // Moves this contract's tokens, measured through the balance: fine on any target, so a
@@ -2132,6 +2132,32 @@ library TokenRateLimit {
             _tstore(r, head + (1 << 16));
         } else if (current < _tload(slot + 2)) {
             _tstore(slot + 2, current);
+        }
+    }
+
+    /// @notice Takes the snapshot now, if it isn't taken yet. For a measuring window around one
+    ///         of the contract's own functions: `begin`, then `snapshot`, then `endProgram` after
+    ///         the function, which charges what it moved out.
+    /// @dev The window charges a function's net outflow of each listed token, so a balance a
+    ///      program credits with a `STORE` can't be withdrawn faster than the budget allows.
+    ///      Approvals the function grants aren't recorded: the contract's own code decides those.
+    function snapshot(GasKillerSDK.TokenLimits storage t) internal {
+        _snapshot(t, _region());
+    }
+
+    /// @dev Records `balanceOf(this)` for every listed token in region `r`, unless already done,
+    ///      and returns the region's head.
+    function _snapshot(GasKillerSDK.TokenLimits storage t, uint256 r) private returns (uint256 head) {
+        head = _tload(r);
+        if (head & 1 == 0) {
+            uint256 count = t.count;
+            for (uint256 i = 0; i < count; ++i) {
+                address token = t.buckets[i].token;
+                _tstore(r + 1 + 3 * i, uint160(token));
+                _tstore(r + 2 + 3 * i, IERC20(token).balanceOf(address(this)));
+            }
+            head = 1 | (count << 1);
+            _tstore(r, head);
         }
     }
 

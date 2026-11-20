@@ -387,9 +387,10 @@ They all run before the op does, and a revert in any of them reverts the whole t
 what a program's own ops do. A compromised quorum can also `STORE` into your contract's own state,
 for example crediting itself a large balance in a mapping (mapping entries can't be protected, see
 [Protected storage](#protected-storage)), and then withdraw through your contract's normal functions
-in a later transaction. Nothing here sees that. For a contract whose payouts follow its own balances,
-such as a vault, an AMM or a staking pool, these limits close the direct route only; bounding the
-indirect one means having your own payout functions spend from the same budget as well.
+in a later transaction. The call policy and the program-side limits don't see that. For a contract
+whose payouts follow its own balances, such as a vault, an AMM or a staking pool, wrap the payout
+functions in `limitsOutflow` (see [Limiting your own payouts](#limiting-your-own-payouts)), so that
+route draws from the same budget.
 
 None of the hooks is told which tracked function a transition is for. The quorum names that
 function and nothing checks it against the program, so a rule that depended on it would only look
@@ -516,9 +517,10 @@ function _authorizeCall(uint256 index, StateUpdateType kind, address target, uin
 - **Shared.** All of the contract's programs spend from one bucket: single, batched, and nested
   frames alike. A `NESTED` op's value spends the parent's bucket; a callee with its own limit spends
   its own.
-- **Signed programs only.** The contract's own functions, called natively, spend nothing from it.
-  So a quorum that credits itself a balance with a `STORE` and withdraws through your own
-  `withdraw()` isn't limited: see [What these limits cover](#restricting-calls).
+- **Signed programs, plus the functions you mark.** The contract's own functions spend nothing from
+  it unless wrapped in `limitsOutflow`. Without that, a quorum that credits itself a balance with a
+  `STORE` and withdraws through your own `withdraw()` isn't limited: see
+  [Limiting your own payouts](#limiting-your-own-payouts).
 - **ETH only.** A token transfer sends no value; see per-token limits below.
 - **Changing the limit.** The first `_setOutgoingRateLimit(limit, period)` (or
   `OutgoingRateLimit.set`) fills the bucket. A later one keeps what it holds, capped at the new limit: lowering the limit during a drain doesn't
@@ -619,6 +621,111 @@ and `_afterLimitedProgram` instead.
   one and +20,600 with four. Each listed token costs two `balanceOf` calls and a budget read and
   write per settlement that runs code.
 
+### Limiting your own payouts
+
+The rate limits above see what signed programs send. A compromised quorum can also credit itself a
+balance in your contract's own state with a `STORE` and withdraw it through your ordinary
+`withdraw()` later. To bound that route, wrap every function that can pay out ETH or a listed token
+in `limitsOutflow`, from either rate-limit drop-in:
+
+```solidity
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {GasKillerTokenRateLimit} from "gas-killer-sdk/extensions/GasKillerTokenRateLimit.sol";
+
+contract Vault is GasKillerTokenRateLimit {
+    IERC20 public immutable usdc;
+    mapping(address => uint256) public balances;
+
+    // At most 10 ETH and 100,000 USDC an hour, through programs and withdrawals together.
+    constructor(address registry, IERC20 usdc_) GasKillerTokenRateLimit(10 ether, 1 hours) {
+        _setSchnorrRegistry(registry);
+        usdc = usdc_;
+        _setTokenRateLimit(address(usdc_), 100_000e6, 1 hours);
+    }
+
+    function withdraw(uint256 amount) external limitsOutflow {
+        balances[msg.sender] -= amount;
+        require(usdc.transfer(msg.sender, amount));
+    }
+}
+```
+
+- **Measured, like programs.** The modifier reads the contract's ETH balance and each listed token's `balanceOf` before the function and after it, and charges the
+  decrease to the same budgets signed programs spend. Every route out of the function counts,
+  including callbacks, and nothing has to be counted by hand. A shortfall reverts the call with
+  `OutgoingRateLimit.NativeOutflowRateLimitExceeded(value, available)` or
+  `TokenRateLimit.TokenRateLimitExceeded(token, amount, available)`.
+- **Honest withdrawals share the budget.** That is the point, and the cost: size `limit` for your
+  normal outflow plus headroom, as for a bridge's withdrawal limit. When the budget runs out,
+  withdrawals wait for it to refill.
+- **Net, so inflows hide payouts.** Anything the contract receives during the call offsets what it
+  sends: unwrapping WETH and sending the ETH on is charged only if WETH is listed as a token too.
+  That includes inflows someone else can trigger: rewards a public `harvest()` or claim pays your
+  contract, a repayment, another protocol's payout, and tokens your contract pulls with
+  `transferFrom` (which programs, unlike the window, can't use to offset a send). If a payout's
+  recipient gets a callback (ETH `receive`, ERC-777 or ERC-1155 hooks) and can trigger such an
+  inflow from it, a credited balance can leave uncharged, covered by funds that belonged to others.
+  Keep those inflows out of reach of limited functions and their callbacks, or pay out through a
+  pull pattern. Charging gross outflow instead is #117.
+- **Listed tokens must stay readable.** In the token drop-in every limited call reads `balanceOf`
+  on every listed token. One whose `balanceOf` reverts (paused, broken by an upgrade) blocks every
+  limited function, ETH-only payouts included, until it is cleared. Limits can't be set or cleared
+  from inside a limited function either (`TokenRateLimitChangedMidProgram`).
+- **Never on a `trackState` function.** The modifier writes the budget, which is protected
+  storage, so a program carrying that write can never settle (`ProtectedSlotWrite`), as with the
+  config setters. Put it on your plain payout functions only.
+- **Final.** The modifier can't be overridden, so its charge can't be dropped by an override that
+  forgets `super`.
+- **`msg.value` doesn't offset payouts.** It is already in the balance when the window opens, so
+  a payable limited function that receives ETH and sends it on (a swap, a forwarder) is charged for
+  what it sends. Excluding it would let one deposit offset every limited function a call runs.
+- **Nested windows.** A limited function that calls another, directly or through a callback, is
+  charged for both: conservative, never under-counted, but honest payouts can use the budget up
+  faster. The same applies to a limited function an allowed self-call reaches inside a signed
+  program. Charging only the outermost window is #119.
+- **Cost.** About +1,000 gas for an ETH payout with the budget slot warm, plus about 2,100 for the
+  first (cold) read of it in a transaction. A token payout costs about +4,000 with no tokens listed,
+  +9,100 with one and +26,400 with four: two `balanceOf` calls and a budget write per listed token.
+
+### Allow-listing calls
+
+`GasKillerCallAllowList` (and `GasKillerNestedCallAllowList`) makes the call policy default-deny:
+a signed `CALL` runs only if its `(target, selector)` pair is on your list, a `NESTED` op only if
+`(callee, IGasKillerNested.applyNested.selector)` is, and `CREATE`/`CREATE2` only if
+`_allowDeployments()` returns true (it returns false by default).
+
+```solidity
+import {GasKillerCallAllowList} from "gas-killer-sdk/extensions/GasKillerCallAllowList.sol";
+
+contract Treasury is GasKillerCallAllowList {
+    function _isAllowedCall(address target, bytes4 selector) internal view override returns (bool) {
+        return (target == address(usdc) && selector == IERC20.transfer.selector)
+            || (target == payee && selector == bytes4(0)); // plain ETH to the payee
+    }
+}
+```
+
+- **The list is code.** Keep `_isAllowedCall` `pure`, or reading immutables: no setter to secure, no
+  slot to protect, and a few comparisons per `CALL`. Changing it takes a new deployment or upgrade.
+- **Selector zero** lists plain ETH transfers (empty calldata) to a target. Calldata of 1 to 3
+  bytes, or with selector `0x00000000` and a payload, is always rejected, as for self-calls.
+- **Self-calls** are governed by `_allowSelfCall` and aren't listed again. Nor are `NESTED` ops to
+  your own contract: each op of the frame they open is checked. Calling `CallAllowList.check` from
+  a `CallPolicy` you build by hand? It skips self-calls on that assumption, so check them yourself
+  if your policy's `allowSelfCall` doesn't.
+- **Extra policy goes in `_authorizeAllowedCall`.** `_authorizeCall` is final in the allow-list
+  bases, so an override that forgets `super` can't switch the list off. The hook runs after the
+  list allowed the op.
+- **What it bounds:** which contracts and functions your contract's authority can reach. Not a
+  call's arguments (an allowed `transfer` sends wherever the quorum says), not what an allowed
+  function does next, and not payouts through your own functions. Pair it with the rate limits
+  and `limitsOutflow`.
+- **With a rate-limit drop-in,** don't inherit both: the drop-ins make `_authorizeCall` final.
+  Inherit the drop-in and run the same check from its `_authorizeLimitedCall`:
+  `CallAllowList.check(index, kind, target, data, _isAllowedCall, CallAllowList.noDeployments)`
+  (or your own `view` function returning whether deployments may run). See the NatSpec on `GasKillerCallAllowList`.
+- **Cost.** About 365 gas per `CALL` for a one-entry list (`test_allowList`).
+
 ### Cost of the hooks
 
 Measured through `verifyAndUpdate` (`bench/CallPolicyGas.t.sol`) for the counter copy plus
@@ -641,7 +748,7 @@ access (2,600) and its callee's work, so the share is smaller than against this 
   input, so `transfer(to, amount)` is judged on its own: the policy can pin `to` to a known payee,
   but can't tell a legitimate payout to an arbitrary user from theft.
 - Value that leaves through your contract's own functions after a program has written its state,
-  such as a balance a `STORE` credited (see [What these limits cover](#restricting-calls)).
+  such as a balance a `STORE` credited, unless those functions use `limitsOutflow`.
 - Checking that a program is what the tracked function would have produced. That is what the
   quorum attests; only a fraud or validity proof of the execution would remove that trust.
 
@@ -655,8 +762,8 @@ access (2,600) and its callee's work, so the share is smaller than against this 
   - `StateChangeHandlerLib.sol` — Executes batched `STORE`, `CALL`, `LOG`, `CREATE` and `NESTED` operations
   - `TransitionGuard.sol` — EIP-1153 reentrancy / in-transition latch, keyed by the active nested root
   - `interface/` — `IGasKillerSDK`, `IGasKillerSDKBatch`, `IGasKillerNested`, `ISchnorrStakeRegistry`, `ISchnorrApprovalRegistry`, and the Alloy-compatible `IStateUpdateTypes`
-  - `libraries/` — `Secp256k1` (affine point math), `SchnorrVerify` (constant-gas `ecrecover`-trick verify), `NestedFrames` (nested-settlement leaves, tree membership and witnesses) `StorageGuard` (protected storage ranges for `STORE` updates) `OutgoingRateLimit` (token bucket over the ETH signed programs send) and `TokenRateLimit` (per-token budgets over measured ERC-20 outflow)
-  - `extensions/` — Optional drop-in bases: `GasKillerOutgoingRateLimit` (outgoing-ETH rate limit) and `GasKillerTokenRateLimit` (plus per-token limits), each with a `Nested` variant
+  - `libraries/` — `Secp256k1` (affine point math), `SchnorrVerify` (constant-gas `ecrecover`-trick verify), `NestedFrames` (nested-settlement leaves, tree membership and witnesses) `StorageGuard` (protected storage ranges for `STORE` updates) `OutgoingRateLimit` (token bucket over the ETH signed programs send) `TokenRateLimit` (per-token budgets over measured ERC-20 outflow) and `CallAllowList` (default-deny `(target, selector)` check for signed ops)
+  - `extensions/` — Optional drop-in bases: `GasKillerOutgoingRateLimit` (outgoing-ETH rate limit, and `limitsOutflow` for your own payouts), `GasKillerTokenRateLimit` (plus per-token limits) and `GasKillerCallAllowList` (default-deny call allow-list), each with a `Nested` variant
 - **`src/examples/`** — Demo apps: `ArraySummation`(`Factory`), `ReentrantCheckpoint`(`Factory`), and the nested-settlement `nested-chain`, `nested-cycle` and `nested-deposit` examples
 - **`script/`** — Deployment scripts
 - **`test/`** — Unit and integration tests

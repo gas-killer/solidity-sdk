@@ -7,6 +7,7 @@ import {StateUpdateType} from "../src/StateChangeHandlerLib.sol";
 import {AcceptAll} from "./SettlementGas.t.sol";
 import {GasKillerOutgoingRateLimit} from "../src/extensions/GasKillerOutgoingRateLimit.sol";
 import {GasKillerTokenRateLimit} from "../src/extensions/GasKillerTokenRateLimit.sol";
+import {GasKillerCallAllowList} from "../src/extensions/GasKillerCallAllowList.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -78,6 +79,57 @@ contract SelfCaller is DefaultCaller {
     }
 }
 
+/// Allows plain calls to one sink, as the CALLs in `settleGas` are.
+contract ListedCaller is GasKillerCallAllowList {
+    address public immutable sink;
+
+    constructor(address registry, address sink_) {
+        _setSchnorrRegistry(registry);
+        sink = sink_;
+    }
+
+    function _isAllowedCall(address target, bytes4 selector) internal view override returns (bool) {
+        return target == sink && selector == bytes4(0);
+    }
+}
+
+/// An ETH vault paying out with and without `limitsOutflow`.
+contract BenchVault is GasKillerOutgoingRateLimit {
+    constructor(address registry) GasKillerOutgoingRateLimit(type(uint96).max, 1 hours) {
+        _setSchnorrRegistry(registry);
+    }
+
+    receive() external payable {}
+
+    function pay(address to, uint256 amount) external {
+        (bool ok,) = to.call{value: amount}("");
+        require(ok);
+    }
+
+    function payLimited(address to, uint256 amount) external limitsOutflow {
+        (bool ok,) = to.call{value: amount}("");
+        require(ok);
+    }
+}
+
+/// A token vault paying out with and without `limitsOutflow`, listing `k` tokens.
+contract BenchTokenVault is GasKillerTokenRateLimit {
+    constructor(address registry, address[] memory tokens) GasKillerTokenRateLimit(type(uint96).max, 1 hours) {
+        _setSchnorrRegistry(registry);
+        for (uint256 i = 0; i < tokens.length; ++i) {
+            _setTokenRateLimit(tokens[i], 1e30, 1 hours);
+        }
+    }
+
+    function pay(IERC20 token, address to, uint256 amount) external {
+        require(token.transfer(to, amount));
+    }
+
+    function payLimited(IERC20 token, address to, uint256 amount) external limitsOutflow {
+        require(token.transfer(to, amount));
+    }
+}
+
 /// The drop-in rate limit.
 contract RateLimitedCaller is GasKillerOutgoingRateLimit {
     constructor(address registry) GasKillerOutgoingRateLimit(1 ether, 1 hours) {
@@ -117,8 +169,8 @@ contract RateLimitedCaller is GasKillerOutgoingRateLimit {
 ///         for the first read (2,100, cold) and write (2,900) of the slot.
 ///
 ///         `test_tokenLimit`: the counter copy plus one ERC-20 `transfer`, for a consumer with no
-///         limits (59,146) and for `GasKillerTokenRateLimit` listing k tokens: k = 0 +4,196 (+7.1%),
-///         k = 1 +9,279 (+15.7%), k = 4 +20,538 (+34.7%). Each listed token costs two `balanceOf`
+///         limits (59,146) and for `GasKillerTokenRateLimit` listing k tokens: k = 0 +4,242 (+7.2%),
+///         k = 1 +9,336 (+15.8%), k = 4 +20,628 (+34.9%). Each listed token costs two `balanceOf`
 ///         calls and a budget read and write; a program that runs no code reads no balances.
 ///
 ///         `test_selfCalls`: the counter copy plus m allowed CALLs to the consumer's own `ping()`,
@@ -131,6 +183,14 @@ contract RateLimitedCaller is GasKillerOutgoingRateLimit {
 ///
 ///         About 37 gas per self-call to compare the selector with a one-entry list, on top of
 ///         about 90 to reject malformed calldata before the hook is asked.
+///
+///         `test_allowList`: the zero-value CALLs above, for a consumer with a one-entry
+///         `GasKillerCallAllowList`: +476 (m = 1), +3,031 (m = 8), +11,791 (m = 32) over the
+///         default policy, about 365 gas per CALL.
+///
+///         `test_payouts`: one payout through the contract's own function, without and with
+///         `limitsOutflow` (budget slot warm): ETH 7,849 +1,018; a token, 26,566 +4,029 with no
+///         tokens listed, +9,107 with one, +26,363 with four.
 ///
 ///         Run with `FOUNDRY_PROFILE=gas forge test --match-contract CallPolicyGas -vv`.
 contract CallPolicyGasTest is Test {
@@ -273,6 +333,83 @@ contract CallPolicyGasTest is Test {
             uint256 one = this.selfGas(false, ms[i]);
             console2.log(string.concat(vm.toString(ms[i]), "  |  ", vm.toString(all), "  |  ", vm.toString(one)));
         }
+    }
+
+    /// @dev The same settlement as `settleGas` for a consumer with a one-entry allow-list.
+    function listedGas(uint256 m) external returns (uint256 used) {
+        GasKillerSDK target = new ListedCaller(address(registry), address(sink));
+        bytes memory updates = _updates(m);
+        bytes32 h = target.getMessageHash(0, FN, updates);
+        address[] memory none = new address[](0);
+        uint32 ref = uint32(block.number - 1);
+        uint256 g = gasleft();
+        target.verifyAndUpdate(h, ref, updates, 0, FN, 1, address(1), none);
+        used = g - gasleft();
+    }
+
+    function test_allowList() public {
+        uint256[3] memory ms = [uint256(1), 8, 32];
+        this.settleGas(false, 1); // warm the registry
+        console2.log("settlement gas, counter copy + m zero-value CALLs");
+        console2.log("m  |  default  |  one-entry allow-list");
+        for (uint256 i = 0; i < 3; ++i) {
+            uint256 d = this.settleGas(false, ms[i]);
+            uint256 l = this.listedGas(ms[i]);
+            console2.log(string.concat(vm.toString(ms[i]), "  |  ", vm.toString(d), "  |  ", vm.toString(l)));
+        }
+    }
+
+    /// @dev One ETH payout through the vault's own function, without and with `limitsOutflow`.
+    ///      The vault is deployed in this call, so its budget slot is warm.
+    function payoutGas(bool limited) external returns (uint256 used) {
+        BenchVault v = new BenchVault(address(registry));
+        vm.deal(address(v), 1 ether);
+        uint256 g = gasleft();
+        if (limited) v.payLimited(address(sink), 1);
+        else v.pay(address(sink), 1);
+        used = g - gasleft();
+    }
+
+    /// @dev One token payout, without and with `limitsOutflow`, listing `k` tokens.
+    function tokenPayoutGas(bool limited, uint256 k) external returns (uint256 used) {
+        address[] memory tokens = new address[](k == 0 ? 1 : k);
+        for (uint256 i = 0; i < tokens.length; ++i) {
+            tokens[i] = address(new BenchToken());
+        }
+        address[] memory listed = new address[](k);
+        for (uint256 i = 0; i < k; ++i) {
+            listed[i] = tokens[i];
+        }
+        BenchTokenVault v = new BenchTokenVault(address(registry), listed);
+        BenchToken(tokens[0]).mint(address(v), 1000);
+        uint256 g = gasleft();
+        if (limited) v.payLimited(IERC20(tokens[0]), address(sink), 1);
+        else v.pay(IERC20(tokens[0]), address(sink), 1);
+        used = g - gasleft();
+    }
+
+    function test_payouts() public {
+        this.payoutGas(false); // warm the sink
+        console2.log("one payout through the contract's own function");
+        console2.log("ETH  |  ", vm.toString(this.payoutGas(false)), "  |  ", vm.toString(this.payoutGas(true)));
+        console2.log(
+            "token, k = 0  |  ",
+            vm.toString(this.tokenPayoutGas(false, 0)),
+            "  |  ",
+            vm.toString(this.tokenPayoutGas(true, 0))
+        );
+        console2.log(
+            "token, k = 1  |  ",
+            vm.toString(this.tokenPayoutGas(false, 1)),
+            "  |  ",
+            vm.toString(this.tokenPayoutGas(true, 1))
+        );
+        console2.log(
+            "token, k = 4  |  ",
+            vm.toString(this.tokenPayoutGas(false, 4)),
+            "  |  ",
+            vm.toString(this.tokenPayoutGas(true, 4))
+        );
     }
 
     function test_calls() public {

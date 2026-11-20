@@ -1349,9 +1349,18 @@ library StateChangeHandlerLib {
     ///      ETH-transfer case, or a selector its zero-padding matches, must not let it through.
     function _checkSelfCall(CallPolicy memory policy, uint256 index, bytes memory data) private view {
         uint256 length = data.length;
-        bytes4 selector = bytes4(data); // zero-padded when shorter than 4 bytes
-        bool wellFormed = length == 0 || (length >= 4 && selector != bytes4(0));
-        require(wellFormed && policy.allowSelfCall(selector), SelfCall(index, selector));
+        bytes4 selector;
+        if (length >= 4) {
+            // One `mload` rather than `bytes4(data)`, which costs about 240 gas more, as in
+            // `CallAllowList.check`.
+            assembly ("memory-safe") {
+                selector := and(mload(add(data, 0x20)), shl(224, 0xffffffff))
+            }
+            require(selector != bytes4(0), SelfCall(index, selector));
+        } else if (length != 0) {
+            revert SelfCall(index, bytes4(data)); // zero-padded
+        }
+        require(policy.allowSelfCall(selector), SelfCall(index, selector));
     }
 
     /// @dev The STORE check of an unguarded run: none.
@@ -2301,9 +2310,10 @@ abstract contract GasKillerSDK is
 ///      contracts in `src/extensions/GasKillerOutgoingRateLimit.sol` do exactly that.
 ///
 ///      All of a contract's programs share the bucket, whether they settle alone, in a batch or
-///      as frames of a nested tree. Only value sent by signed programs counts: the contract's own
-///      functions, called natively, spend nothing, so a balance a program credits with a `STORE`
-///      and the contract later pays out isn't limited. It limits ETH only; a token transfer moves no
+///      as frames of a nested tree. Signed programs spend from it op by op. The contract's own
+///      functions, called natively, spend from it only inside a `beginNative` / `endNative`
+///      window (the drop-ins' `limitsOutflow`): without one, a balance a program credits with a
+///      `STORE` and the contract later pays out isn't limited. It limits ETH only; a token transfer moves no
 ///      value, so restrict those in `_authorizeCall`. Timestamps are kept in 32 bits, which holds
 ///      until 2106.
 library OutgoingRateLimit {
@@ -2312,6 +2322,11 @@ library OutgoingRateLimit {
     /// @param value Wei the op sends.
     /// @param available Wei the budget held.
     error OutgoingRateLimitExceeded(uint256 index, uint256 value, uint256 available);
+
+    /// @notice A function wrapped in `limitsOutflow` sent more than the budget holds.
+    /// @param value Wei the function sent out, net of what it received.
+    /// @param available Wei the budget held.
+    error NativeOutflowRateLimitExceeded(uint256 value, uint256 available);
 
     /// @notice A limit above `type(uint96).max`, or a period of zero or above `type(uint32).max`.
     error InvalidOutgoingRateLimit();
@@ -2361,6 +2376,8 @@ library OutgoingRateLimit {
     ///      (224-255). `test_bucketPackingMatchesTheStruct` pins that.
     function spend(GasKillerSDK.OutgoingBucket storage b, uint256 index, address target, uint256 value) internal {
         if (value == 0 || target == address(this)) return;
+        // Inlined rather than shared with `spendNative` through `_take`: this runs on every op
+        // that sends value, and the shared helper costs about 80 gas more per op.
         uint256 word;
         assembly ("memory-safe") {
             word := sload(b.slot)
@@ -2376,6 +2393,59 @@ library OutgoingRateLimit {
         assembly ("memory-safe") {
             sstore(b.slot, word)
         }
+    }
+
+    /// @notice Spends `value` that one of the contract's own functions sent, or reverts with
+    ///         `NativeOutflowRateLimitExceeded`. Spends nothing when `value` is zero.
+    /// @dev For payout paths outside signed programs, so that a balance a program credits with a
+    ///      `STORE` can't be withdrawn faster than the budget allows. Usually reached through
+    ///      `beginNative` / `endNative`, which measure the value rather than trusting the caller
+    ///      to count every transfer.
+    function spendNative(GasKillerSDK.OutgoingBucket storage b, uint256 value) internal {
+        if (value == 0) return;
+        (bool ok, uint256 left) = _take(b, value);
+        if (!ok) revert NativeOutflowRateLimitExceeded(value, left);
+    }
+
+    /// @notice Opens a measuring window around one of the contract's own functions: returns its
+    ///         ETH balance as the function starts, the call's `msg.value` included.
+    /// @dev `msg.value` is already in the balance and isn't excluded: every window in one call
+    ///      sees the same `msg.value`, so excluding it would let one deposit offset the payout of
+    ///      each limited function the call runs. So ETH a limited function receives with its call
+    ///      and sends on is charged; only ETH that arrives during the window offsets a send.
+    function beginNative() internal view returns (uint256 baseline) {
+        return address(this).balance;
+    }
+
+    /// @notice Closes the window `beginNative` opened: spends the net decrease of the contract's
+    ///         ETH balance since then.
+    /// @dev Net: ETH the function received offsets ETH it sent, so unwrapping WETH held by the
+    ///      contract and sending the ETH on isn't charged here; limit WETH as a token too. A
+    ///      window nested in another (one limited function calling another, possibly through a
+    ///      callback) is charged both to itself and to the window around it.
+    function endNative(GasKillerSDK.OutgoingBucket storage b, uint256 baseline) internal {
+        uint256 balance = address(this).balance;
+        if (balance < baseline) spendNative(b, baseline - balance);
+    }
+
+    /// @dev Takes `value` from the budget if it holds that much, as `spend` does inline. One
+    ///      `SLOAD`, and one `SSTORE` when it does.
+    function _take(GasKillerSDK.OutgoingBucket storage b, uint256 value) private returns (bool ok, uint256 left) {
+        uint256 word;
+        assembly ("memory-safe") {
+            word := sload(b.slot)
+        }
+        uint256 updated;
+        (left, updated) = _refilled(word);
+        if (value > left) return (false, left);
+        // Keep `limit` and `period`; replace `available` and `updated`, as `spend` does.
+        unchecked {
+            word = (word & _KEEP) | ((left - value) << 96) | (updated << 224);
+        }
+        assembly ("memory-safe") {
+            sstore(b.slot, word)
+        }
+        return (true, left);
     }
 
     /// @notice What the budget holds now, its limit and its period.
@@ -2479,9 +2549,10 @@ library OutgoingRateLimit {
 ///
 ///      The budgets live in the SDK's protected config namespace (`GasKillerSDK._tokenLimits()`),
 ///      so a signed program can't refill them with a `STORE`. All of the contract's programs
-///      share them. Only signed programs are charged: the contract's own functions, called
-///      natively, are not, so a balance a program credits with a `STORE` and the contract later
-///      pays out isn't charged either.
+///      share them. Signed programs are charged. The contract's own functions, called natively, are
+///      charged only inside a `begin` / `snapshot` / `endProgram` window (the drop-ins'
+///      `limitsOutflow`): without one, a balance a program credits with a `STORE` and the
+///      contract later pays out isn't charged.
 library TokenRateLimit {
     /// @notice A program's net outflow of `token`, with allowances it left standing, exceeds the
     ///         token's budget.
@@ -2643,17 +2714,7 @@ library TokenRateLimit {
         returns (bool unrecognized)
     {
         uint256 r = _region();
-        uint256 head = _tload(r);
-        if (head & 1 == 0) {
-            uint256 count = t.count;
-            for (uint256 i = 0; i < count; ++i) {
-                address token = t.buckets[i].token;
-                _tstore(r + 1 + 3 * i, uint160(token));
-                _tstore(r + 2 + 3 * i, IERC20(token).balanceOf(address(this)));
-            }
-            head = 1 | (count << 1);
-            _tstore(r, head);
-        }
+        uint256 head = _snapshot(t, r);
         if (kind != StateUpdateType.CALL) return false;
         bytes4 selector = bytes4(data); // zero-padded when shorter than 4 bytes
         // Moves this contract's tokens, measured through the balance: fine on any target, so a
@@ -2709,6 +2770,32 @@ library TokenRateLimit {
             _tstore(r, head + (1 << 16));
         } else if (current < _tload(slot + 2)) {
             _tstore(slot + 2, current);
+        }
+    }
+
+    /// @notice Takes the snapshot now, if it isn't taken yet. For a measuring window around one
+    ///         of the contract's own functions: `begin`, then `snapshot`, then `endProgram` after
+    ///         the function, which charges what it moved out.
+    /// @dev The window charges a function's net outflow of each listed token, so a balance a
+    ///      program credits with a `STORE` can't be withdrawn faster than the budget allows.
+    ///      Approvals the function grants aren't recorded: the contract's own code decides those.
+    function snapshot(GasKillerSDK.TokenLimits storage t) internal {
+        _snapshot(t, _region());
+    }
+
+    /// @dev Records `balanceOf(this)` for every listed token in region `r`, unless already done,
+    ///      and returns the region's head.
+    function _snapshot(GasKillerSDK.TokenLimits storage t, uint256 r) private returns (uint256 head) {
+        head = _tload(r);
+        if (head & 1 == 0) {
+            uint256 count = t.count;
+            for (uint256 i = 0; i < count; ++i) {
+                address token = t.buckets[i].token;
+                _tstore(r + 1 + 3 * i, uint160(token));
+                _tstore(r + 2 + 3 * i, IERC20(token).balanceOf(address(this)));
+            }
+            head = 1 | (count << 1);
+            _tstore(r, head);
         }
     }
 
@@ -2978,9 +3065,9 @@ abstract contract GasKillerNestedSDK is GasKillerSDK, IGasKillerNested {
 ///      finalizes `_authorizeCall`, so the limit is spent whatever an override does: an override
 ///      that left out `super` would otherwise switch the limit off without any error. Trying to
 ///      override `_authorizeCall` is a compile error.
-///      `_maxOutgoingValue` still caps each program on its own. To add the limit to a contract
-///      that already inherits another `GasKillerSDK` base, call `OutgoingRateLimit` from that
-///      contract's own `_authorizeCall` instead.
+///      `_maxOutgoingValue` still caps each program on its own. To combine it with the call
+///      allow-list, inherit this contract and run `CallAllowList.check` from
+///      `_authorizeLimitedCall` (see `GasKillerCallAllowList`); don't inherit both.
 abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
     /// @param limit Most wei signed programs may send in one `period`; zero sends none.
     /// @param period Seconds over which the full `limit` refills.
@@ -3016,6 +3103,52 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
     /// @dev For `GasKillerTokenRateLimit`, which adds its own per-op step here. Runs after the ETH
     ///      limit. Not meant for consumers: put policy in `_authorizeLimitedCall`.
     function _rateLimitOp(uint256 index, StateUpdateType kind, address target, bytes memory data) internal virtual {}
+
+    /// @notice Wrap each of this contract's own functions that can pay out ETH (or, in the token
+    ///         drop-in, a listed token) in this modifier. What the function sends out, net of what
+    ///         it receives, spends from the same budget as signed programs.
+    /// @dev Signed programs are limited by their ops, but a malicious quorum can also `STORE`
+    ///      itself a balance in this contract's state and withdraw it through an ordinary
+    ///      `withdraw()` later. Limiting the payout functions too bounds that route: honest
+    ///      withdrawals then share the budget, so size `limit` for normal traffic. Measured by
+    ///      balance, so every route out of the function counts, including callbacks. The call's
+    ///      `msg.value` is in the balance before the function runs, so it doesn't offset what the
+    ///      function sends. A limited function that calls another, directly or through a callback, is
+    ///      charged for both windows: conservative, never under-counted. Reverts with
+    ///      `OutgoingRateLimit.NativeOutflowRateLimitExceeded` (or
+    ///      `TokenRateLimit.TokenRateLimitExceeded`) after the function, rolling it back. In the
+    ///      token drop-in the function runs as a program does, so it can't set or clear token
+    ///      limits (`TokenRateLimit.TokenRateLimitChangedMidProgram`), and every window reads
+    ///      `balanceOf` on every listed token: one whose `balanceOf` reverts blocks every
+    ///      limited function, ETH-only payouts included, until it is cleared.
+    ///
+    ///      **Never on a `trackState` function.** The window writes the budget, which is protected
+    ///      storage, so a program carrying that write can never settle (`ProtectedSlotWrite`), as
+    ///      with the config setters. Limit the plain functions that pay out.
+    ///
+    ///      **Net, so inflows hide payouts.** Anything the contract receives during the window
+    ///      offsets what it sends: ETH or tokens a third party pays in (rewards a public
+    ///      `harvest()` or claim sends here, a repayment, a protocol's payout) and tokens this
+    ///      contract pulls with `transferFrom`. If the recipient's callback (an ETH `receive`, an
+    ///      ERC-777 or ERC-1155 hook) can trigger such an inflow, a credited balance can leave
+    ///      uncharged, covered by funds that belonged to others. Keep such inflows out of reach
+    ///      of the window, or pay out without a callback that can reach them (a pull pattern).
+    ///      Charging gross outflow instead is tracked in #117.
+    modifier limitsOutflow() {
+        uint256 ethBaseline = OutgoingRateLimit.beginNative();
+        _beginTokenOutflow();
+        _;
+        _endTokenOutflow();
+        OutgoingRateLimit.endNative(_outgoingBucket(), ethBaseline);
+    }
+
+    /// @dev For `GasKillerTokenRateLimit`, which opens and closes its token window here, inside
+    ///      the ETH one. Not meant for consumers: the modifier itself can't be overridden, so the
+    ///      ETH charge can't be dropped by an override that forgets `super`.
+    function _beginTokenOutflow() internal virtual {}
+
+    /// @dev As `_beginTokenOutflow`: closes the token window and charges it.
+    function _endTokenOutflow() internal virtual {}
 
     /// @dev Final: see the contract's notes.
     function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
@@ -3064,6 +3197,52 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
 
     /// @dev As `GasKillerOutgoingRateLimit._rateLimitOp`.
     function _rateLimitOp(uint256 index, StateUpdateType kind, address target, bytes memory data) internal virtual {}
+
+    /// @notice Wrap each of this contract's own functions that can pay out ETH (or, in the token
+    ///         drop-in, a listed token) in this modifier. What the function sends out, net of what
+    ///         it receives, spends from the same budget as signed programs.
+    /// @dev Signed programs are limited by their ops, but a malicious quorum can also `STORE`
+    ///      itself a balance in this contract's state and withdraw it through an ordinary
+    ///      `withdraw()` later. Limiting the payout functions too bounds that route: honest
+    ///      withdrawals then share the budget, so size `limit` for normal traffic. Measured by
+    ///      balance, so every route out of the function counts, including callbacks. The call's
+    ///      `msg.value` is in the balance before the function runs, so it doesn't offset what the
+    ///      function sends. A limited function that calls another, directly or through a callback, is
+    ///      charged for both windows: conservative, never under-counted. Reverts with
+    ///      `OutgoingRateLimit.NativeOutflowRateLimitExceeded` (or
+    ///      `TokenRateLimit.TokenRateLimitExceeded`) after the function, rolling it back. In the
+    ///      token drop-in the function runs as a program does, so it can't set or clear token
+    ///      limits (`TokenRateLimit.TokenRateLimitChangedMidProgram`), and every window reads
+    ///      `balanceOf` on every listed token: one whose `balanceOf` reverts blocks every
+    ///      limited function, ETH-only payouts included, until it is cleared.
+    ///
+    ///      **Never on a `trackState` function.** The window writes the budget, which is protected
+    ///      storage, so a program carrying that write can never settle (`ProtectedSlotWrite`), as
+    ///      with the config setters. Limit the plain functions that pay out.
+    ///
+    ///      **Net, so inflows hide payouts.** Anything the contract receives during the window
+    ///      offsets what it sends: ETH or tokens a third party pays in (rewards a public
+    ///      `harvest()` or claim sends here, a repayment, a protocol's payout) and tokens this
+    ///      contract pulls with `transferFrom`. If the recipient's callback (an ETH `receive`, an
+    ///      ERC-777 or ERC-1155 hook) can trigger such an inflow, a credited balance can leave
+    ///      uncharged, covered by funds that belonged to others. Keep such inflows out of reach
+    ///      of the window, or pay out without a callback that can reach them (a pull pattern).
+    ///      Charging gross outflow instead is tracked in #117.
+    modifier limitsOutflow() {
+        uint256 ethBaseline = OutgoingRateLimit.beginNative();
+        _beginTokenOutflow();
+        _;
+        _endTokenOutflow();
+        OutgoingRateLimit.endNative(_outgoingBucket(), ethBaseline);
+    }
+
+    /// @dev For `GasKillerTokenRateLimit`, which opens and closes its token window here, inside
+    ///      the ETH one. Not meant for consumers: the modifier itself can't be overridden, so the
+    ///      ETH charge can't be dropped by an override that forgets `super`.
+    function _beginTokenOutflow() internal virtual {}
+
+    /// @dev As `_beginTokenOutflow`: closes the token window and charges it.
+    function _endTokenOutflow() internal virtual {}
 
     /// @dev Final, as in `GasKillerOutgoingRateLimit`.
     function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
@@ -3141,6 +3320,17 @@ abstract contract GasKillerTokenRateLimit is GasKillerOutgoingRateLimit {
     ///         can't be set or cleared here either.
     function _afterLimitedProgram() internal virtual {}
 
+    /// @dev Final, so a consumer can't drop the token charge from `limitsOutflow`.
+    function _beginTokenOutflow() internal override {
+        TokenRateLimit.begin();
+        TokenRateLimit.snapshot(_tokenLimits());
+    }
+
+    /// @dev Final, as `_beginTokenOutflow`.
+    function _endTokenOutflow() internal override {
+        TokenRateLimit.endProgram(_tokenLimits());
+    }
+
     function _beforeProgram() internal override {
         super._beforeProgram();
         TokenRateLimit.begin();
@@ -3202,6 +3392,17 @@ abstract contract GasKillerNestedTokenRateLimit is GasKillerNestedOutgoingRateLi
 
     /// @notice As `GasKillerTokenRateLimit._afterLimitedProgram`.
     function _afterLimitedProgram() internal virtual {}
+
+    /// @dev Final, so a consumer can't drop the token charge from `limitsOutflow`.
+    function _beginTokenOutflow() internal override {
+        TokenRateLimit.begin();
+        TokenRateLimit.snapshot(_tokenLimits());
+    }
+
+    /// @dev Final, as `_beginTokenOutflow`.
+    function _endTokenOutflow() internal override {
+        TokenRateLimit.endProgram(_tokenLimits());
+    }
 
     function _beforeProgram() internal override {
         super._beforeProgram();
