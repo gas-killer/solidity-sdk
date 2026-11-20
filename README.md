@@ -671,6 +671,9 @@ contract Vault is GasKillerTokenRateLimit {
   on every listed token. One whose `balanceOf` reverts (paused, broken by an upgrade) blocks every
   limited function, ETH-only payouts included, until it is cleared. Limits can't be set or cleared
   from inside a limited function either (`TokenRateLimitChangedMidProgram`).
+- **Never on a `trackState` function.** The modifier writes the budget, which is protected
+  storage, so a program carrying that write can never settle (`ProtectedSlotWrite`), as with the
+  config setters. Put it on your plain payout functions only.
 - **Final.** The modifier can't be overridden, so its charge can't be dropped by an override that
   forgets `super`.
 - **`msg.value` doesn't offset payouts.** It is already in the balance when the window opens, so

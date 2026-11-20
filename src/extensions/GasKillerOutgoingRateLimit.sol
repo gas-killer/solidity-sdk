@@ -14,9 +14,9 @@ import {OutgoingRateLimit} from "../libraries/OutgoingRateLimit.sol";
 ///      finalizes `_authorizeCall`, so the limit is spent whatever an override does: an override
 ///      that left out `super` would otherwise switch the limit off without any error. Trying to
 ///      override `_authorizeCall` is a compile error.
-///      `_maxOutgoingValue` still caps each program on its own. To add the limit to a contract
-///      that already inherits another `GasKillerSDK` base, call `OutgoingRateLimit` from that
-///      contract's own `_authorizeCall` instead.
+///      `_maxOutgoingValue` still caps each program on its own. To combine it with the call
+///      allow-list, inherit this contract and run `CallAllowList.check` from
+///      `_authorizeLimitedCall` (see `GasKillerCallAllowList`); don't inherit both.
 abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
     /// @param limit Most wei signed programs may send in one `period`; zero sends none.
     /// @param period Seconds over which the full `limit` refills.
@@ -70,6 +70,10 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
     ///      limits (`TokenRateLimit.TokenRateLimitChangedMidProgram`), and every window reads
     ///      `balanceOf` on every listed token: one whose `balanceOf` reverts blocks every
     ///      limited function, ETH-only payouts included, until it is cleared.
+    ///
+    ///      **Never on a `trackState` function.** The window writes the budget, which is protected
+    ///      storage, so a program carrying that write can never settle (`ProtectedSlotWrite`), as
+    ///      with the config setters. Limit the plain functions that pay out.
     ///
     ///      **Net, so inflows hide payouts.** Anything the contract receives during the window
     ///      offsets what it sends: ETH or tokens a third party pays in (rewards a public
@@ -160,6 +164,10 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
     ///      limits (`TokenRateLimit.TokenRateLimitChangedMidProgram`), and every window reads
     ///      `balanceOf` on every listed token: one whose `balanceOf` reverts blocks every
     ///      limited function, ETH-only payouts included, until it is cleared.
+    ///
+    ///      **Never on a `trackState` function.** The window writes the budget, which is protected
+    ///      storage, so a program carrying that write can never settle (`ProtectedSlotWrite`), as
+    ///      with the config setters. Limit the plain functions that pay out.
     ///
     ///      **Net, so inflows hide payouts.** Anything the contract receives during the window
     ///      offsets what it sends: ETH or tokens a third party pays in (rewards a public
