@@ -48,6 +48,19 @@ contract ListedTreasury is GasKillerCallAllowList {
     }
 }
 
+/// A `ListedTreasury` that also caps each op's value at 1 ether, through the policy hook.
+contract CappedListedTreasury is ListedTreasury {
+    constructor(address registry, IERC20 token_, address payee_) ListedTreasury(registry, token_, payee_, false) {}
+
+    function _authorizeAllowedCall(uint256, StateUpdateType, address, uint256 value, bytes memory)
+        internal
+        pure
+        override
+    {
+        require(value <= 1 ether, "cap");
+    }
+}
+
 /// The allow-list together with the token rate limit: 100 tokens an hour. The rate-limit hooks
 /// are final, so the list is checked from `_authorizeLimitedCall` rather than inherited.
 contract ListedLimitedTreasury is GasKillerTokenRateLimit {
@@ -138,6 +151,16 @@ contract GasKillerCallAllowListTest is Test {
     }
 
     // ---------------------------------------------------------------- CALL
+
+    /// `_authorizeAllowedCall` adds policy on top of the list, which still applies first.
+    function test_policyHookRunsAfterTheList() public {
+        CappedListedTreasury t = new CappedListedTreasury(address(registry), IERC20(address(token)), PAYEE);
+        vm.deal(address(t), 10 ether);
+        _call(t, PAYEE, 1 ether, "", "");
+        assertEq(PAYEE.balance, 1 ether);
+        _call(t, PAYEE, 2 ether, "", bytes("cap"));
+        _call(t, ATTACKER, 2 ether, "", _notAllowed(ATTACKER, bytes4(0)));
+    }
 
     function test_listedCallSettles() public {
         ListedTreasury t = _treasury(false);

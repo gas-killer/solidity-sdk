@@ -18,7 +18,8 @@ import {CallAllowList} from "../libraries/CallAllowList.sol";
 ///                 || (target == payee && selector == bytes4(0)); // plain ETH to the payee
 ///         }
 ///         ```
-/// @dev Self-calls are governed by `_allowSelfCall` and aren't checked again here, nor are
+/// @dev Put extra policy in `_authorizeAllowedCall`: `_authorizeCall` is final here, so the list
+///      can't be switched off by an override. Self-calls are governed by `_allowSelfCall` and aren't checked again here, nor are
 ///      `NESTED` ops to this contract (each op of the frame they open is). The
 ///      rate-limit drop-ins make `_authorizeCall` final, so don't inherit this alongside one:
 ///      inherit the drop-in and run the same check from its `_authorizeLimitedCall`:
@@ -46,13 +47,25 @@ abstract contract GasKillerCallAllowList is GasKillerSDK {
         return false;
     }
 
+    /// @notice Override, in place of `_authorizeCall`, to add policy on top of the list; the
+    ///         arguments and rules are `_authorizeCall`'s, including that `data` must not be
+    ///         written. Runs after the list allowed the op. Allows everything by default.
+    function _authorizeAllowedCall(
+        uint256 index,
+        StateUpdateType kind,
+        address target,
+        uint256 value,
+        bytes memory data
+    ) internal virtual {}
+
+    /// @dev Final, so an override that left out `super` can't switch the list off.
     function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
         internal
-        virtual
         override
     {
         super._authorizeCall(index, kind, target, value, data);
         CallAllowList.check(index, kind, target, data, _isAllowedCall, _allowDeployments);
+        _authorizeAllowedCall(index, kind, target, value, data);
     }
 }
 
@@ -69,12 +82,22 @@ abstract contract GasKillerNestedCallAllowList is GasKillerNestedSDK {
         return false;
     }
 
+    /// @notice As `GasKillerCallAllowList._authorizeAllowedCall`.
+    function _authorizeAllowedCall(
+        uint256 index,
+        StateUpdateType kind,
+        address target,
+        uint256 value,
+        bytes memory data
+    ) internal virtual {}
+
+    /// @dev Final, as in `GasKillerCallAllowList`.
     function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
         internal
-        virtual
         override
     {
         super._authorizeCall(index, kind, target, value, data);
         CallAllowList.check(index, kind, target, data, _isAllowedCall, _allowDeployments);
+        _authorizeAllowedCall(index, kind, target, value, data);
     }
 }

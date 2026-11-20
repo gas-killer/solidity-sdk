@@ -629,12 +629,23 @@ balance in your contract's own state with a `STORE` and withdraw it through your
 in `limitsOutflow`, from either rate-limit drop-in:
 
 ```solidity
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {GasKillerTokenRateLimit} from "gas-killer-sdk/extensions/GasKillerTokenRateLimit.sol";
+
 contract Vault is GasKillerTokenRateLimit {
+    IERC20 public immutable usdc;
     mapping(address => uint256) public balances;
+
+    // At most 10 ETH and 100,000 USDC an hour, through programs and withdrawals together.
+    constructor(address registry, IERC20 usdc_) GasKillerTokenRateLimit(10 ether, 1 hours) {
+        _setSchnorrRegistry(registry);
+        usdc = usdc_;
+        _setTokenRateLimit(address(usdc_), 100_000e6, 1 hours);
+    }
 
     function withdraw(uint256 amount) external limitsOutflow {
         balances[msg.sender] -= amount;
-        usdc.transfer(msg.sender, amount);
+        require(usdc.transfer(msg.sender, amount));
     }
 }
 ```
@@ -648,17 +659,28 @@ contract Vault is GasKillerTokenRateLimit {
 - **Honest withdrawals share the budget.** That is the point, and the cost: size `limit` for your
   normal outflow plus headroom, as for a bridge's withdrawal limit. When the budget runs out,
   withdrawals wait for it to refill.
-- **Net.** What the function receives offsets what it sends: unwrapping WETH and sending the ETH
-  on is charged only if WETH is listed as a token too. Unlike programs, where a `transferFrom` into
-  the contract can't offset a send, tokens the function pulls in count too. Keep code that pulls
-  from third parties who approved your contract out of reach of a limited function and its
-  callbacks, or a credited balance can leave hidden behind the pull (#117).
+- **Net, so inflows hide payouts.** Anything the contract receives during the call offsets what it
+  sends: unwrapping WETH and sending the ETH on is charged only if WETH is listed as a token too.
+  That includes inflows someone else can trigger: rewards a public `harvest()` or claim pays your
+  contract, a repayment, another protocol's payout, and tokens your contract pulls with
+  `transferFrom` (which programs, unlike the window, can't use to offset a send). If a payout's
+  recipient gets a callback (ETH `receive`, ERC-777 or ERC-1155 hooks) and can trigger such an
+  inflow from it, a credited balance can leave uncharged, covered by funds that belonged to others.
+  Keep those inflows out of reach of limited functions and their callbacks, or pay out through a
+  pull pattern. Charging gross outflow instead is #117.
+- **Listed tokens must stay readable.** In the token drop-in every limited call reads `balanceOf`
+  on every listed token. One whose `balanceOf` reverts (paused, broken by an upgrade) blocks every
+  limited function, ETH-only payouts included, until it is cleared. Limits can't be set or cleared
+  from inside a limited function either (`TokenRateLimitChangedMidProgram`).
+- **Final.** The modifier can't be overridden, so its charge can't be dropped by an override that
+  forgets `super`.
 - **Put it on external entry points.** The ETH side excludes the call's `msg.value` from the
   baseline (not a self-call's, which is the contract's own ETH). On an internal function that runs
   after the call forwarded its `msg.value`, the window under-counts; the one around it doesn't.
 - **Nested windows.** A limited function that calls another, directly or through a callback, is
-  charged for both: conservative, never under-counted. The same applies to a limited function an
-  allowed self-call reaches inside a signed program.
+  charged for both: conservative, never under-counted, but honest payouts can use the budget up
+  faster. The same applies to a limited function an allowed self-call reaches inside a signed
+  program. Charging only the outermost window is #119.
 - **Cost.** About +1,000 gas for an ETH payout with the budget slot warm, plus about 2,100 for the
   first (cold) read of it in a transaction. A token payout costs about +4,000 with no tokens listed,
   +9,100 with one and +26,400 with four: two `balanceOf` calls and a budget write per listed token.
@@ -686,7 +708,12 @@ contract Treasury is GasKillerCallAllowList {
 - **Selector zero** lists plain ETH transfers (empty calldata) to a target. Calldata of 1 to 3
   bytes, or with selector `0x00000000` and a payload, is always rejected, as for self-calls.
 - **Self-calls** are governed by `_allowSelfCall` and aren't listed again. Nor are `NESTED` ops to
-  your own contract: each op of the frame they open is checked.
+  your own contract: each op of the frame they open is checked. Calling `CallAllowList.check` from
+  a `CallPolicy` you build by hand? It skips self-calls on that assumption, so check them yourself
+  if your policy's `allowSelfCall` doesn't.
+- **Extra policy goes in `_authorizeAllowedCall`.** `_authorizeCall` is final in the allow-list
+  bases, so an override that forgets `super` can't switch the list off. The hook runs after the
+  list allowed the op.
 - **What it bounds:** which contracts and functions your contract's authority can reach. Not a
   call's arguments (an allowed `transfer` sends wherever the quorum says), not what an allowed
   function does next, and not payouts through your own functions. Pair it with the rate limits

@@ -66,26 +66,33 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
     ///      `OutgoingRateLimit.NativeOutflowRateLimitExceeded` (or
     ///      `TokenRateLimit.TokenRateLimitExceeded`) after the function, rolling it back. In the
     ///      token drop-in the function runs as a program does, so it can't set or clear token
-    ///      limits (`TokenRateLimit.TokenRateLimitChangedMidProgram`). Net, unlike a program's
-    ///      token charge: anything the window receives offsets what it sends, tokens this
-    ///      contract pulls with `transferFrom` included. Don't let a limited function, or a
-    ///      callback during one, reach code that pulls tokens from third parties who approved
-    ///      this contract, or a credited balance can leave hidden behind the pull.
+    ///      limits (`TokenRateLimit.TokenRateLimitChangedMidProgram`), and every window reads
+    ///      `balanceOf` on every listed token: one whose `balanceOf` reverts blocks every
+    ///      limited function, ETH-only payouts included, until it is cleared.
+    ///
+    ///      **Net, so inflows hide payouts.** Anything the contract receives during the window
+    ///      offsets what it sends: ETH or tokens a third party pays in (rewards a public
+    ///      `harvest()` or claim sends here, a repayment, a protocol's payout) and tokens this
+    ///      contract pulls with `transferFrom`. If the recipient's callback (an ETH `receive`, an
+    ///      ERC-777 or ERC-1155 hook) can trigger such an inflow, a credited balance can leave
+    ///      uncharged, covered by funds that belonged to others. Keep such inflows out of reach
+    ///      of the window, or pay out without a callback that can reach them (a pull pattern).
+    ///      Charging gross outflow instead is tracked in #117.
     modifier limitsOutflow() {
-        uint256 ethBaseline = _beginOutflow();
+        uint256 ethBaseline = OutgoingRateLimit.beginNative();
+        _beginTokenOutflow();
         _;
-        _endOutflow(ethBaseline);
-    }
-
-    /// @dev Opens the window `limitsOutflow` measures; the token drop-in extends it.
-    function _beginOutflow() internal virtual returns (uint256 ethBaseline) {
-        return OutgoingRateLimit.beginNative();
-    }
-
-    /// @dev Closes the window and charges it.
-    function _endOutflow(uint256 ethBaseline) internal virtual {
+        _endTokenOutflow();
         OutgoingRateLimit.endNative(_outgoingBucket(), ethBaseline);
     }
+
+    /// @dev For `GasKillerTokenRateLimit`, which opens and closes its token window here, inside
+    ///      the ETH one. Not meant for consumers: the modifier itself can't be overridden, so the
+    ///      ETH charge can't be dropped by an override that forgets `super`.
+    function _beginTokenOutflow() internal virtual {}
+
+    /// @dev As `_beginTokenOutflow`: closes the token window and charges it.
+    function _endTokenOutflow() internal virtual {}
 
     /// @dev Final: see the contract's notes.
     function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)
@@ -148,26 +155,33 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
     ///      `OutgoingRateLimit.NativeOutflowRateLimitExceeded` (or
     ///      `TokenRateLimit.TokenRateLimitExceeded`) after the function, rolling it back. In the
     ///      token drop-in the function runs as a program does, so it can't set or clear token
-    ///      limits (`TokenRateLimit.TokenRateLimitChangedMidProgram`). Net, unlike a program's
-    ///      token charge: anything the window receives offsets what it sends, tokens this
-    ///      contract pulls with `transferFrom` included. Don't let a limited function, or a
-    ///      callback during one, reach code that pulls tokens from third parties who approved
-    ///      this contract, or a credited balance can leave hidden behind the pull.
+    ///      limits (`TokenRateLimit.TokenRateLimitChangedMidProgram`), and every window reads
+    ///      `balanceOf` on every listed token: one whose `balanceOf` reverts blocks every
+    ///      limited function, ETH-only payouts included, until it is cleared.
+    ///
+    ///      **Net, so inflows hide payouts.** Anything the contract receives during the window
+    ///      offsets what it sends: ETH or tokens a third party pays in (rewards a public
+    ///      `harvest()` or claim sends here, a repayment, a protocol's payout) and tokens this
+    ///      contract pulls with `transferFrom`. If the recipient's callback (an ETH `receive`, an
+    ///      ERC-777 or ERC-1155 hook) can trigger such an inflow, a credited balance can leave
+    ///      uncharged, covered by funds that belonged to others. Keep such inflows out of reach
+    ///      of the window, or pay out without a callback that can reach them (a pull pattern).
+    ///      Charging gross outflow instead is tracked in #117.
     modifier limitsOutflow() {
-        uint256 ethBaseline = _beginOutflow();
+        uint256 ethBaseline = OutgoingRateLimit.beginNative();
+        _beginTokenOutflow();
         _;
-        _endOutflow(ethBaseline);
-    }
-
-    /// @dev Opens the window `limitsOutflow` measures; the token drop-in extends it.
-    function _beginOutflow() internal virtual returns (uint256 ethBaseline) {
-        return OutgoingRateLimit.beginNative();
-    }
-
-    /// @dev Closes the window and charges it.
-    function _endOutflow(uint256 ethBaseline) internal virtual {
+        _endTokenOutflow();
         OutgoingRateLimit.endNative(_outgoingBucket(), ethBaseline);
     }
+
+    /// @dev For `GasKillerTokenRateLimit`, which opens and closes its token window here, inside
+    ///      the ETH one. Not meant for consumers: the modifier itself can't be overridden, so the
+    ///      ETH charge can't be dropped by an override that forgets `super`.
+    function _beginTokenOutflow() internal virtual {}
+
+    /// @dev As `_beginTokenOutflow`: closes the token window and charges it.
+    function _endTokenOutflow() internal virtual {}
 
     /// @dev Final, as in `GasKillerOutgoingRateLimit`.
     function _authorizeCall(uint256 index, StateUpdateType kind, address target, uint256 value, bytes memory data)

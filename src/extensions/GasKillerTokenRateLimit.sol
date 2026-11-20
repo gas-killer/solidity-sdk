@@ -67,15 +67,15 @@ abstract contract GasKillerTokenRateLimit is GasKillerOutgoingRateLimit {
     ///         can't be set or cleared here either.
     function _afterLimitedProgram() internal virtual {}
 
-    function _beginOutflow() internal virtual override returns (uint256 ethBaseline) {
-        ethBaseline = super._beginOutflow();
+    /// @dev Final, so a consumer can't drop the token charge from `limitsOutflow`.
+    function _beginTokenOutflow() internal override {
         TokenRateLimit.begin();
         TokenRateLimit.snapshot(_tokenLimits());
     }
 
-    function _endOutflow(uint256 ethBaseline) internal virtual override {
+    /// @dev Final, as `_beginTokenOutflow`.
+    function _endTokenOutflow() internal override {
         TokenRateLimit.endProgram(_tokenLimits());
-        super._endOutflow(ethBaseline);
     }
 
     function _beforeProgram() internal override {
@@ -140,15 +140,15 @@ abstract contract GasKillerNestedTokenRateLimit is GasKillerNestedOutgoingRateLi
     /// @notice As `GasKillerTokenRateLimit._afterLimitedProgram`.
     function _afterLimitedProgram() internal virtual {}
 
-    function _beginOutflow() internal virtual override returns (uint256 ethBaseline) {
-        ethBaseline = super._beginOutflow();
+    /// @dev Final, so a consumer can't drop the token charge from `limitsOutflow`.
+    function _beginTokenOutflow() internal override {
         TokenRateLimit.begin();
         TokenRateLimit.snapshot(_tokenLimits());
     }
 
-    function _endOutflow(uint256 ethBaseline) internal virtual override {
+    /// @dev Final, as `_beginTokenOutflow`.
+    function _endTokenOutflow() internal override {
         TokenRateLimit.endProgram(_tokenLimits());
-        super._endOutflow(ethBaseline);
     }
 
     function _beforeProgram() internal override {
