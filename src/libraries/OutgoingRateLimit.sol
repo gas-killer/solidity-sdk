@@ -14,9 +14,10 @@ import {GasKillerSDK} from "../GasKillerSDK.sol";
 ///      contracts in `src/extensions/GasKillerOutgoingRateLimit.sol` do exactly that.
 ///
 ///      All of a contract's programs share the bucket, whether they settle alone, in a batch or
-///      as frames of a nested tree. Only value sent by signed programs counts: the contract's own
-///      functions, called natively, spend nothing, so a balance a program credits with a `STORE`
-///      and the contract later pays out isn't limited. It limits ETH only; a token transfer moves no
+///      as frames of a nested tree. Signed programs spend from it op by op. The contract's own
+///      functions, called natively, spend from it only inside a `beginNative` / `endNative`
+///      window (the drop-ins' `limitsOutflow`): without one, a balance a program credits with a
+///      `STORE` and the contract later pays out isn't limited. It limits ETH only; a token transfer moves no
 ///      value, so restrict those in `_authorizeCall`. Timestamps are kept in 32 bits, which holds
 ///      until 2106.
 library OutgoingRateLimit {
@@ -112,8 +113,18 @@ library OutgoingRateLimit {
 
     /// @notice Opens a measuring window around one of the contract's own functions: returns its
     ///         ETH balance before the function, not counting the `msg.value` it was called with.
+    /// @dev A self-call's `msg.value` is the contract's own ETH, not new money, so it isn't
+    ///      excluded: otherwise ETH an allowed self-call sends in, which `spend` skips, could be
+    ///      paid out uncharged. Put the window on external entry points: inside one call every
+    ///      window excludes the same `msg.value`, so a window on an internal function that runs
+    ///      after the call forwarded its `msg.value` sees a lower baseline (zero at worst, rather
+    ///      than an underflow) and under-counts. The window around it still charges the call.
     function beginNative() internal view returns (uint256 baseline) {
-        return address(this).balance - msg.value;
+        baseline = address(this).balance;
+        if (msg.sender == address(this)) return baseline;
+        unchecked {
+            return baseline > msg.value ? baseline - msg.value : 0;
+        }
     }
 
     /// @notice Closes the window `beginNative` opened: spends the net decrease of the contract's

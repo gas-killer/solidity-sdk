@@ -60,9 +60,10 @@ import {StateUpdateType} from "../StateChangeHandlerLib.sol";
 ///
 ///      The budgets live in the SDK's protected config namespace (`GasKillerSDK._tokenLimits()`),
 ///      so a signed program can't refill them with a `STORE`. All of the contract's programs
-///      share them. Only signed programs are charged: the contract's own functions, called
-///      natively, are not, so a balance a program credits with a `STORE` and the contract later
-///      pays out isn't charged either.
+///      share them. Signed programs are charged. The contract's own functions, called natively, are
+///      charged only inside a `begin` / `snapshot` / `endProgram` window (the drop-ins'
+///      `limitsOutflow`): without one, a balance a program credits with a `STORE` and the
+///      contract later pays out isn't charged.
 library TokenRateLimit {
     /// @notice A program's net outflow of `token`, with allowances it left standing, exceeds the
     ///         token's budget.

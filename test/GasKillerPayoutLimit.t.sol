@@ -43,6 +43,41 @@ contract EthVault is GasKillerOutgoingRateLimit {
     }
 }
 
+/// An `EthVault` that lets signed programs call `payTo` on itself, with value.
+contract SelfPayVault is EthVault {
+    constructor(address registry) EthVault(registry) {}
+
+    function payTo(address to, uint256 amount) external payable limitsOutflow {
+        require(msg.sender == address(this), "only self");
+        (bool ok,) = to.call{value: amount}("");
+        require(ok, "send");
+    }
+
+    function _allowSelfCall(bytes4 selector) internal pure override returns (bool) {
+        return selector == this.payTo.selector;
+    }
+}
+
+/// Forwards the call's `msg.value` to a sink, then pays out through an internal limited function.
+contract ForwardingVault is GasKillerOutgoingRateLimit {
+    constructor(address registry) GasKillerOutgoingRateLimit(1 ether, 1 hours) {
+        _setSchnorrRegistry(registry);
+    }
+
+    receive() external payable {}
+
+    function forwardThenPay(address sink, uint256 amount) external payable {
+        (bool ok,) = sink.call{value: msg.value}("");
+        require(ok, "forward");
+        _payout(amount);
+    }
+
+    function _payout(uint256 amount) internal limitsOutflow {
+        (bool ok,) = msg.sender.call{value: amount}("");
+        require(ok, "send");
+    }
+}
+
 /// A token vault: at most 100 tokens an hour may leave, ETH unlimited.
 contract TokenVault is GasKillerTokenRateLimit {
     mapping(address => uint256) public balances; // slot 0
@@ -174,6 +209,37 @@ contract GasKillerPayoutLimitTest is Test {
         v.swapOut{value: 5 ether}(5.5 ether);
         (uint256 available,,) = v.gasKillerOutgoingAllowance();
         assertEq(available, 0.5 ether, "5.5 out, 5 in: 0.5 charged");
+    }
+
+    /// ETH a signed program sends into an allowed, payable limited self-call is the vault's own:
+    /// `spend` skips it because the target is the vault, so the window must not treat it as
+    /// incoming money. Paying it out is charged.
+    function test_selfCallValuePaidOutIsCharged() public {
+        SelfPayVault v = new SelfPayVault(address(registry));
+        vm.deal(address(v), 50 ether);
+        StateUpdateType[] memory types = new StateUpdateType[](2);
+        bytes[] memory args = new bytes[](2);
+        uint256 ti = v.stateTransitionCount();
+        args[0] = abi.encode(TRACKER_SLOT, bytes32(ti + 1));
+        types[1] = StateUpdateType.CALL;
+        args[1] = abi.encode(address(v), 0.6 ether, abi.encodeCall(SelfPayVault.payTo, (ATTACKER, 0.6 ether)));
+        bytes memory updates = abi.encode(types, args);
+        bytes32 h = v.getMessageHash(ti, FN, updates);
+        v.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
+        assertEq(ATTACKER.balance, 0.6 ether);
+        (uint256 available,,) = v.gasKillerOutgoingAllowance();
+        assertEq(available, 0.4 ether, "the payout is charged");
+    }
+
+    /// A window on an internal function, after the call forwarded its `msg.value` and left less
+    /// than that behind, doesn't underflow.
+    function test_internalWindowAfterForwardingDoesNotPanic() public {
+        ForwardingVault v = new ForwardingVault(address(registry));
+        vm.deal(address(v), 0.1 ether);
+        vm.deal(USER, 1 ether);
+        vm.prank(USER);
+        v.forwardThenPay{value: 1 ether}(address(0xdead), 0.1 ether);
+        assertEq(USER.balance, 0.1 ether);
     }
 
     // ---------------------------------------------------------------- tokens

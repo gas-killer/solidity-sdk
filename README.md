@@ -648,8 +648,14 @@ contract Vault is GasKillerTokenRateLimit {
 - **Honest withdrawals share the budget.** That is the point, and the cost: size `limit` for your
   normal outflow plus headroom, as for a bridge's withdrawal limit. When the budget runs out,
   withdrawals wait for it to refill.
-- **Net.** What the function receives offsets what it sends, as for programs: unwrapping WETH and
-  sending the ETH on is charged only if WETH is listed as a token too.
+- **Net.** What the function receives offsets what it sends: unwrapping WETH and sending the ETH
+  on is charged only if WETH is listed as a token too. Unlike programs, where a `transferFrom` into
+  the contract can't offset a send, tokens the function pulls in count too. Keep code that pulls
+  from third parties who approved your contract out of reach of a limited function and its
+  callbacks, or a credited balance can leave hidden behind the pull (#117).
+- **Put it on external entry points.** The ETH side excludes the call's `msg.value` from the
+  baseline (not a self-call's, which is the contract's own ETH). On an internal function that runs
+  after the call forwarded its `msg.value`, the window under-counts; the one around it doesn't.
 - **Nested windows.** A limited function that calls another, directly or through a callback, is
   charged for both: conservative, never under-counted. The same applies to a limited function an
   allowed self-call reaches inside a signed program.
@@ -679,15 +685,16 @@ contract Treasury is GasKillerCallAllowList {
   slot to protect, and a few comparisons per `CALL`. Changing it takes a new deployment or upgrade.
 - **Selector zero** lists plain ETH transfers (empty calldata) to a target. Calldata of 1 to 3
   bytes, or with selector `0x00000000` and a payload, is always rejected, as for self-calls.
-- **Self-calls** are governed by `_allowSelfCall` and aren't listed again.
+- **Self-calls** are governed by `_allowSelfCall` and aren't listed again. Nor are `NESTED` ops to
+  your own contract: each op of the frame they open is checked.
 - **What it bounds:** which contracts and functions your contract's authority can reach. Not a
   call's arguments (an allowed `transfer` sends wherever the quorum says), not what an allowed
   function does next, and not payouts through your own functions. Pair it with the rate limits
   and `limitsOutflow`.
 - **With a rate-limit drop-in,** don't inherit both: the drop-ins make `_authorizeCall` final.
   Inherit the drop-in and run the same check from its `_authorizeLimitedCall`:
-  `CallAllowList.check(index, kind, target, data, _isAllowedCall, false)` (pass `true` to allow
-  deployments). See the NatSpec on `GasKillerCallAllowList`.
+  `CallAllowList.check(index, kind, target, data, _isAllowedCall, CallAllowList.noDeployments)`
+  (or your own `view` function returning whether deployments may run). See the NatSpec on `GasKillerCallAllowList`.
 - **Cost.** About 365 gas per `CALL` for a one-entry list (`test_allowList`).
 
 ### Cost of the hooks

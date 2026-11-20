@@ -68,7 +68,7 @@ contract ListedLimitedTreasury is GasKillerTokenRateLimit {
         view
         override
     {
-        CallAllowList.check(index, kind, target, data, _isAllowedCall, false);
+        CallAllowList.check(index, kind, target, data, _isAllowedCall, CallAllowList.noDeployments);
     }
 }
 
@@ -81,7 +81,7 @@ contract AllowListHarness {
     }
 
     function check(StateUpdateType kind, address target, bytes memory data) external view {
-        CallAllowList.check(0, kind, target, data, _isAllowed, false);
+        CallAllowList.check(0, kind, target, data, _isAllowed, CallAllowList.noDeployments);
     }
 
     function _isAllowed(address target, bytes4 selector) private view returns (bool) {
@@ -248,5 +248,18 @@ contract GasKillerCallAllowListTest is Test {
             _notAllowed(address(token), IERC20.approve.selector)
         );
         assertEq(token.balanceOf(ATTACKER), 100);
+    }
+
+    /// A `NESTED` op to the contract itself opens its own frame, whose ops are checked one by one;
+    /// it isn't listed.
+    function test_selfNestedIsNotListed() public {
+        AllowListHarness h = new AllowListHarness(address(0xCAFE));
+        h.check(StateUpdateType.NESTED, address(h), "");
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CallAllowList.CallNotAllowed.selector, 0, address(0xBEEF), IGasKillerNested.applyNested.selector
+            )
+        );
+        h.check(StateUpdateType.NESTED, address(0xBEEF), "");
     }
 }

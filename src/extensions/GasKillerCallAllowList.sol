@@ -18,7 +18,8 @@ import {CallAllowList} from "../libraries/CallAllowList.sol";
 ///                 || (target == payee && selector == bytes4(0)); // plain ETH to the payee
 ///         }
 ///         ```
-/// @dev Self-calls are governed by `_allowSelfCall` and aren't checked again here. The
+/// @dev Self-calls are governed by `_allowSelfCall` and aren't checked again here, nor are
+///      `NESTED` ops to this contract (each op of the frame they open is). The
 ///      rate-limit drop-ins make `_authorizeCall` final, so don't inherit this alongside one:
 ///      inherit the drop-in and run the same check from its `_authorizeLimitedCall`:
 ///      ```
@@ -28,7 +29,7 @@ import {CallAllowList} from "../libraries/CallAllowList.sol";
 ///          function _authorizeLimitedCall(uint256 i, StateUpdateType k, address t, uint256, bytes memory d)
 ///              internal view override
 ///          {
-///              CallAllowList.check(i, k, t, d, _isAllowedCall, false); // true to allow deployments
+///              CallAllowList.check(i, k, t, d, _isAllowedCall, CallAllowList.noDeployments);
 ///          }
 ///      }
 ///      ```
@@ -51,7 +52,7 @@ abstract contract GasKillerCallAllowList is GasKillerSDK {
         override
     {
         super._authorizeCall(index, kind, target, value, data);
-        CallAllowList.check(index, kind, target, data, _isAllowedCall, _allowDeployments());
+        CallAllowList.check(index, kind, target, data, _isAllowedCall, _allowDeployments);
     }
 }
 
@@ -74,6 +75,6 @@ abstract contract GasKillerNestedCallAllowList is GasKillerNestedSDK {
         override
     {
         super._authorizeCall(index, kind, target, value, data);
-        CallAllowList.check(index, kind, target, data, _isAllowedCall, _allowDeployments());
+        CallAllowList.check(index, kind, target, data, _isAllowedCall, _allowDeployments);
     }
 }
