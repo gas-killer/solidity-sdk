@@ -58,7 +58,8 @@ contract SelfPayVault is EthVault {
     }
 }
 
-/// Forwards the call's `msg.value` to a sink, then pays out through an internal limited function.
+/// Pays out through an internal limited function, after forwarding the call's `msg.value` or twice
+/// in one call.
 contract ForwardingVault is GasKillerOutgoingRateLimit {
     constructor(address registry) GasKillerOutgoingRateLimit(1 ether, 1 hours) {
         _setSchnorrRegistry(registry);
@@ -69,6 +70,12 @@ contract ForwardingVault is GasKillerOutgoingRateLimit {
     function forwardThenPay(address sink, uint256 amount) external payable {
         (bool ok,) = sink.call{value: msg.value}("");
         require(ok, "forward");
+        _payout(amount);
+    }
+
+    /// Two limited payouts under one payable call.
+    function payTwice(uint256 amount) external payable {
+        _payout(amount);
         _payout(amount);
     }
 
@@ -200,15 +207,29 @@ contract GasKillerPayoutLimitTest is Test {
         assertEq(available, 0);
     }
 
-    /// `msg.value` doesn't count as the vault's own ETH, and what the call brought in offsets what
-    /// it sent out.
-    function test_onlyNetOutflowIsCharged() public {
+    /// The call's `msg.value` is in the baseline: ETH a payable limited function receives and sends
+    /// on is charged.
+    function test_msgValueDoesNotOffsetPayouts() public {
         EthVault v = _ethVault();
-        vm.deal(USER, 5 ether);
+        vm.deal(USER, 10 ether);
         vm.prank(USER);
-        v.swapOut{value: 5 ether}(5.5 ether);
+        vm.expectRevert(_ethExceeded(1.5 ether, 1 ether));
+        v.swapOut{value: 5 ether}(1.5 ether);
+
+        vm.prank(USER);
+        v.swapOut{value: 5 ether}(0.4 ether);
         (uint256 available,,) = v.gasKillerOutgoingAllowance();
-        assertEq(available, 0.5 ether, "5.5 out, 5 in: 0.5 charged");
+        assertEq(available, 0.6 ether, "0.4 sent, all charged");
+    }
+
+    /// One deposit can't offset the payouts of two limited functions in the same call.
+    function test_oneDepositDoesNotOffsetTwoPayouts() public {
+        ForwardingVault v = new ForwardingVault(address(registry));
+        vm.deal(address(v), 50 ether);
+        vm.deal(USER, 1 ether);
+        vm.prank(USER);
+        vm.expectRevert(_ethExceeded(0.6 ether, 0.4 ether));
+        v.payTwice{value: 1 ether}(0.6 ether);
     }
 
     /// ETH a signed program sends into an allowed, payable limited self-call is the vault's own:
@@ -231,15 +252,17 @@ contract GasKillerPayoutLimitTest is Test {
         assertEq(available, 0.4 ether, "the payout is charged");
     }
 
-    /// A window on an internal function, after the call forwarded its `msg.value` and left less
-    /// than that behind, doesn't underflow.
-    function test_internalWindowAfterForwardingDoesNotPanic() public {
+    /// A limited internal function that runs after the call forwarded its `msg.value` is charged
+    /// for its payout, and doesn't underflow.
+    function test_forwardThenPayIsCharged() public {
         ForwardingVault v = new ForwardingVault(address(registry));
         vm.deal(address(v), 0.1 ether);
         vm.deal(USER, 1 ether);
         vm.prank(USER);
         v.forwardThenPay{value: 1 ether}(address(0xdead), 0.1 ether);
         assertEq(USER.balance, 0.1 ether);
+        (uint256 available,,) = v.gasKillerOutgoingAllowance();
+        assertEq(available, 0.9 ether, "the payout is charged");
     }
 
     // ---------------------------------------------------------------- tokens

@@ -650,8 +650,7 @@ contract Vault is GasKillerTokenRateLimit {
 }
 ```
 
-- **Measured, like programs.** The modifier reads the contract's ETH balance (less the call's
-  `msg.value`) and each listed token's `balanceOf` before the function and after it, and charges the
+- **Measured, like programs.** The modifier reads the contract's ETH balance and each listed token's `balanceOf` before the function and after it, and charges the
   decrease to the same budgets signed programs spend. Every route out of the function counts,
   including callbacks, and nothing has to be counted by hand. A shortfall reverts the call with
   `OutgoingRateLimit.NativeOutflowRateLimitExceeded(value, available)` or
@@ -674,9 +673,9 @@ contract Vault is GasKillerTokenRateLimit {
   from inside a limited function either (`TokenRateLimitChangedMidProgram`).
 - **Final.** The modifier can't be overridden, so its charge can't be dropped by an override that
   forgets `super`.
-- **Put it on external entry points.** The ETH side excludes the call's `msg.value` from the
-  baseline (not a self-call's, which is the contract's own ETH). On an internal function that runs
-  after the call forwarded its `msg.value`, the window under-counts; the one around it doesn't.
+- **`msg.value` doesn't offset payouts.** It is already in the balance when the window opens, so
+  a payable limited function that receives ETH and sends it on (a swap, a forwarder) is charged for
+  what it sends. Excluding it would let one deposit offset every limited function a call runs.
 - **Nested windows.** A limited function that calls another, directly or through a callback, is
   charged for both: conservative, never under-counted, but honest payouts can use the budget up
   faster. The same applies to a limited function an allowed self-call reaches inside a signed
