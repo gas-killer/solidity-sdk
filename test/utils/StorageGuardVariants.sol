@@ -146,6 +146,14 @@ library StorageGuardVariants {
             mask := mload(add(range, 0x40))
             current := sload(slot)
         }
+        if (slot == StorageGuard.COUNTER_SLOT) {
+            unchecked {
+                if (value >= current && uint256(value) - uint256(current) <= StorageGuard.MAX_COUNTER_ADVANCE) {
+                    return;
+                }
+            }
+            revert StorageGuard.ProtectedSlotWrite(index, slot);
+        }
         if ((current ^ value) & mask != 0) revert StorageGuard.ProtectedSlotWrite(index, slot);
     }
 }

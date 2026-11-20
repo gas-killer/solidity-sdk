@@ -67,7 +67,8 @@ contract UnguardedConsumer is RangedConsumer0 {
 ///           32  | 773,288 | +1,933 (+0.2%) | +12,820 (+1.7%) | +13,317 (+1.7%) | +14,912 (+1.9%)
 ///
 ///         Protected: about 340 gas per STORE, about 500 per declared range per call (building
-///         and merging the list; it is validated at deployment, not here), and about 1,400 fixed.
+///         and merging the list; it is validated at deployment, not here), and about 1,400 fixed,
+///         plus about 70 per transition for the counter's forward rule (added later, #116).
 ///         Opted out: about 60 per STORE. `test_batch`: a 20-item batch builds the list once,
 ///         +34,750 (+5.3%) at k = 0, +46,963 (+7.2%) at k = 4 and +8,323 (+1.3%) opted out, over
 ///         653,659.

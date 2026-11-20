@@ -123,6 +123,26 @@ contract ReentrantVault is GasKillerSDK {
     }
 }
 
+/// A consumer whose tracked function calls another public tracked function internally (a jump,
+/// not a `CALL`), so one native call bumps its counter twice.
+contract DoubleTracked is GasKillerSDK {
+    uint256 public deposits; // slot 0
+    uint256 public stakes; // slot 1
+
+    constructor(address registry) {
+        _setSchnorrRegistry(registry);
+    }
+
+    function deposit() public trackState {
+        deposits += 1;
+    }
+
+    function depositAndStake() external trackState {
+        deposit();
+        stakes += 1;
+    }
+}
+
 /// The external contract a tracked function calls, which calls back into the vault's other
 /// tracked function, or does nothing.
 contract Poker {
@@ -280,10 +300,33 @@ contract GasKillerSDKProtectedStorageTest is Test {
 
     // ---------------------------------------------------------------- the SDK's own slots
 
-    function test_counterRewriteRejected() public {
+    /// The counter may not move back from what `trackState` wrote, which could replay old
+    /// transitions, nor jump further forward than `MAX_COUNTER_ADVANCE`.
+    function test_counterRewindAndOverlongJumpRejected() public {
         Program memory p = _program(1);
-        _store(p, TRACKER_SLOT, bytes32(uint256(7)));
+        _store(p, TRACKER_SLOT, bytes32(0)); // settlement has already bumped it to 1
         _settle(vault, p, _rejection(0, TRACKER_SLOT));
+
+        p = _program(1);
+        _store(p, TRACKER_SLOT, bytes32(1 + StorageGuard.MAX_COUNTER_ADVANCE + 1));
+        _settle(vault, p, _rejection(0, TRACKER_SLOT));
+
+        p = _program(1);
+        _store(p, TRACKER_SLOT, bytes32(type(uint256).max));
+        _settle(vault, p, _rejection(0, TRACKER_SLOT));
+        assertEq(vault.stateTransitionCount(), 0);
+    }
+
+    /// A program may move the counter forward, up to the bound, as a tracked function that
+    /// bumps it more than once natively does. The next transition then takes the index after it.
+    function test_counterMayMoveForward() public {
+        Program memory p = _program(1);
+        _store(p, TRACKER_SLOT, bytes32(1 + StorageGuard.MAX_COUNTER_ADVANCE));
+        _settle(vault, p);
+        assertEq(vault.stateTransitionCount(), 1 + StorageGuard.MAX_COUNTER_ADVANCE);
+
+        _settle(vault, _tracked(vault, 0));
+        assertEq(vault.stateTransitionCount(), 2 + StorageGuard.MAX_COUNTER_ADVANCE);
     }
 
     function test_sdkConfigRewriteRejected() public {
@@ -540,13 +583,78 @@ contract GasKillerSDKProtectedStorageTest is Test {
     }
 
     /// @dev If the CALL's replay diverges from the simulation and doesn't re-enter, the final
-    ///      slice's counter value is one the contract never reached, and the write is rejected
-    ///      instead of skipping a transition index.
-    function test_reassertedCounterTheReplayDidNotReachIsRejected() public {
+    ///      slice still brings the counter to the value native execution reached: the signed
+    ///      program, not the replay, decides the final storage. That skips one index, which
+    ///      nothing was signed for.
+    function test_reassertedCounterTheReplayDidNotReachIsApplied() public {
         ReentrantVault v = new ReentrantVault(address(registry));
         Poker poker = new Poker();
-        Program memory p = _reentrantProgram(v, poker, abi.encodeCall(Poker.noop, ()), true);
-        _settle(v, p, _rejection(3, TRACKER_SLOT));
+        _settle(v, _reentrantProgram(v, poker, abi.encodeCall(Poker.noop, ()), true));
+        assertEq(v.stateTransitionCount(), 2);
+        assertEq(v.hits(), 1);
+    }
+
+    // ---------------------------------------------------------------- nested trackState (#116)
+
+    /// @dev `depositAndStake()` as gas-analyzer emits it. The canonical extraction writes each
+    ///      slot's final value once; the journal-order one replays every SSTORE, so the counter
+    ///      appears at N+1 and then N+2.
+    function _doubleTrackedProgram(DoubleTracked d, bool journal) internal view returns (Program memory p) {
+        uint256 n = d.stateTransitionCount();
+        p = _program(4);
+        if (journal) _store(p, TRACKER_SLOT, bytes32(n + 1));
+        _store(p, TRACKER_SLOT, bytes32(n + 2));
+        _store(p, bytes32(0), bytes32(d.deposits() + 1));
+        _store(p, bytes32(uint256(1)), bytes32(d.stakes() + 1));
+    }
+
+    /// A tracked function that calls another tracked function settles, and leaves the counter
+    /// where native execution does.
+    function test_trackedFunctionCallingAnotherSettles() public {
+        DoubleTracked d = new DoubleTracked(address(registry));
+        uint256 snapshot = vm.snapshotState();
+        d.depositAndStake();
+        uint256 nativeCount = d.stateTransitionCount();
+        vm.revertToState(snapshot);
+
+        _settle(d, _doubleTrackedProgram(d, false));
+        assertEq(d.stateTransitionCount(), nativeCount, "matches native execution");
+        assertEq(d.stateTransitionCount(), 2);
+        assertEq(d.deposits(), 1);
+        assertEq(d.stakes(), 1);
+
+        _settle(d, _doubleTrackedProgram(d, true));
+        assertEq(d.stateTransitionCount(), 4);
+        assertEq(d.deposits(), 2);
+    }
+
+    /// In a batch, each transition's index follows the counter the one before it left.
+    function test_trackedFunctionCallingAnotherSettlesInABatch() public {
+        DoubleTracked d = new DoubleTracked(address(registry));
+        TaskSubmission[] memory subs = new TaskSubmission[](2);
+        for (uint256 i = 0; i < 2; ++i) {
+            uint256 n = 2 * i; // each transition moves the counter by two
+            Program memory p = _program(3);
+            _store(p, TRACKER_SLOT, bytes32(n + 2));
+            _store(p, bytes32(0), bytes32(i + 1));
+            _store(p, bytes32(uint256(1)), bytes32(i + 1));
+            bytes memory updates = _encode(p);
+            subs[i] = TaskSubmission(
+                d.getMessageHash(n, FN, updates),
+                uint32(block.number - 1),
+                updates,
+                n,
+                FN,
+                1,
+                address(1),
+                new address[](0),
+                0
+            );
+        }
+        d.verifyAndUpdateBatch(subs);
+        assertEq(d.stateTransitionCount(), 4);
+        assertEq(d.deposits(), 2);
+        assertEq(d.stakes(), 2);
     }
 
     // ---------------------------------------------------------------- batches

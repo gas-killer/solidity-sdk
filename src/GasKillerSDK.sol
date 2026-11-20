@@ -47,7 +47,9 @@ import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
 ///      storage: the transition counter and the whole ERC-7201 namespace of the configuration
 ///      struct (AVS address, registry, stale-block window). Consumers add theirs, such as an `Ownable` owner slot, by
 ///      overriding `_protectedRanges()`. A write that leaves protected bits unchanged passes,
-///      which is what keeps the counter copy gas-analyzer puts in every program working.
+///      which is what keeps the counter copy gas-analyzer puts in every program working. The
+///      counter may also move forward, never back, so a tracked function that bumps it more than
+///      once natively still settles (`StorageGuard.COUNTER_SLOT`).
 abstract contract GasKillerSDK is
     StateTracker,
     TransitionGuard,
@@ -440,7 +442,7 @@ abstract contract GasKillerSDK is
     }
 
     /// @notice **Unsafe.** Override to return true to stop settlement checking signed STOREs
-    ///         against protected storage. Saves about 1,400 gas per call, 500 more per declared
+    ///         against protected storage. Saves about 1,500 gas per call, 500 more per declared
     ///         range, and about 280 per STORE (see `bench/SettlementGas.t.sol`).
     /// @dev With the check off, a quorum that signs a malicious program can overwrite any slot of
     ///      this contract: an owner, an upgrade slot, the transition counter (replaying or
