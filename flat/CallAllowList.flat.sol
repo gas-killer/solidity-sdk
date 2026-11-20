@@ -838,7 +838,10 @@ library CallAllowList {
 
     /// @notice Reverts unless the op is allowed.
     /// @dev A `CALL` to the running contract itself is skipped: the SDK's self-call check
-    ///      (`_allowSelfCall`) has already allowed it. So is a `NESTED` op to it: the frame it
+    ///      (`_allowSelfCall`) has already allowed it. That holds only behind the SDK's
+    ///      `_authorizeCall` chain, as in the extensions. In a `CallPolicy` built by hand, whose
+    ///      `allowSelfCall` doesn't check self-calls (`_unrestrictedCalls`), every self-call
+    ///      passes: check them there yourself. So is a `NESTED` op to it: the frame it
     ///      opens is this contract's own, and each of its ops comes through this check too. Calldata of 1 to 3 bytes, or of 4 or more
     ///      starting with `0x00000000`, is rejected without asking `isAllowed`, since it would land
     ///      in a fallback that allowing the ETH-transfer case (selector zero) or a selector its
