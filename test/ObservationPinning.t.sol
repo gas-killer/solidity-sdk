@@ -33,6 +33,31 @@ contract Pool {
 
 contract Deployed {}
 
+/// Succeeds whether or not its inner work runs: a caught out-of-gas takes the other path, so
+/// the outer call's success says nothing about which one ran.
+contract Catcher {
+    uint256 public done;
+
+    function run() external returns (bool) {
+        try this.work() {
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    /// About 20 fresh SSTOREs, over 440k gas.
+    function work() external {
+        require(msg.sender == address(this));
+        for (uint256 i = 1; i <= 20; ++i) {
+            assembly {
+                sstore(add(0x1000, i), i)
+            }
+        }
+        done += 1;
+    }
+}
+
 /// Logs the gas a call arrived with: cheap enough to run on the 2,300 stipend.
 contract GasProbe {
     event Arrived(uint256 gas);
@@ -318,6 +343,78 @@ contract ObservationPinningTest is Test {
         Program memory p = _tracked(1);
         _op(p, StateUpdateType.CALL, abi.encode(address(probe), uint256(0), data, _hash(false, ""), uint256(10_000)));
         _settle(p, abi.encodeWithSelector(StateChangeHandlerLib.RevertingContext.selector, 1, address(probe), "", data));
+    }
+
+    function _catcherProgram(Catcher catcher, uint256 gasLimit) internal view returns (bytes memory updates) {
+        Program memory p = _tracked(1);
+        _op(
+            p,
+            StateUpdateType.CALL,
+            abi.encode(address(catcher), uint256(0), abi.encodeCall(Catcher.run, ()), bytes32(0), gasLimit)
+        );
+        StateUpdateType[] memory t = new StateUpdateType[](p.n);
+        bytes[] memory a = new bytes[](p.n);
+        for (uint256 i = 0; i < p.n; ++i) {
+            (t[i], a[i]) = (p.types[i], p.args[i]);
+        }
+        updates = abi.encode(t, a);
+    }
+
+    /// Settles `updates` with only `txGas`, as a griefing settler would.
+    function _settleWithGas(bytes memory updates, uint256 txGas) internal returns (bool ok, bytes memory ret) {
+        uint256 ti = c.stateTransitionCount();
+        bytes memory data = abi.encodeCall(
+            c.verifyAndUpdate,
+            (
+                c.getMessageHash(ti, FN, updates),
+                uint32(block.number - 1),
+                updates,
+                ti,
+                FN,
+                1,
+                address(1),
+                new address[](0)
+            )
+        );
+        (ok, ret) = address(c).call{gas: txGas}(data);
+    }
+
+    /// A settler can't starve a capped callee into its catch path: with too little gas the
+    /// settlement reverts, and with enough the callee gets all of its cap.
+    function test_callGas_capMustBeDeliverable() public {
+        Catcher catcher = new Catcher();
+        bytes memory updates = _catcherProgram(catcher, 600_000);
+
+        (bool ok, bytes memory ret) = _settleWithGas(updates, 300_000);
+        assertFalse(ok, "starved settlement must revert");
+        assertEq(ret, abi.encodeWithSelector(StateChangeHandlerLib.InsufficientCallGas.selector, 1, 600_000));
+        assertEq(catcher.done(), 0);
+
+        (ok,) = _settleWithGas(updates, 2_000_000);
+        assertTrue(ok, "settles with enough gas");
+        assertEq(catcher.done(), 1, "the inner work ran, as in the trace");
+    }
+
+    /// With `type(uint256).max` the settler still picks the callee's gas: the starved callee
+    /// takes its catch path and the settlement goes through. The fallback's known limit.
+    function test_callGas_uncappedCallCanStillBeStarved() public {
+        Catcher catcher = new Catcher();
+        (bool ok,) = _settleWithGas(_catcherProgram(catcher, type(uint256).max), 300_000);
+        assertTrue(ok, "settles");
+        assertEq(catcher.done(), 0, "the inner work was skipped");
+    }
+
+    /// A cap no settlement can supply, such as a raw operand from a trace run past the block
+    /// gas limit, makes the program unsettleable: the analyzer has to clamp it.
+    function test_callGas_capAboveWhatSettlementCanSupplyReverts() public {
+        Catcher catcher = new Catcher();
+        Program memory p = _tracked(1);
+        _op(
+            p,
+            StateUpdateType.CALL,
+            abi.encode(address(catcher), uint256(0), abi.encodeCall(Catcher.run, ()), bytes32(0), uint256(1e12))
+        );
+        _settle(p, abi.encodeWithSelector(StateChangeHandlerLib.InsufficientCallGas.selector, 1, uint256(1e12)));
     }
 
     // ---------------------------------------------------------------- reads

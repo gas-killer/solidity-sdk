@@ -881,16 +881,23 @@ silently back a credit of the 100 the trace saw.
   pinned, as it can't be told from an out-of-gas the settler caused. Its policy hooks and rate
   limits still charge it as if it had gone through. A caught revert that depended on a gas cap
   can't be pinned either: an out-of-gas returns no data.
-- A `CALL`'s `gasLimit` is the gas operand the traced call passed, and settlement passes it
-  unchanged. The EVM caps it at 63/64 of the gas left and adds the 2,300 stipend to a call with
-  value, as in the trace. So a `transfer` or `send` (operand 0 with value, 2,300 without) reaches
-  its recipient with the stipend only, not with enough gas to re-enter the consumer
-  mid-transition. A call that forwarded all its gas in the trace should be encoded as
-  `type(uint256).max`, and gets everything left. If a callee runs out of gas, settlement reverts.
-  For a call with a large operand, a settler can retry with a higher gas limit. A capped callee
-  can also run out where it fit in the trace, because an account or slot that was warm there is
-  cold at settlement; more gas doesn't help that, but an EIP-2930 access list on the settlement
-  transaction that warms what the trace had warm does.
+- A `CALL`'s `gasLimit` is the gas its callee gets, never more than the traced call passed. A
+  `transfer` or `send` (operand 0 with value, 2,300 without) reaches its recipient with the
+  2,300 stipend only, as in the trace, not with enough gas to re-enter the consumer
+  mid-transition. For other calls the analyzer signs the least gas with which the callee,
+  re-simulated, reproduces the trace, or the traced operand if that's smaller.
+- Settlement reverts with `InsufficientCallGas` unless the callee can get all of `gasLimit`
+  (63/64 of what's left after the `CALL`'s own cost). So whoever submits the settlement can't
+  starve a callee into another path, such as an inner call that runs out of gas and is caught,
+  while the call still succeeds. A retry with a higher gas limit settles it. A `gasLimit` more
+  than any settlement can supply, such as an operand recorded in a trace run past the block gas
+  limit, can never settle, so the analyzer clamps it.
+- `gasLimit = type(uint256).max` forwards everything left, unchecked: the fallback when the
+  callee's needed gas wasn't worked out. The settler then chooses how much gas that callee gets.
+- If a callee runs out of gas, settlement reverts. A capped callee can run out where it fit in
+  the trace, because an account or slot that was warm there is cold at settlement. More gas
+  doesn't help that, but an EIP-2930 access list on the settlement transaction that warms what
+  the trace had warm does.
 - `CREATE`'s `expected` pins the deployed address, which moves with the contract's nonce; zero
   leaves it unchecked. `CREATE2`'s address is fixed by its signed salt and initcode.
 - The `*_CHECK` ops pin reads that changed no state: `STATICCALL` (with the same result hash),
