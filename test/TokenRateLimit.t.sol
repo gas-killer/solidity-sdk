@@ -94,8 +94,8 @@ contract NestingHarness is GasKillerSDK {
         TokenRateLimit.begin();
         TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
         token.transfer(to, 20);
-        TokenRateLimit.endProgram(_tokenLimits()); // the inner program: nothing
-        TokenRateLimit.endProgram(_tokenLimits()); // the outer one: 10 + 20
+        TokenRateLimit.endProgram(_tokenLimits()); // the inner program: 20
+        TokenRateLimit.endProgram(_tokenLimits()); // the outer one: 10, beyond the inner's 20
     }
 
     /// The outer program receives 20 (a mint stands in for any inflow), then the inner one sends 20.
@@ -116,8 +116,8 @@ contract NestingHarness is GasKillerSDK {
         TokenRateLimit.begin();
         TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
         token.transfer(to, 20);
-        TokenRateLimit.endProgram(_tokenLimits()); // the inner program: nothing
-        TokenRateLimit.endProgram(_tokenLimits()); // the outer one: 20, snapshotted as the inner began
+        TokenRateLimit.endProgram(_tokenLimits()); // the inner program: 20
+        TokenRateLimit.endProgram(_tokenLimits()); // the outer one: nothing, never snapshotted
     }
 
     /// The outer program sends 50; the inner one pulls 50 in from `user` as a deposit.
@@ -553,7 +553,8 @@ contract TokenRateLimitTest is Test {
         v.verifyAndUpdateBatch(subs);
     }
 
-    /// A program nested in another on the same contract is charged once, by the outermost.
+    /// A program nested in another on the same contract charges its own outflow; the one around it only
+    /// the rest.
     function test_nestedProgramsAreChargedOnce() public {
         NestingHarness h = new NestingHarness(address(token));
         token.mint(address(h), 100);

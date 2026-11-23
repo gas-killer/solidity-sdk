@@ -96,6 +96,8 @@ library OutgoingRateLimit {
         }
         assembly ("memory-safe") {
             sstore(b.slot, word)
+            // Counted for `endNative`, so a window around this program doesn't charge it again.
+            tstore(_NATIVE_CHARGED, add(tload(_NATIVE_CHARGED), value))
         }
     }
 
