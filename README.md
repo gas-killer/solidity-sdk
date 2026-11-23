@@ -858,13 +858,18 @@ contract observed from outside, at the position the trace observed it, and settl
 `ObservationMismatch` if anything moved. Otherwise a swap that returns 95 at settlement would
 silently back a credit of the 100 the trace saw.
 
-- A `CALL`'s `resultHash` is `keccak256(abi.encodePacked(success, returndata))`. Zero leaves it
-  unchecked, for results that reach no write. A call the trace saw revert and catch is pinned as a
-  failure: it may revert at settlement, and the program goes on.
+- A `CALL`'s `resultHash` is `keccak256(abi.encodePacked(success, returndata))`. With zero the
+  call must still succeed, but its return data isn't checked, for results that reach no write. A
+  call that sends no value and that the trace saw revert and catch is pinned as a failure: it may
+  revert at settlement, and the program goes on. Its policy hooks and rate limits still charge it
+  as if it had gone through. A caught revert that depended on a gas cap can't be pinned, since
+  settlement forwards all gas.
 - `CREATE`'s `expected` pins the deployed address, which moves with the contract's nonce; zero
   leaves it unchecked. `CREATE2`'s address is fixed by its signed salt and initcode.
 - The `*_CHECK` ops pin reads that changed no state: `STATICCALL` (with the same result hash),
-  `BALANCE` and `SELFBALANCE`, `EXTCODEHASH` and `EXTCODESIZE`. They run no policy hooks.
+  `BALANCE` and `SELFBALANCE`, `EXTCODEHASH` and `EXTCODESIZE`. They run no policy hooks, and
+  the call allow-list doesn't cover them: they can't change state. In a batch, the contract's own
+  balance is checked less the value later items brought.
 - Block values (`block.timestamp` and the like) can't be pinned, as settlement lands in a later
   block: a transition is defined as of its reference block, and carries the values the trace saw
   there. The reference block can be at most the staleness bound old.

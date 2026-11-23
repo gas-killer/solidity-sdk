@@ -4,6 +4,7 @@ pragma solidity ^0.8.29;
 import {Test} from "forge-std/Test.sol";
 import {GasKillerSDK} from "../src/GasKillerSDK.sol";
 import {StateChangeHandlerLib, StateUpdateType} from "../src/StateChangeHandlerLib.sol";
+import {TaskSubmission} from "../src/interface/IGasKillerSDKBatch.sol";
 import {AcceptingRegistry} from "./GasKillerSDKProtectedStorage.t.sol";
 
 /// External state a program observes: a swap whose output can move, and a read that can revert.
@@ -56,6 +57,8 @@ contract LockedConsumer is Consumer {
 
 /// @notice Observation pinning (#101): a program's view of external state is checked at settlement.
 contract ObservationPinningTest is Test {
+    receive() external payable {}
+
     bytes32 constant TRACKER_SLOT = 0xdebfdfd5a50ad117c10898d68b5ccf0893c6b40d4f443f902e2e7646601bdeaf;
     bytes4 constant FN = bytes4(keccak256("work()"));
 
@@ -186,6 +189,26 @@ contract ObservationPinningTest is Test {
         _settle(p, _mismatch(1, failed, _hash(true, abi.encode(uint256(100)))));
     }
 
+    /// A call that sends value must succeed even when pinned as a failure: an empty-data failure
+    /// could be a value shortfall the trace never saw.
+    function test_pinnedFailureMustSucceedWhenItSendsValue() public {
+        bytes32 failed = _hash(false, "");
+        Program memory p = _tracked(1);
+        _op(p, StateUpdateType.CALL, abi.encode(address(pool), uint256(1 ether), "", failed));
+        _settle(p, abi.encodeWithSelector(StateChangeHandlerLib.RevertingContext.selector, 1, address(pool), "", ""));
+    }
+
+    /// The layouts from before pinning are rejected, not misread.
+    function test_oldLayoutsAreRejected() public {
+        Program memory p = _tracked(1);
+        _op(p, StateUpdateType.CALL, abi.encode(address(pool), uint256(0), abi.encodeCall(Pool.swap, ())));
+        _settle(p, abi.encodeWithSelector(StateChangeHandlerLib.MalformedOp.selector, 1));
+
+        p = _tracked(1);
+        _op(p, StateUpdateType.CREATE, abi.encode(uint256(0), type(Deployed).creationCode));
+        _settle(p, abi.encodeWithSelector(StateChangeHandlerLib.MalformedOp.selector, 1));
+    }
+
     // ---------------------------------------------------------------- reads
 
     function _quote(Program memory p, bytes32 expected) internal view {
@@ -233,6 +256,33 @@ contract ObservationPinningTest is Test {
         p = _tracked(1);
         _op(p, StateUpdateType.BALANCE_CHECK, abi.encode(address(pool), uint256(0)));
         _settle(p, _mismatch(1, bytes32(0), bytes32(uint256(1))));
+    }
+
+    /// In a batch, each item's own balance check sees only the value its trace saw: the value
+    /// later items and the surplus bring isn't counted.
+    function test_selfBalanceCheckInABatch() public {
+        TaskSubmission[] memory subs = new TaskSubmission[](2);
+        for (uint256 i = 0; i < 2; ++i) {
+            StateUpdateType[] memory t = new StateUpdateType[](2);
+            bytes[] memory a = new bytes[](2);
+            a[0] = abi.encode(TRACKER_SLOT, bytes32(i + 1));
+            t[1] = StateUpdateType.BALANCE_CHECK;
+            a[1] = abi.encode(address(c), (i + 1) * 1 ether);
+            bytes memory updates = abi.encode(t, a);
+            subs[i] = TaskSubmission(
+                c.getMessageHashWithValue(i, FN, updates, 1 ether),
+                uint32(block.number - 1),
+                updates,
+                i,
+                FN,
+                1,
+                address(1),
+                new address[](0),
+                1 ether
+            );
+        }
+        c.verifyAndUpdateBatch{value: 3 ether}(subs); // 1 ether of surplus, refunded
+        assertEq(address(c).balance, 2 ether);
     }
 
     /// Covers `EXTCODEHASH` and `EXTCODESIZE`: code appearing at an empty address is caught.

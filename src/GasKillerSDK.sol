@@ -244,6 +244,8 @@ abstract contract GasKillerSDK is
             // Already settled (e.g. front-run or redelivered) → skip, don't poison the batch.
             if (sub.transitionIndex + 1 <= stateTransitionCount()) continue;
             required += sub.value;
+            // What later items and any surplus brought: this item's trace didn't see it.
+            StateChangeHandlerLib._setUnattributedValue(msg.value > required ? msg.value - required : 0);
             _verifyTransition(
                 sub.msgHash,
                 sub.referenceBlockNumber,
@@ -257,6 +259,7 @@ abstract contract GasKillerSDK is
             );
             _stateChangeHandler(sub.storageUpdates, ranges);
         }
+        StateChangeHandlerLib._setUnattributedValue(0);
         require(msg.value >= required, InsufficientBatchValue(msg.value, required));
         if (msg.value > required) {
             // Under the latch, so the refund can't re-enter settlement. A sender that rejects ETH
