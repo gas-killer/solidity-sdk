@@ -184,7 +184,7 @@ contract SchnorrStakeRegistryGasTest is Test {
         console2.log("cold  full participation:  ", coldFull);
 
         // The comparison the scheme exists for: cheaper than the CACHED ECDSA registry at
-        // 3 ops (30,825, service #311) even in the cold context, and far below its
+        // 3 ops (30,825) even in the cold context, and far below its
         // 65,027 base. Cold-vs-warm delta is the account + base-slot access surcharge.
         assertLt(coldFull, 30_825, "cold full-participation beats cached 3-op ECDSA");
     }

@@ -48,7 +48,8 @@ contract ReentrantCheckpointTest is Test {
 
     function _observeCall(uint256 expected) internal view returns (StateUpdateType, bytes memory) {
         bytes memory callargs = abi.encodeCall(ReentrantObserver.observe, (expected));
-        return (StateUpdateType.CALL, abi.encode(address(observer), uint256(0), callargs, bytes32(0)));
+        return
+            (StateUpdateType.CALL, abi.encode(address(observer), uint256(0), callargs, bytes32(0), type(uint256).max));
     }
 
     /// The canonical program for advance() at transition N-1 -> N.

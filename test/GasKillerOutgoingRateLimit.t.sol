@@ -121,7 +121,7 @@ contract GasKillerOutgoingRateLimitTest is Test {
     }
 
     function _send(Program memory p, address to, uint256 value) internal pure {
-        _op(p, StateUpdateType.CALL, abi.encode(to, value, "", bytes32(0)));
+        _op(p, StateUpdateType.CALL, abi.encode(to, value, "", bytes32(0), type(uint256).max));
     }
 
     function _encode(Program memory p) internal pure returns (bytes memory) {
@@ -192,7 +192,9 @@ contract GasKillerOutgoingRateLimitTest is Test {
         _op(
             p,
             StateUpdateType.CALL,
-            abi.encode(address(t), 5 ether, abi.encodeCall(RateLimitedTreasury.deposit, ()), bytes32(0))
+            abi.encode(
+                address(t), 5 ether, abi.encodeCall(RateLimitedTreasury.deposit, ()), bytes32(0), type(uint256).max
+            )
         );
         _send(p, ATTACKER, 1 ether);
         _settle(t, p, "");

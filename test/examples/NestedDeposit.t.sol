@@ -120,7 +120,7 @@ contract NestedDepositTest is Test {
     }
 
     /// ETH forced into the gateway cannot stand in for the deposit: the root leaf binds the
-    /// settlement's own `msg.value` (gas-killer/solidity-sdk#104).
+    /// settlement's own `msg.value`.
     function test_strayGatewayEthCannotFundAnUnderPaidSettlement() public {
         vm.deal(address(gateway), DEPOSIT);
         TreeSubmission memory sub = _submission(DEPOSIT, DEPOSIT, DEPOSIT);

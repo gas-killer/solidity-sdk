@@ -184,7 +184,7 @@ contract RecordingTreasury is Treasury {
     }
 }
 
-/// @notice The call policy (#109): what a quorum-signed program can do through CALL, CREATE,
+/// @notice The call policy: what a quorum-signed program can do through CALL, CREATE,
 ///         CREATE2 and NESTED with no policy, and what `_authorizeCall` and
 ///         `_maxOutgoingValue` stop. Nested settlement is covered in `examples/NestedCycle.t.sol`
 ///         and `examples/NestedDeposit.t.sol`.
@@ -222,7 +222,7 @@ contract GasKillerSDKCallPolicyTest is Test {
 
     function _call(Program memory p, address target, uint256 value, bytes memory data) internal pure {
         p.types[p.n] = StateUpdateType.CALL;
-        p.args[p.n++] = abi.encode(target, value, data, bytes32(0));
+        p.args[p.n++] = abi.encode(target, value, data, bytes32(0), type(uint256).max);
     }
 
     function _create(Program memory p, uint256 value) internal pure {
@@ -283,7 +283,7 @@ contract GasKillerSDKCallPolicyTest is Test {
 
     // ---------------------------------------------------------------- without a policy
 
-    /// @notice Pins the default: a consumer that writes no policy runs every probe from #109
+    /// @notice Pins the default: a consumer that writes no policy runs every probe in this file
     ///         except the self-call, which the SDK rejects on its own.
     function test_withoutAPolicyASignedProgramSpendsWithTheConsumersAuthority() public {
         Treasury t = _funded(new Treasury(address(registry)));

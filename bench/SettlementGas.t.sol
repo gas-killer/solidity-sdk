@@ -68,9 +68,9 @@ contract UnguardedConsumer is RangedConsumer0 {
 ///
 ///         Protected: about 340 gas per STORE, about 500 per declared range per call (building
 ///         and merging the list; it is validated at deployment, not here), and about 1,400 fixed,
-///         plus about 70 per transition for the counter's forward rule (added later, #116) and
+///         plus about 70 per transition for the counter's forward rule (added later) and
 ///         about 400 per call for detecting a proxy; behind one, the EIP-1967 ranges add about
-///         1,100 per call and 475 per transition (added later, #118).
+///         1,100 per call and 475 per transition (added later).
 ///         Opted out: about 60 per STORE. `test_batch`: a 20-item batch builds the list once,
 ///         +34,750 (+5.3%) at k = 0, +46,963 (+7.2%) at k = 4 and +8,323 (+1.3%) opted out, over
 ///         653,659.

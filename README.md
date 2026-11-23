@@ -849,7 +849,7 @@ of the following, applied in order.
 | Type | Effect | Encoded args |
 |------|--------|--------------|
 | `STORE` | Write to a storage slot (`SSTORE`) | `(bytes32 slot, bytes32 value)` |
-| `CALL` | External call with optional ETH | `(address target, uint256 value, bytes calldata, bytes32 resultHash)` |
+| `CALL` | External call with optional ETH | `(address target, uint256 value, bytes calldata, bytes32 resultHash, uint256 gasLimit)` |
 | `LOG0`–`LOG4` | Emit a log with 0–4 topics | `(bytes data[, bytes32 topic1, ...])` |
 | `CREATE` | Deploy via `CREATE` | `(uint256 value, bytes initcode, address expected)` |
 | `CREATE2` | Deploy via `CREATE2` | `(bytes32 salt, uint256 value, bytes initcode)` |
@@ -878,9 +878,29 @@ silently back a credit of the 100 the trace saw.
   call must still succeed, but its return data isn't checked, for results that reach no write. A
   call that sends no value and that the trace saw revert with data and catch is pinned as a
   failure: it may revert at settlement, and the program goes on. A failure without data can't be
-  pinned, as it can't be told from an out-of-gas the settler caused. Its policy hooks and rate limits still charge it
-  as if it had gone through. A caught revert that depended on a gas cap can't be pinned, since
-  settlement forwards all gas.
+  pinned, as it can't be told from an out-of-gas the settler caused. Its policy hooks and rate
+  limits still charge it as if it had gone through. A caught revert that depended on a gas cap
+  can't be pinned either: an out-of-gas returns no data.
+- A `CALL`'s `gasLimit` is the gas its callee gets, never more than the traced call passed. A
+  `transfer` or `send` (operand 0 with value, 2,300 without) reaches its recipient with the
+  2,300 stipend only, as in the trace, not with enough gas to re-enter the consumer
+  mid-transition. For other calls the analyzer signs the gas the callee needs at settlement (see
+  below), or the traced operand if that's smaller.
+- Settlement reverts with `InsufficientCallGas` unless the callee can get all of `gasLimit`
+  (63/64 of what's left after the `CALL`'s own cost). So whoever submits the settlement can't
+  starve a callee into another path, such as an inner call that runs out of gas and is caught,
+  while the call still succeeds. A retry with a higher gas limit settles it. A `gasLimit` more
+  than any settlement can supply, such as an operand recorded in a trace run past the block gas
+  limit, can never settle, so the analyzer clamps it.
+- `gasLimit = type(uint256).max` forwards everything left, unchecked: the fallback when the
+  callee's needed gas wasn't worked out. The settler then chooses how much gas that callee gets.
+- The cap has to cover settlement, not just the trace. An account or slot the trace had warm is
+  cold at settlement unless an EIP-2930 access list warms it, and the settler picks the access
+  list. A callee short of gas doesn't always revert: one that catches an inner out-of-gas
+  succeeds down another path, and no pin need notice. So the analyzer sizes `gasLimit` with
+  nothing warm but what the program touched before the call, checks the callee also reproduces
+  with everything it touches warm, and rejects the task otherwise. An access list then only
+  makes the call cheaper.
 - `CREATE`'s `expected` pins the deployed address, which moves with the contract's nonce; zero
   leaves it unchecked. `CREATE2`'s address is fixed by its signed salt and initcode.
 - The `*_CHECK` ops pin reads that changed no state: `STATICCALL` (with the same result hash),

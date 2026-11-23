@@ -142,7 +142,7 @@ contract RateLimitedCaller is GasKillerOutgoingRateLimit {
 ///         `_maxOutgoingValue` and `_allowSelfCall` not overridden) and with the small one above.
 ///
 ///         Reference measurements (forge 1.5.1, solc 0.8.33, cancun). "Before" is the same
-///         settlement before the call policy (#108's tree, 0944508):
+///         settlement before the call policy (0944508):
 ///
 ///           m   | before | default policy  | small policy
 ///           1   | 33,576 | +446 (+1.3%)    | +488 (+1.5%)
@@ -177,7 +177,7 @@ contract RateLimitedCaller is GasKillerOutgoingRateLimit {
 ///           32  | 229,014   | +31,408 (+13.7%) | +84,530 (+36.9%) | +199,970 (+87.3%)
 ///
 ///         Each listed token costs a `balanceOf` read per op that runs code (about 1,200 to 1,500
-///         gas, #117), one more at the end and a budget read and write; a program that runs no
+///         gas), one more at the end and a budget read and write; a program that runs no
 ///         code reads no balances.
 ///
 ///         `test_selfCalls`: the counter copy plus m allowed CALLs to the consumer's own `ping()`,
@@ -219,7 +219,7 @@ contract CallPolicyGasTest is Test {
         a[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(1)));
         for (uint256 i = 1; i <= m; ++i) {
             t[i] = StateUpdateType.CALL;
-            a[i] = abi.encode(address(sink), uint256(0), "", bytes32(0));
+            a[i] = abi.encode(address(sink), uint256(0), "", bytes32(0), type(uint256).max);
         }
         return abi.encode(t, a);
     }
@@ -248,7 +248,7 @@ contract CallPolicyGasTest is Test {
         a[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(1)));
         for (uint256 i = 1; i <= m; ++i) {
             t[i] = StateUpdateType.CALL;
-            a[i] = abi.encode(address(sink), uint256(1), "", bytes32(0));
+            a[i] = abi.encode(address(sink), uint256(1), "", bytes32(0), type(uint256).max);
         }
         bytes memory updates = abi.encode(t, a);
         bytes32 h = target.getMessageHash(0, FN, updates);
@@ -293,7 +293,7 @@ contract CallPolicyGasTest is Test {
         a[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(1)));
         for (uint256 i = 1; i <= m; ++i) {
             t[i] = StateUpdateType.CALL;
-            a[i] = abi.encode(tokens[0], uint256(0), abi.encodeCall(IERC20.transfer, (address(sink), 1)), bytes32(0));
+            a[i] = abi.encode(tokens[0], uint256(0), abi.encodeCall(IERC20.transfer, (address(sink), 1)), bytes32(0), type(uint256).max);
         }
         bytes memory updates = abi.encode(t, a);
         bytes32 h = target.getMessageHash(0, FN, updates);
@@ -334,7 +334,7 @@ contract CallPolicyGasTest is Test {
         a[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(1)));
         for (uint256 i = 1; i <= m; ++i) {
             t[i] = StateUpdateType.CALL;
-            a[i] = abi.encode(address(target), uint256(0), abi.encodeCall(SelfCaller.ping, ()), bytes32(0));
+            a[i] = abi.encode(address(target), uint256(0), abi.encodeCall(SelfCaller.ping, ()), bytes32(0), type(uint256).max);
         }
         bytes memory updates = abi.encode(t, a);
         bytes32 h = target.getMessageHash(0, FN, updates);

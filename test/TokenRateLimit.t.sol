@@ -246,7 +246,7 @@ contract TokenRateLimitTest is Test {
 
     function _call(Program memory p, address target, bytes memory data) internal pure {
         p.types[p.n] = StateUpdateType.CALL;
-        p.args[p.n++] = abi.encode(target, uint256(0), data, bytes32(0));
+        p.args[p.n++] = abi.encode(target, uint256(0), data, bytes32(0), type(uint256).max);
     }
 
     function _transfer(Program memory p, MintableToken t, address to, uint256 amount) internal pure {
@@ -545,7 +545,7 @@ contract TokenRateLimitTest is Test {
         assertEq(_available(), 60);
     }
 
-    /// Tokens one op receives don't offset what another op sends (#117): a borrow, or a
+    /// Tokens one op receives don't offset what another op sends: a borrow, or a
     /// position unwound, then sent on is charged in full. A mint stands in for the receipt.
     function test_inflowDoesNotOffsetALaterSend() public {
         Program memory p = _tracked(2);

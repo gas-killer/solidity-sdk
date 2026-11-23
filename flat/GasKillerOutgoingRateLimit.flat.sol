@@ -59,12 +59,13 @@ struct TaskSubmission {
 ///      alone drops from ~17.0k cold to ~6.5k warm at full participation).
 ///
 ///      Batch assemblers (the off-chain router composing `submissions`) should be aware
-///      that `StateChangeHandlerLib`'s `CALL` update forwards *all* remaining gas to its
-///      target with no cap. A greedy or griefing CALL target in an early sub-transition can
-///      consume enough gas to starve every later sub-transition, reverting the whole
-///      (atomic) batch — no partial-state hazard, since it's all-or-nothing, but it does
-///      nullify the amortization this extension exists for. Ordering submissions with
-///      untrusted CALL targets last, or excluding them from batches entirely, avoids this.
+///      that `StateChangeHandlerLib`'s `CALL` update gives its target the gas the trace gave
+///      it, often all that's left. A greedy or griefing CALL target in an early
+///      sub-transition can consume enough gas to starve every later sub-transition, reverting
+///      the whole (atomic) batch — no partial-state hazard, since it's all-or-nothing, but
+///      it does nullify the amortization this extension exists for. Ordering submissions
+///      with untrusted CALL targets last, or excluding them from batches entirely, avoids
+///      this.
 interface IGasKillerSDKBatch {
     /// @notice Verify and apply a sequence of independently signed state transitions.
     /// @dev Transitions apply in calldata order with consecutive `transitionIndex`es.
@@ -582,11 +583,12 @@ library StorageGuard {
 ///         "in transition" latch external contracts can query.
 /// @dev Two holes in the unguarded settlement path, one mechanism:
 ///
-///      1. **Reentrancy.** `StateChangeHandlerLib`'s `CALL` update forwards all remaining
-///         gas to an arbitrary target *mid-transition* — after `trackState` has already
-///         bumped the counter and before the transition's later updates have executed. A
-///         re-entrant `verifyAndUpdate` carrying transition N+1's valid quorum signature
-///         would pass the transition-index check and interleave N+1's updates inside N.
+///      1. **Reentrancy.** `StateChangeHandlerLib`'s `CALL` update runs an arbitrary target
+///         with the gas the trace gave it, often all that's left, *mid-transition*: after
+///         `trackState` has already bumped the counter and before the transition's later
+///         updates have executed. A re-entrant `verifyAndUpdate` carrying transition N+1's
+///         valid quorum signature would pass the transition-index check and interleave
+///         N+1's updates inside N.
 ///         `guardTransition` makes the re-entrant call revert instead.
 ///
 ///      2. **Midway state.** During a `CALL` update the called contract observes storage
@@ -1148,7 +1150,7 @@ struct CallPolicy {
 ///      The consumer's writes were computed against external state as of the trace, and its
 ///      `CALL`s run against external state as of settlement. To keep the two from drifting
 ///      apart silently (a swap that returns less than the trace credited), a program pins what
-///      its contract observed from outside (#101): a `CALL`'s result hash, a `CREATE`'s address,
+///      its contract observed from outside: a `CALL`'s result hash, a `CREATE`'s address,
 ///      and the `*_CHECK` ops for reads that changed no state (`STATICCALL`, `BALANCE`,
 ///      `SELFBALANCE`, `EXTCODEHASH`, `EXTCODESIZE`), each at its position in the trace. A
 ///      mismatch reverts with `ObservationMismatch`. Block values (`block.timestamp` and the
@@ -1162,9 +1164,11 @@ struct CallPolicy {
 ///      revert): its hash then covers the failure, and the program goes on. Its policy hooks ran before it,
 ///      so they charge it as if it had gone through (a deposit `transferFrom` that now fails is
 ///      charged as tokens out): never less than it moved. A caught revert whose result depended
-///      on a gas cap (an out-of-gas from `f{gas: n}()`) can't be pinned, as settlement forwards
-///      all gas: the analyzer has to reject the task. The read checks run code at any address
-///      without the call policy (the allow list doesn't cover them); they can't change state.
+///      on a gas cap (an out-of-gas from `f{gas: n}()`) can't be pinned: settlement replays the
+///      cap, but an out-of-gas returns no data, and the callee's gas use differs from the trace
+///      (other slots are warm), so the analyzer has to reject the task. The read checks run code
+///      at any address without the call policy (the allow list doesn't cover them); they can't
+///      change state.
 library StateChangeHandlerLib {
     /// @dev keccak256("gasKiller.unattributedValue") - 1. The part of the contract's balance the
     ///      running program's trace didn't see: in a batch, the value later items brought, and
@@ -1489,29 +1493,52 @@ library StateChangeHandlerLib {
         if (ctx.consumed != ctx.children.length) revert UnconsumedWitnesses(ctx.children.length, ctx.consumed);
     }
 
-    /// @dev A `CALL`: `(target, value, callargs, resultHash)`. Forwards all remaining gas (no
-    ///      stipend cap). In a batched settlement (e.g. GasKillerSDK.verifyAndUpdateBatch) this
-    ///      is amplified: a greedy or griefing target in an earlier sub-transition's CALL can
-    ///      consume enough gas to starve every later sub-transition in the same batch, reverting
-    ///      the whole (atomic) batch. No partial-state hazard, it's all or nothing, but it does
-    ///      nullify the batch's cost amortization. See IGasKillerSDKBatch for the batch-assembly-
-    ///      side note.
+    /// @dev A `CALL`: `(target, value, callargs, resultHash, gasLimit)`.
+    ///      `gasLimit` is the gas the callee gets, and never more than the traced `CALL` passed:
+    ///      forwarding all gas instead would let a callee that only had the stipend in the trace
+    ///      run real code mid-transition, such as re-entering the consumer's other functions
+    ///      while the program is half applied. The EVM adds the 2,300 stipend when value is
+    ///      sent, so a `transfer` or `send` (operand 0 with value, 2,300 without) gets the
+    ///      stipend here too. A larger cap is the gas the callee needs at settlement (see
+    ///      below), or the traced operand itself.
+    ///      Settlement reverts with `InsufficientCallGas` unless the callee can get all of
+    ///      `gasLimit`, so whoever submits the settlement can't starve the callee into another
+    ///      path (an inner call that runs out of gas and is caught) while the call still
+    ///      succeeds. A cap more than a settlement can supply, such as one recorded in a trace
+    ///      run past the block gas limit, therefore makes the program unsettleable. The analyzer
+    ///      clamps it.
+    ///      `type(uint256).max` forwards everything left, unchecked, as before. The settler then
+    ///      decides how much gas the callee gets: the fallback for a callee whose needed gas
+    ///      wasn't worked out.
+    ///      The cap has to cover settlement, not just the trace. An account or slot the trace had
+    ///      warm is cold here unless an EIP-2930 access list warms it, and the settler picks the
+    ///      access list. A callee short of gas doesn't always revert: one that catches an inner
+    ///      out-of-gas succeeds down another path, and no pin need notice. So the analyzer sizes
+    ///      `gasLimit` with nothing warm but what the program touched before this op, checks the
+    ///      callee also reproduces with everything it touches warm, and rejects the task
+    ///      otherwise. An access list then only makes the call cheaper.
+    ///      Gas spent here also starves later items of a batch (e.g.
+    ///      GasKillerSDK.verifyAndUpdateBatch): a greedy or griefing target can make the whole
+    ///      atomic batch revert. No partial-state hazard, but it nullifies the batch's cost
+    ///      amortization. See IGasKillerSDKBatch for the batch-assembly side.
     ///      A nonzero `resultHash` pins the result: a call that succeeds with other return data,
     ///      or fails when the trace saw it succeed, reverts. A pinned failure lets the program go
     ///      on, unless the call sends value: a failure with empty data can also be the EVM's own
     ///      (a value shortfall, call depth), which the trace didn't see, so such a call must
     ///      succeed.
     function _call(CallPolicy memory policy, uint256 i, bytes memory arg) private {
-        // The pre-#101 layout `(target, value, callargs)` would decode with its calldata length
-        // as the hash: reject anything but the canonical offset.
-        _requireOffset(arg, 0x40, 0x80, i);
-        (address target, uint256 value, bytes memory callargs, bytes32 expected) =
-            abi.decode(arg, (address, uint256, bytes, bytes32));
+        // Earlier layouts, `(target, value, callargs)` and `(target, value, callargs,
+        // resultHash)`, would decode with other words in place of the hash and the gas limit:
+        // reject anything but the canonical offset.
+        _requireOffset(arg, 0x40, 0xa0, i);
+        (address target, uint256 value, bytes memory callargs, bytes32 expected, uint256 gasLimit) =
+            abi.decode(arg, (address, uint256, bytes, bytes32, uint256));
         if (target == address(this)) _checkSelfCall(policy, i, callargs);
         _authorize(policy, i, StateUpdateType.CALL, target, value, callargs);
+        if (gasLimit != type(uint256).max) _requireCallGas(i, gasLimit);
         bool success;
         assembly {
-            success := call(gas(), target, value, add(callargs, 0x20), mload(callargs), 0, 0)
+            success := call(gasLimit, target, value, add(callargs, 0x20), mload(callargs), 0, 0)
         }
         if (expected != bytes32(0) && (success || _pinnableFailure(value))) {
             bytes32 actual = _resultHash(success);
@@ -1520,6 +1547,20 @@ library StateChangeHandlerLib {
             if (success) revert ObservationMismatch(i, expected, actual);
         }
         if (!success) revert RevertingContext(i, target, _returnData(), callargs);
+    }
+
+    /// @dev The most a `CALL` itself can cost before its callee starts: a cold account (2,600),
+    ///      a value transfer (9,000) and a new account (25,000), plus the few operations between
+    ///      the check and the `CALL`. Generous on purpose: overestimating only asks the settler
+    ///      for a little more gas, which is refunded.
+    uint256 private constant _CALL_OVERHEAD = 40_000;
+
+    /// @dev Reverts unless the next `CALL` can give its callee all of `gasLimit`: the EVM passes
+    ///      at most 63/64 of the gas left after the `CALL`'s own cost.
+    function _requireCallGas(uint256 i, uint256 gasLimit) private view {
+        uint256 left = gasleft();
+        uint256 available = left > _CALL_OVERHEAD ? left - _CALL_OVERHEAD : 0;
+        require(available - available / 64 >= gasLimit, InsufficientCallGas(i, gasLimit));
     }
 
     /// @dev A `CREATE`: `(value, initcode, expected)`. A nonzero `expected` pins the deployed
@@ -1770,6 +1811,12 @@ library StateChangeHandlerLib {
     /// @param index The zero-based position of the operation
     error MalformedOp(uint256 index);
 
+    /// @notice Thrown when the gas left can't give a CALL op's callee all of its signed
+    ///         `gasLimit`. Retrying with a higher gas limit settles it.
+    /// @param index The zero-based position of the operation
+    /// @param gasLimit The gas the callee must get
+    error InsufficientCallGas(uint256 index, uint256 gasLimit);
+
     /// @notice Thrown when a batch item spent ETH that later items in the batch brought: on its
     ///         own, it couldn't have
     error UnattributedValueSpent();
@@ -1982,11 +2029,11 @@ abstract contract GasKillerSDK is
     ///      Reverts (`InvalidTransitionIndex`) only on a genuine gap — an index above the
     ///      next expected one.
     ///
-    ///      Batch assemblers: a `CALL` state update forwards all remaining gas to its target
-    ///      with no cap (see `StateChangeHandlerLib`). A greedy/griefing target in an early
-    ///      sub-transition can therefore starve every later one in the same batch, reverting
-    ///      the whole (atomic) batch — no partial-state hazard, but it does nullify the
-    ///      amortization this function exists for.
+    ///      Batch assemblers: a `CALL` state update gives its target the gas the trace gave
+    ///      it, often all that's left (see `StateChangeHandlerLib`). A greedy/griefing target
+    ///      in an early sub-transition can therefore starve every later one in the same batch,
+    ///      reverting the whole (atomic) batch — no partial-state hazard, but it does nullify
+    ///      the amortization this function exists for.
     ///
     ///      Each submission's digest binds its own `value`, and `msg.value` must cover the sum
     ///      over the submissions actually applied (`InsufficientBatchValue` otherwise), so no

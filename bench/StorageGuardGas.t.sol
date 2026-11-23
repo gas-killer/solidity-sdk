@@ -7,7 +7,7 @@ import {StateUpdateType} from "../src/StateChangeHandlerLib.sol";
 import {StorageGuardVariants} from "../test/utils/StorageGuardVariants.sol";
 import {Sort} from "../test/utils/Sort.sol";
 
-/// @notice Gas cost of the StorageGuard checkers (issue #107): the library's sorted-merge cursor
+/// @notice Gas cost of the StorageGuard checkers: the library's sorted-merge cursor
 ///         (`StorageGuard.advance`, what settlement uses) against two comparison variants kept in
 ///         test utilities, a per-write binary search (`StorageGuardVariants.checkEach`) and a
 ///         per-write linear scan (`StorageGuardVariants.checkEachLinear`).
