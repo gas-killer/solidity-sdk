@@ -227,7 +227,7 @@ contract GasKillerSDKHardeningTest is Test {
     }
 
     function _digest(uint256 transitionIndex, bytes4 targetFn, bytes memory updates) internal view returns (bytes32) {
-        return sha256(abi.encode(transitionIndex, address(sdk), targetFn, updates));
+        return sha256(abi.encode(transitionIndex, block.chainid, address(sdk), targetFn, updates));
     }
 
     function _digest(uint256 transitionIndex, bytes4 targetFn, bytes memory updates, uint256 value)
@@ -236,7 +236,7 @@ contract GasKillerSDKHardeningTest is Test {
         returns (bytes32)
     {
         if (value == 0) return _digest(transitionIndex, targetFn, updates);
-        return sha256(abi.encode(transitionIndex, address(sdk), targetFn, updates, value));
+        return sha256(abi.encode(transitionIndex, block.chainid, address(sdk), targetFn, updates, value));
     }
 
     function _submission(uint256 transitionIndex, bytes memory updates) internal view returns (TaskSubmission memory) {
@@ -770,19 +770,58 @@ contract GasKillerSDKHardeningTest is Test {
         _settle(sub, 1);
     }
 
-    /// Zero-value transitions keep the original four-field digest, so existing signatures and
-    /// off-chain parity are unchanged; a valued one uses the five-field encoding.
+    /// A zero-value transition hashes five fields and a valued one appends the value; both
+    /// carry the chain id after the transition index.
     function test_digestEncodings() public view {
         bytes memory updates = _storeUpdate(bytes32(0), bytes32(uint256(7)));
         bytes4 fn = bytes4(keccak256("set()"));
-        bytes32 legacy = sha256(abi.encode(uint256(3), address(sdk), fn, updates));
-        assertEq(sdk.getMessageHash(3, fn, updates), legacy, "zero-value digest unchanged");
-        assertEq(sdk.getMessageHashWithValue(3, fn, updates, 0), legacy, "explicit zero matches");
+        bytes32 zero = sha256(abi.encode(uint256(3), block.chainid, address(sdk), fn, updates));
+        assertEq(sdk.getMessageHash(3, fn, updates), zero, "zero-value digest");
+        assertEq(sdk.getMessageHashWithValue(3, fn, updates, 0), zero, "explicit zero matches");
         assertEq(
             sdk.getMessageHashWithValue(3, fn, updates, 5),
-            sha256(abi.encode(uint256(3), address(sdk), fn, updates, uint256(5))),
+            sha256(abi.encode(uint256(3), block.chainid, address(sdk), fn, updates, uint256(5))),
             "valued digest appends the value"
         );
+    }
+
+    /// #112: a consumer at the same address on another chain, behind a registry with the same
+    /// keys and at the same transition count, must not accept a signature made for this chain.
+    function test_digestBindsChainId() public {
+        bytes memory updates = _storeUpdate(bytes32(0), bytes32(uint256(7)));
+        bytes4 fn = bytes4(keccak256("set()"));
+        bytes32 here = sdk.getMessageHash(3, fn, updates);
+        bytes32 hereValued = sdk.getMessageHashWithValue(3, fn, updates, 5);
+        vm.chainId(block.chainid + 1);
+        assertTrue(sdk.getMessageHash(3, fn, updates) != here, "zero-value digest binds the chain");
+        assertTrue(sdk.getMessageHashWithValue(3, fn, updates, 5) != hereValued, "valued digest binds the chain");
+    }
+
+    function test_verifyAndUpdate_rejectsSignatureFromAnotherChain() public {
+        uint256 chainA = block.chainid;
+        TaskSubmission memory sub = _submission(0, _storeUpdate(bytes32(0), bytes32(uint256(1))));
+
+        vm.chainId(chainA + 1);
+        vm.expectRevert(GasKillerSDK.InvalidSignature.selector);
+        _settle(sub, 0);
+
+        vm.chainId(chainA);
+        _settle(sub, 0);
+        assertEq(sdk.stateTransitionCount(), 1, "settles on the chain it was signed for");
+    }
+
+    function test_verifyAndUpdate_rejectsValuedSignatureFromAnotherChain() public {
+        vm.deal(address(this), 5);
+        uint256 chainA = block.chainid;
+        TaskSubmission memory sub = _submission(0, _storeUpdate(bytes32(0), bytes32(uint256(1))), 5);
+
+        vm.chainId(chainA + 1);
+        vm.expectRevert(GasKillerSDK.InvalidSignature.selector);
+        _settle(sub, 5);
+
+        vm.chainId(chainA);
+        _settle(sub, 5);
+        assertEq(sdk.stateTransitionCount(), 1, "settles on the chain it was signed for");
     }
 
     /// Each batch item binds its own value and `msg.value` must cover the applied sum, so a

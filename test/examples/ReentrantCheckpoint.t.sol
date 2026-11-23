@@ -64,7 +64,11 @@ contract ReentrantCheckpointTest is Test {
     /// The digest verifyAndUpdate reconstructs. Computed OUTSIDE any expectRevert so the
     /// sha256 precompile staticcall doesn't confuse the cheatcode.
     function _digest(uint256 transitionIndex, bytes memory program) internal view returns (bytes32) {
-        return sha256(abi.encode(transitionIndex, address(checkpoint), ReentrantCheckpoint.advance.selector, program));
+        return sha256(
+            abi.encode(
+                transitionIndex, block.chainid, address(checkpoint), ReentrantCheckpoint.advance.selector, program
+            )
+        );
     }
 
     function _submit(uint256 transitionIndex, bytes memory program) internal {

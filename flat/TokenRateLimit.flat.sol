@@ -1416,17 +1416,18 @@ library StateChangeHandlerLib {
 ///         **single** aggregate Schnorr signature verified against a `SchnorrStakeRegistry`
 ///         (constant gas, non-signer subtraction) and applies the signed state updates.
 ///
-/// @dev The signed message is `sha256(abi.encode(transitionIndex, address(this),
-///      targetFunction, storageUpdates))` for a transition settled with no ETH, and
-///      `sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates,
-///      value))` for one settled with `value` wei. It is independent of the signature scheme,
-///      so the off-chain digest and the slashing/fraud-proof machinery do not depend on it.
+/// @dev The signed message is `sha256(abi.encode(transitionIndex, block.chainid,
+///      address(this), targetFunction, storageUpdates))` for a transition settled with no ETH,
+///      and `sha256(abi.encode(transitionIndex, block.chainid, address(this), targetFunction,
+///      storageUpdates, value))` for one settled with `value` wei. It is independent of the
+///      signature scheme, so the off-chain digest and the slashing/fraud-proof machinery do
+///      not depend on it.
 ///
 ///      Binding the value is what makes inbound ETH safe: a tracked function that credits
 ///      `msg.value` replays as plain `STORE` updates, so without it anyone could settle a
-///      deposit while sending nothing. A zero-value transition keeps the original four-field
-///      encoding, so every zero-value signature is unchanged; the two encodings cannot collide
-///      because their heads differ in length.
+///      deposit while sending nothing. The two encodings cannot collide because their heads
+///      differ in length. The chain id keeps a signature from settling a consumer at the same
+///      address on another chain whose registry resolves the same operator keys.
 ///
 ///      Both entrypoints are `guardTransition`-protected (see `TransitionGuard`): a `CALL`
 ///      state update runs arbitrary external code mid-transition, so re-entering
@@ -2001,8 +2002,8 @@ abstract contract GasKillerSDK is
     }
 
     /// @notice Compute the expected message hash for a transition settled with no ETH
-    /// @dev Exact mirror of the ECDSA `GasKillerSDK.getMessageHash` — the digest is
-    ///      scheme-agnostic, so off-chain parity checks work unchanged.
+    /// @dev The digest is scheme-agnostic. Off-chain code can compare this against each digest
+    ///      format to learn which one a deployed consumer signs.
     /// @param transitionIndex The transition index
     /// @param targetFunction The target function selector
     /// @param storageUpdates The ABI-encoded storage updates
@@ -2038,8 +2039,10 @@ abstract contract GasKillerSDK is
         view
         returns (bytes32)
     {
-        if (value == 0) return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
-        return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates, value));
+        if (value == 0) {
+            return sha256(abi.encode(transitionIndex, block.chainid, address(this), targetFunction, storageUpdates));
+        }
+        return sha256(abi.encode(transitionIndex, block.chainid, address(this), targetFunction, storageUpdates, value));
     }
 
     /// @inheritdoc TransitionGuard

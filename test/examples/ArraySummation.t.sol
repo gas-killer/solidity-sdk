@@ -47,7 +47,7 @@ contract ArraySummationTest is Test {
     }
 
     function _digest(uint256 transitionIndex, bytes4 targetFn, bytes memory updates) internal view returns (bytes32) {
-        return sha256(abi.encode(transitionIndex, address(target), targetFn, updates));
+        return sha256(abi.encode(transitionIndex, block.chainid, address(target), targetFn, updates));
     }
 
     function test_supportsInterface() public view {
@@ -66,7 +66,8 @@ contract ArraySummationTest is Test {
 
     function test_getMessageHash_parity() public view {
         bytes memory updates = _storeUpdate(bytes32(uint256(0)), bytes32(uint256(99)));
-        bytes32 expected = sha256(abi.encode(uint256(0), address(target), ArraySummation.sum.selector, updates));
+        bytes32 expected =
+            sha256(abi.encode(uint256(0), block.chainid, address(target), ArraySummation.sum.selector, updates));
         assertEq(
             target.getMessageHash(0, ArraySummation.sum.selector, updates), expected, "getMessageHash parity broken"
         );
