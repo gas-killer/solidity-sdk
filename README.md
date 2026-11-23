@@ -553,10 +553,14 @@ Pass `type(uint96).max` as the ETH limit to leave ETH effectively unlimited.
 `transferFrom` by a contract holding an allowance (a router pulling during a signed `CALL`), or
 through whatever else the token implements, so the limit reads `balanceOf(this)` for every listed
 token before each op that runs code and again when the program ends, and charges every decrease
-between two readings. Tokens one op receives never offset what another op sends: borrowing,
-unwinding a position or taking a deposit and then sending the proceeds out is charged in full.
+between two readings. Tokens one op receives never offset what another op sends: proceeds of a
+borrow, an unwound position or a deposit that land in your contract and are sent on are charged in
+full. Only your contract's balance of listed tokens is measured, though: one `CALL` that unwinds a
+position or borrows straight to another recipient moves nothing there. So list the tokens your
+positions are held in, and reject calls to lending and debt markets (anything that can pay out
+against your position or credit) in `_authorizeLimitedCall`.
 
-Within one op the change is net, so a swap that pulls a token and pays it back in the same `CALL`
+Within one op the change is net, including inside any `limitsOutflow` function the op reaches, so a swap that pulls a token and pays it back in the same `CALL`
 is charged nothing. That also means a called contract holding an allowance could pull tokens out
 and have a third party pay as much back in (a public `harvest()`, a vault withdrawal it was
 approved for) in that one `CALL`, and a recipient's callback (an ERC-777 hook) could call back into
@@ -569,7 +573,8 @@ less (a fee on transfer, a `false` return) is charged the difference, and one th
 `type(uint256).max` as "the whole balance" reverts the program. A `transferFrom` between two others
 is rejected (see below). Users' allowances on unlisted tokens aren't guarded.
 
-Each listed token costs about 1,200 to 1,500 gas per op that runs code, for the `balanceOf` read;
+Each listed token costs a `balanceOf` read per op that runs code: about 1,200 to 1,500 gas for a
+plain ERC-20, several times that for a proxied or rebasing token;
 a program that runs no code reads no balances.
 
 A token is recognized by the address it is listed under: don't list a token that is also reachable

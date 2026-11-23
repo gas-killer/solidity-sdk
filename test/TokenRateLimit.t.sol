@@ -64,6 +64,29 @@ contract TokenVault is GasKillerTokenRateLimit {
     }
 }
 
+/// Consumer hooks that bring tokens in: after the program, or before each op from the second.
+contract RefillingVault is GasKillerTokenRateLimit {
+    MintableToken immutable token;
+    bool immutable afterProgram;
+
+    constructor(address registry, MintableToken token_, bool afterProgram_)
+        GasKillerTokenRateLimit(type(uint96).max, 1)
+    {
+        _setSchnorrRegistry(registry);
+        _setTokenRateLimit(address(token_), 100, 1 hours);
+        token = token_;
+        afterProgram = afterProgram_;
+    }
+
+    function _authorizeLimitedCall(uint256 index, StateUpdateType, address, uint256, bytes memory) internal override {
+        if (!afterProgram && index > 1) token.mint(address(this), 150);
+    }
+
+    function _afterLimitedProgram() internal override {
+        if (afterProgram) token.mint(address(this), 150);
+    }
+}
+
 /// A consumer policy that allows everything and calls no `super`: the limits still apply,
 /// because the drop-in runs them outside the overridable hook.
 contract PermissiveTokenVault is GasKillerTokenRateLimit {
@@ -536,6 +559,25 @@ contract TokenRateLimitTest is Test {
         Program memory p = _tracked(2);
         _transfer(p, token, ATTACKER, 150);
         _call(p, address(token), abi.encodeCall(MintableToken.mint, (address(v), 150)));
+        _settle(p, _exceeded(150, 100));
+    }
+
+    /// Tokens the after-program hook receives don't offset the program's sends.
+    function test_afterProgramHookReceiptDoesNotOffset() public {
+        v = TokenVault(address(new RefillingVault(address(registry), token, true)));
+        token.mint(address(v), 1000);
+        Program memory p = _tracked(1);
+        _transfer(p, token, ATTACKER, 150);
+        _settle(p, _exceeded(150, 100));
+    }
+
+    /// Nor do tokens `_authorizeLimitedCall` receives before a later op.
+    function test_authorizeHookReceiptDoesNotOffset() public {
+        v = TokenVault(address(new RefillingVault(address(registry), token, false)));
+        token.mint(address(v), 1000);
+        Program memory p = _tracked(2);
+        _transfer(p, token, ATTACKER, 150);
+        _transfer(p, token, ATTACKER, 0);
         _settle(p, _exceeded(150, 100));
     }
 
