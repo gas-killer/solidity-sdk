@@ -41,18 +41,19 @@ library NestedFrames {
         bytes[] children;
     }
 
-    /// @dev Must stay byte-identical to `GasKillerSDK`'s digest, zero-value encoding included.
+    /// @dev Must stay byte-identical to `GasKillerSDK`'s digest, chain id and zero-value encoding
+    ///      included.
     function rootLeaf(
         uint256 transitionIndex,
         address target,
         bytes4 targetFunction,
         bytes memory storageUpdates,
         uint256 value
-    ) internal pure returns (bytes32) {
+    ) internal view returns (bytes32) {
         if (value == 0) {
-            return sha256(abi.encode(transitionIndex, target, targetFunction, storageUpdates));
+            return sha256(abi.encode(transitionIndex, block.chainid, target, targetFunction, storageUpdates));
         }
-        return sha256(abi.encode(transitionIndex, target, targetFunction, storageUpdates, value));
+        return sha256(abi.encode(transitionIndex, block.chainid, target, targetFunction, storageUpdates, value));
     }
 
     function nestedLeaf(

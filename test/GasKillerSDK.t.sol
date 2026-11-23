@@ -51,7 +51,7 @@ contract GasKillerSDKTest is Test {
     }
 
     function _digest(uint256 transitionIndex, bytes4 targetFn, bytes memory updates) internal view returns (bytes32) {
-        return sha256(abi.encode(transitionIndex, address(sdk), targetFn, updates));
+        return sha256(abi.encode(transitionIndex, block.chainid, address(sdk), targetFn, updates));
     }
 
     function test_verifyAndUpdate_appliesStore() public {

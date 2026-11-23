@@ -120,12 +120,19 @@ task was analyzed with:
 
 | Settled with | Signed digest |
 |---|---|
-| no ETH | `sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates))` |
-| `value` wei | `sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates, value))` |
+| no ETH | `sha256(abi.encode(transitionIndex, block.chainid, address(this), targetFunction, storageUpdates))` |
+| `value` wei | `sha256(abi.encode(transitionIndex, block.chainid, address(this), targetFunction, storageUpdates, value))` |
 
-Zero-value transitions keep the original encoding, so their signatures and off-chain parity are
-unchanged. The two encodings cannot collide, because their heads differ in length.
-`getMessageHash` returns the zero-value digest and `getMessageHashWithValue` either one.
+The two encodings cannot collide, because their heads differ in length. `getMessageHash` returns
+the zero-value digest and `getMessageHashWithValue` either one.
+
+The chain id stops a signature from settling on another chain. Without it, a consumer deployed at
+the same address on two chains (a deterministic factory, or the same deployer nonce), behind
+registries that resolve the same operator keys and at the same transition count, would accept on
+one chain a payload the quorum signed for the other. SDK versions before this change hash the same
+fields without `block.chainid`. To tell which format a deployed consumer signs, call
+`getMessageHash` on it and compare the result with each encoding computed off-chain; the
+`IGasKillerSDK` interface ID did not change.
 
 The `IGasKillerSDK` interface ID (`0x82b35a01`) is unchanged, so it can't tell a consumer that binds
 the value from one built on an older SDK, which accepts a value-bearing signature with any
@@ -185,9 +192,9 @@ root that does not report it settles flat.
   contract calls it.
 - **Cycles work.** `A → B → A` applies two `A` frames in one tree. The transition guard holds the
   active root, so a frame of the same root may re-enter, and every other re-entry still reverts.
-- **The single-transition digest is unchanged.** A root frame's leaf is exactly the
-  `verifyAndUpdate` digest, value included, so consumers that never nest sign and settle as
-  before.
+- **A root frame signs the single-transition digest.** A root frame's leaf is exactly the
+  `verifyAndUpdate` digest, chain id and value included, so consumers that never nest sign the
+  same bytes.
 
 Rules for a contract that may be nested:
 

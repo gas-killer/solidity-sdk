@@ -27,15 +27,15 @@ contract NestedFramesTest is Test {
         assertEq(NestedFrames.MODE, 0);
     }
 
-    function test_rootLeafEqualsTodaysDigest() public pure {
+    function test_rootLeafEqualsTheDigest() public view {
         bytes memory updates = hex"c0ffee";
-        bytes32 expected = sha256(abi.encode(uint256(7), A, bytes4(0x12345678), updates));
+        bytes32 expected = sha256(abi.encode(uint256(7), block.chainid, A, bytes4(0x12345678), updates));
         assertEq(NestedFrames.rootLeaf(7, A, 0x12345678, updates, 0), expected);
     }
 
-    function test_valuedRootLeafEqualsTheValuedDigest() public pure {
+    function test_valuedRootLeafEqualsTheValuedDigest() public view {
         bytes memory updates = hex"c0ffee";
-        bytes32 expected = sha256(abi.encode(uint256(7), A, bytes4(0x12345678), updates, uint256(5)));
+        bytes32 expected = sha256(abi.encode(uint256(7), block.chainid, A, bytes4(0x12345678), updates, uint256(5)));
         assertEq(NestedFrames.rootLeaf(7, A, 0x12345678, updates, 5), expected);
         assertTrue(expected != NestedFrames.rootLeaf(7, A, 0x12345678, updates, 0), "value changes the leaf");
     }
@@ -49,9 +49,13 @@ contract NestedFramesTest is Test {
     }
 
     function test_leavesBindChainId() public {
+        bytes32 root = NestedFrames.rootLeaf(7, A, 0x12345678, hex"01", 0);
+        bytes32 valuedRoot = NestedFrames.rootLeaf(7, A, 0x12345678, hex"01", 5);
         bytes32 nested = NestedFrames.nestedLeaf(A, 1, B, 2, bytes32(uint256(3)), hex"01");
         bytes32 expiry = NestedFrames.expiryLeaf(A, 100);
         vm.chainId(block.chainid + 1);
+        assertTrue(NestedFrames.rootLeaf(7, A, 0x12345678, hex"01", 0) != root);
+        assertTrue(NestedFrames.rootLeaf(7, A, 0x12345678, hex"01", 5) != valuedRoot);
         assertTrue(NestedFrames.nestedLeaf(A, 1, B, 2, bytes32(uint256(3)), hex"01") != nested);
         assertTrue(NestedFrames.expiryLeaf(A, 100) != expiry);
     }
