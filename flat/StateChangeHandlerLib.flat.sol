@@ -50,8 +50,8 @@ interface ISchnorrStakeRegistry {
 ///      that change nothing is what lets the SDK protect its own transition counter: gas-analyzer
 ///      copies the counter's new value into every program as a STORE, and `trackState` has usually
 ///      written that same value by the time the program runs. The counter also accepts a bounded
-///      move forward, for tracked functions that bump it more than once (`COUNTER_SLOT`). Deciding costs one SLOAD, paid only
-///      by a write that lands in a range.
+///      move forward, for tracked functions that bump it more than once (`COUNTER_SLOT`).
+///      Deciding costs one SLOAD, paid only by a write that lands in a range.
 ///
 ///      `advance` makes one forward pass with a `Cursor`. Writes in ascending slot order walk the
 ///      ranges together, and once a write is past the last range every later ascending write costs
