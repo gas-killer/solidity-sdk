@@ -256,7 +256,7 @@ contract GasKillerSDKProtectedStorageTest is Test {
 
     function _call(Program memory p, address target, bytes memory data) internal pure {
         p.types[p.n] = StateUpdateType.CALL;
-        p.args[p.n++] = abi.encode(target, uint256(0), data);
+        p.args[p.n++] = abi.encode(target, uint256(0), data, bytes32(0));
     }
 
     function _encode(Program memory p) internal pure returns (bytes memory) {

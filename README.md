@@ -763,7 +763,7 @@ access (2,600) and its callee's work, so the share is smaller than against this 
   - `GasKillerNestedSDK.sol` — `GasKillerSDK` plus nested settlement; inherit this instead in a contract that roots or joins a tree
   - `SchnorrStakeRegistry.sol` — Aggregate-key registry with proof-of-possession registration and non-signer subtraction
   - `StateTracker.sol` — Tracks state transitions via an ERC-7201 storage slot
-  - `StateChangeHandlerLib.sol` — Executes batched `STORE`, `CALL`, `LOG`, `CREATE` and `NESTED` operations
+  - `StateChangeHandlerLib.sol` — Executes batched `STORE`, `CALL`, `LOG`, `CREATE`, `NESTED` and observation-check operations
   - `TransitionGuard.sol` — EIP-1153 reentrancy / in-transition latch, keyed by the active nested root
   - `interface/` — `IGasKillerSDK`, `IGasKillerSDKBatch`, `IGasKillerNested`, `ISchnorrStakeRegistry`, `ISchnorrApprovalRegistry`, and the Alloy-compatible `IStateUpdateTypes`
   - `libraries/` — `Secp256k1` (affine point math), `SchnorrVerify` (constant-gas `ecrecover`-trick verify), `NestedFrames` (nested-settlement leaves, tree membership and witnesses) `StorageGuard` (protected storage ranges for `STORE` updates) `OutgoingRateLimit` (token bucket over the ETH signed programs send) `TokenRateLimit` (per-token budgets over measured ERC-20 outflow) and `CallAllowList` (default-deny `(target, selector)` check for signed ops)
@@ -839,15 +839,35 @@ of the following, applied in order:
 | Type | Effect | Encoded args |
 |------|--------|--------------|
 | `STORE` | Write to a storage slot | `(bytes32 slot, bytes32 value)` |
-| `CALL` | External call with optional ETH | `(address target, uint256 value, bytes calldata)` |
+| `CALL` | External call with optional ETH | `(address target, uint256 value, bytes calldata, bytes32 resultHash)` |
 | `LOG0`–`LOG4` | Emit a log with 0–4 topics | `(bytes data[, bytes32 topic1, ...])` |
-| `CREATE` | Deploy via `CREATE` | `(uint256 value, bytes initcode)` |
+| `CREATE` | Deploy via `CREATE` | `(uint256 value, bytes initcode, address expected)` |
 | `CREATE2` | Deploy via `CREATE2` | `(bytes32 salt, uint256 value, bytes initcode)` |
 | `NESTED` | Apply an SDK callee's own frame of a nested tree (tree settlement only) | `(address target, uint256 value, bytes32 childLeaf)` |
+| `STATICCALL_CHECK` | Re-run a read and check its result | `(address target, bytes data, bytes32 resultHash)` |
+| `BALANCE_CHECK` | Check an account's ETH balance | `(address account, uint256 balance)` |
+| `CODEHASH_CHECK` | Check an account's code hash | `(address account, bytes32 codehash)` |
 
 See [Settling with value](#settling-with-value) for how `CALL`,
 `CREATE`, `CREATE2` and `NESTED` are paid for. A `NESTED` op forwards its value out of the parent's
 balance, exactly as the native call would have.
+
+**Pinned observations.** The consumer's writes were computed against external state as of the
+trace, but its `CALL`s run against external state as of settlement. So a program pins what its
+contract observed from outside, at the position the trace observed it, and settlement reverts with
+`ObservationMismatch` if anything moved. Otherwise a swap that returns 95 at settlement would
+silently back a credit of the 100 the trace saw.
+
+- A `CALL`'s `resultHash` is `keccak256(abi.encodePacked(success, returndata))`. Zero leaves it
+  unchecked, for results that reach no write. A call the trace saw revert and catch is pinned as a
+  failure: it may revert at settlement, and the program goes on.
+- `CREATE`'s `expected` pins the deployed address, which moves with the contract's nonce; zero
+  leaves it unchecked. `CREATE2`'s address is fixed by its signed salt and initcode.
+- The `*_CHECK` ops pin reads that changed no state: `STATICCALL` (with the same result hash),
+  `BALANCE` and `SELFBALANCE`, `EXTCODEHASH` and `EXTCODESIZE`. They run no policy hooks.
+- Block values (`block.timestamp` and the like) can't be pinned, as settlement lands in a later
+  block: a transition is defined as of its reference block, and carries the values the trace saw
+  there. The reference block can be at most the staleness bound old.
 
 ## Development
 

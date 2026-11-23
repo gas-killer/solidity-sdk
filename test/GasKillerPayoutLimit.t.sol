@@ -203,7 +203,7 @@ contract GasKillerPayoutLimitTest is Test {
         }
         if (sendValue != 0) {
             types[i] = StateUpdateType.CALL;
-            args[i++] = abi.encode(ATTACKER, sendValue, "");
+            args[i++] = abi.encode(ATTACKER, sendValue, "", bytes32(0));
         }
         bytes memory updates = abi.encode(types, args);
         bytes32 h = vault.getMessageHash(ti, FN, updates);
@@ -308,7 +308,8 @@ contract GasKillerPayoutLimitTest is Test {
         uint256 ti = v.stateTransitionCount();
         args[0] = abi.encode(TRACKER_SLOT, bytes32(ti + 1));
         types[1] = StateUpdateType.CALL;
-        args[1] = abi.encode(address(v), 0.6 ether, abi.encodeCall(SelfPayVault.payTo, (ATTACKER, 0.6 ether)));
+        args[1] =
+            abi.encode(address(v), 0.6 ether, abi.encodeCall(SelfPayVault.payTo, (ATTACKER, 0.6 ether)), bytes32(0));
         bytes memory updates = abi.encode(types, args);
         bytes32 h = v.getMessageHash(ti, FN, updates);
         v.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
@@ -367,7 +368,7 @@ contract GasKillerPayoutLimitTest is Test {
         uint256 ti = v.stateTransitionCount();
         args[0] = abi.encode(TRACKER_SLOT, bytes32(ti + 1));
         types[1] = StateUpdateType.CALL;
-        args[1] = abi.encode(ATTACKER, 0.3 ether, "");
+        args[1] = abi.encode(ATTACKER, 0.3 ether, "", bytes32(0));
         bytes memory updates = abi.encode(types, args);
         s.run(v.getMessageHash(ti, FN, updates), updates, ti, FN, 0.2 ether);
         assertEq(ATTACKER.balance, 0.3 ether);
@@ -400,7 +401,7 @@ contract GasKillerPayoutLimitTest is Test {
         uint256 ti = v.stateTransitionCount();
         args[0] = abi.encode(TRACKER_SLOT, bytes32(ti + 1));
         types[1] = StateUpdateType.CALL;
-        args[1] = abi.encode(address(v), 0, abi.encodeCall(TokenVault.payTo, (ATTACKER, 60)));
+        args[1] = abi.encode(address(v), 0, abi.encodeCall(TokenVault.payTo, (ATTACKER, 60)), bytes32(0));
         bytes memory updates = abi.encode(types, args);
         bytes32 h = v.getMessageHash(ti, FN, updates);
         v.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));

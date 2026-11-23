@@ -246,7 +246,7 @@ contract TokenRateLimitTest is Test {
 
     function _call(Program memory p, address target, bytes memory data) internal pure {
         p.types[p.n] = StateUpdateType.CALL;
-        p.args[p.n++] = abi.encode(target, uint256(0), data);
+        p.args[p.n++] = abi.encode(target, uint256(0), data, bytes32(0));
     }
 
     function _transfer(Program memory p, MintableToken t, address to, uint256 amount) internal pure {
