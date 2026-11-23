@@ -237,11 +237,13 @@ function _protectedRanges() internal pure override returns (StorageGuard.Protect
 }
 ```
 
-> **Proxy slots are protected automatically.** When the contract runs behind a proxy (its code
+> **EIP-1967 slots are protected automatically.** When the contract runs behind a proxy (its code
 > executing at an address other than the one it was deployed to), the SDK also protects the
-> EIP-1967 implementation, beacon and admin slots, so a signed `STORE` can't replace its code.
-> Don't list them yourself: the overlap fails deployment with `InvalidRanges`. A tracked function
-> that upgrades the contract can't be settled through Gas Killer.
+> EIP-1967 implementation, beacon and admin slots, so a signed `STORE` can't point an EIP-1967
+> proxy at new code. Don't list them yourself: the overlap fails deployment with `InvalidRanges`.
+> A tracked function that upgrades the contract can't be settled through Gas Killer. Other upgrade
+> or initializer state is still yours to list, such as OpenZeppelin `Initializable`'s slot
+> (resetting it re-opens `initialize`) or the slots of a proxy that doesn't follow EIP-1967.
 
 - `StorageGuard.FULL` protects every bit of every slot in the range. A narrower mask, on a single
   slot, protects part of a packed slot, such as an owner address that shares its slot with a counter.
