@@ -59,9 +59,10 @@ struct TaskSubmission {
 ///      alone drops from ~17.0k cold to ~6.5k warm at full participation).
 ///
 ///      Batch assemblers (the off-chain router composing `submissions`) should be aware
-///      that `StateChangeHandlerLib`'s `CALL` update forwards *all* remaining gas to its
-///      target with no cap. A greedy or griefing CALL target in an early sub-transition can
-///      consume enough gas to starve every later sub-transition, reverting the whole
+///      that `StateChangeHandlerLib`'s `CALL` update gives its target the gas the trace gave
+///      it, often all that's left. A greedy or griefing CALL target in an early
+///      sub-transition can consume enough gas to starve every later sub-transition, reverting
+///      the whole
 ///      (atomic) batch — no partial-state hazard, since it's all-or-nothing, but it does
 ///      nullify the amortization this extension exists for. Ordering submissions with
 ///      untrusted CALL targets last, or excluding them from batches entirely, avoids this.
@@ -705,7 +706,7 @@ struct CallPolicy {
 ///      The consumer's writes were computed against external state as of the trace, and its
 ///      `CALL`s run against external state as of settlement. To keep the two from drifting
 ///      apart silently (a swap that returns less than the trace credited), a program pins what
-///      its contract observed from outside (#101): a `CALL`'s result hash, a `CREATE`'s address,
+///      its contract observed from outside: a `CALL`'s result hash, a `CREATE`'s address,
 ///      and the `*_CHECK` ops for reads that changed no state (`STATICCALL`, `BALANCE`,
 ///      `SELFBALANCE`, `EXTCODEHASH`, `EXTCODESIZE`), each at its position in the trace. A
 ///      mismatch reverts with `ObservationMismatch`. Block values (`block.timestamp` and the
@@ -1049,15 +1050,20 @@ library StateChangeHandlerLib {
     }
 
     /// @dev A `CALL`: `(target, value, callargs, resultHash, gasLimit)`.
-    ///      `gasLimit` is the gas operand the traced `CALL` passed, replayed as is (#11). The EVM
+    ///      `gasLimit` is the gas operand the traced `CALL` passed, replayed as is. The EVM
     ///      caps it at 63/64 of the gas left, as it did in the trace, and adds the 2,300 stipend
-    ///      when value is sent, so a `transfer` (operand 0) gets the stipend here too. Forwarding
-    ///      all gas instead would let a callee that only had the stipend in the trace run real
-    ///      code mid-transition, such as re-entering the consumer's other functions while the
-    ///      program is half applied. A call the trace made with all its gas records a large
-    ///      operand and gets everything left, as before. If the settler's gas limit leaves the
-    ///      callee less than it used in the trace, the call runs out of gas with no return data,
-    ///      which can't match a pin, and settlement reverts, to be retried with more gas.
+    ///      when value is sent. So a `transfer` or `send` (operand 0 with value, 2,300 without)
+    ///      gets the stipend here too. Forwarding all gas instead would let a callee that only
+    ///      had the stipend in the trace run real code mid-transition, such as re-entering the
+    ///      consumer's other functions while the program is half applied. A call that forwarded
+    ///      all its gas in the trace should be encoded as `type(uint256).max`, and gets
+    ///      everything left, as before.
+    ///      A callee that runs out of gas returns no data, which can't match a pin, so
+    ///      settlement reverts. With a large operand, a settler can retry with a higher gas
+    ///      limit. A capped callee can also run out where it fit in the trace, because an
+    ///      account or slot that was warm there is cold here. More gas doesn't help that; a
+    ///      settlement transaction whose EIP-2930 access list warms what the trace had warm
+    ///      does.
     ///      Gas spent here also starves later items of a batch (e.g.
     ///      GasKillerSDK.verifyAndUpdateBatch): a greedy or griefing target can make the whole
     ///      atomic batch revert. No partial-state hazard, but it nullifies the batch's cost

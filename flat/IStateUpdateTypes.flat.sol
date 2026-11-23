@@ -29,8 +29,9 @@ interface IStateUpdateTypes {
         ///         to require success without checking the return data
         bytes32 resultHash;
         /// @notice The gas operand the traced CALL passed, replayed as is: 0 for a `transfer` or
-        ///         `send` (the EVM adds the stipend), the cap for `f{gas: n}()`, and the large
-        ///         `gas()` the trace saw for a call that forwarded everything
+        ///         `send` with value (the EVM adds the stipend), 2,300 for one without, and the
+        ///         cap for `f{gas: n}()`. A call that forwarded all its gas should be encoded as
+        ///         `type(uint256).max` rather than the `gas()` the trace happened to have.
         uint256 gasLimit;
     }
 
