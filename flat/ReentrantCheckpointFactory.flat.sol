@@ -221,7 +221,8 @@ contract StateTracker {
 /// @notice Checks a signed program's `STORE` writes against a denylist of protected storage
 ///         ranges, so a quorum-signed update cannot overwrite slots such as an `Ownable` owner,
 ///         the `StateTracker` counter, the SDK's own configuration or EIP-1967 proxy slots. The
-///         SDK protects its own counter and configuration and the EIP-1967 slots; anything else
+///         SDK protects its own counter and configuration and, behind a proxy, the EIP-1967 slots;
+///         anything else
 ///         is protected only if the consumer lists it in `_protectedRanges`.
 ///         `StateChangeHandlerLib._run` calls `advance` right before every STORE executes.
 /// @dev The list denies rather than allows. Honest writes to mappings and dynamic arrays land on
@@ -1229,11 +1230,12 @@ library StateChangeHandlerLib {
 ///      executes, against `gasKillerProtectedRanges()`. A write that would change a protected bit reverts
 ///      the transition (`StorageGuard.ProtectedSlotWrite`). The SDK always protects its own
 ///      storage: the transition counter and the whole ERC-7201 namespace of the configuration
-///      struct (AVS address, registry, stale-block window), and the EIP-1967 proxy slots.
+///      struct (AVS address, registry, stale-block window), and, behind a proxy, the EIP-1967 slots.
 ///      Consumers add theirs, such as an `Ownable` owner slot, by overriding `_protectedRanges()`.
-///      A write that leaves protected bits unchanged passes, which is what keeps the counter copy gas-analyzer puts in every program working. The
-///      counter may also move forward, never back, so a tracked function that bumps it more than
-///      once natively still settles (`StorageGuard.COUNTER_SLOT`).
+///      A write that leaves protected bits unchanged passes, which is what keeps the counter copy
+///      gas-analyzer puts in every program working. The counter may also move forward, never
+///      back, so a tracked function that bumps it more than once natively still settles
+///      (`StorageGuard.COUNTER_SLOT`).
 abstract contract GasKillerSDK is
     StateTracker,
     TransitionGuard,
@@ -1306,9 +1308,12 @@ abstract contract GasKillerSDK is
 
     uint256 private constant DEFAULT_BLOCK_STALE_MEASURE = 300;
 
-    /// @dev The EIP-1967 proxy slots, protected on every contract: behind a proxy, a signed
-    ///      `STORE` to the implementation slot would replace the contract's code, and on a contract
-    ///      that isn't a proxy no honest write reaches them.
+    /// @dev The address this code was deployed to. Running anywhere else means a proxy
+    ///      delegatecalled it, and settlement then protects the EIP-1967 slots too.
+    address private immutable _self = address(this);
+
+    /// @dev The EIP-1967 proxy slots: behind a proxy, a signed `STORE` to the implementation slot
+    ///      would replace the contract's code.
     uint256 private constant EIP1967_IMPLEMENTATION =
         0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
     uint256 private constant EIP1967_BEACON = 0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50;
@@ -1330,7 +1335,8 @@ abstract contract GasKillerSDK is
     ///      `StorageGuard.InvalidRanges`. Behind a proxy, the implementation's constructor runs it
     ///      against the same code the proxy executes.
     constructor() {
-        StorageGuard.validateRanges(_settlementRanges());
+        StorageGuard.validateRanges(_mergeRanges(false));
+        StorageGuard.validateRanges(_mergeRanges(true));
     }
 
     /// @notice Verify an aggregate Schnorr quorum signature and apply the state updates.
@@ -1617,11 +1623,11 @@ abstract contract GasKillerSDK is
     /// @notice The storage ranges a signed program may not change: the SDK's own slots merged
     ///         with the consumer's `_protectedRanges()`, in ascending order. Empty when the
     ///         consumer has opted out of the check (`_unsafeDisableStorageGuard`); a guarded
-    ///         contract always lists at least the SDK's five ranges.
+    ///         contract always lists at least the SDK's two ranges, five behind a proxy.
     /// @dev A compile-time constant of this contract's code, validated once by the constructor
     ///      (see `constructor`), so it can't be malformed once deployed. Prefixed like no other
     ///      SDK getter because a generic `protectedRanges` could already exist in a consumer.
-    function gasKillerProtectedRanges() external pure returns (StorageGuard.ProtectedRange[] memory) {
+    function gasKillerProtectedRanges() external view returns (StorageGuard.ProtectedRange[] memory) {
         return _guardRanges();
     }
 
@@ -1629,13 +1635,14 @@ abstract contract GasKillerSDK is
     ///      it, when the consumer has opted out. The two settlement entry points build the same
     ///      list inline, for gas. Only the list; whether STOREs are checked is decided by
     ///      `_stateChangeHandler`.
-    function _guardRanges() private pure returns (StorageGuard.ProtectedRange[] memory ranges) {
+    function _guardRanges() private view returns (StorageGuard.ProtectedRange[] memory ranges) {
         if (!_unsafeDisableStorageGuard()) ranges = _settlementRanges();
     }
 
     /// @notice **Unsafe.** Override to return true to stop settlement checking signed STOREs
-    ///         against protected storage. Saves about 2,700 gas per call, 550 per transition, 500 per
-    ///         declared range, and about 280 per STORE (see `bench/SettlementGas.t.sol`).
+    ///         against protected storage. Saves about 1,800 gas per call (2,900 behind a proxy),
+    ///         70 per transition (550 behind a proxy), 500 per declared range, and about 280 per
+    ///         STORE (see `bench/SettlementGas.t.sol`).
     /// @dev With the check off, a quorum that signs a malicious program can overwrite any slot of
     ///      this contract: an owner, an upgrade slot, the transition counter (replaying old
     ///      transitions) and the SDK's own configuration, including the registry that
@@ -1668,69 +1675,91 @@ abstract contract GasKillerSDK is
     ///      }
     ///      ```
     ///
-    ///      The SDK already protects the EIP-1967 proxy slots: don't list them, as the overlap
-    ///      fails deployment. A tracked function that upgrades the contract can't be settled.
+    ///      Behind a proxy the SDK already protects the EIP-1967 slots: don't list them, as the
+    ///      overlap fails deployment. A tracked function that upgrades the contract can't be settled.
     function _protectedRanges() internal pure virtual returns (StorageGuard.ProtectedRange[] memory) {
         return new StorageGuard.ProtectedRange[](0);
     }
 
-    /// @dev The list every program is checked against: the consumer's ranges with the SDK's five
-    ///      fixed ranges merged in by start. Not virtual, so a consumer cannot drop the SDK's own
+    /// @dev The list every program is checked against: the consumer's ranges with the SDK's fixed
+    ///      ranges merged in by start. Not virtual, so a consumer cannot drop the SDK's own
     ///      protection. The constructor validates the result once, so a consumer list that is
     ///      unsorted or collides with an SDK range makes deployment revert instead of failing open.
     ///      Settlement doesn't re-validate: the list is `pure`, so it is the one that was checked.
     ///
-    ///      The SDK ranges are constants in ascending order (config namespace, the EIP-1967
-    ///      implementation, beacon and admin slots, counter), so the merge is one copy pass split
-    ///      at their starts. Consumer entries keep their relative
+    ///      Behind a proxy (this code running at an address other than the one it was deployed
+    ///      to, as a delegatecall does) the EIP-1967 implementation, beacon and admin slots are
+    ///      protected too; elsewhere nothing reads them, so they are left out. The SDK ranges are
+    ///      constants in ascending order (config namespace, the EIP-1967 slots, counter), so the
+    ///      merge is one copy pass split at their starts. Consumer entries keep their relative
     ///      order, so a consumer list that descends or overlaps still does after the merge and
     ///      still fails validation. Each pass compares its position with the end before reading.
-    function _settlementRanges() internal pure returns (StorageGuard.ProtectedRange[] memory out) {
+    function _settlementRanges() internal view returns (StorageGuard.ProtectedRange[] memory) {
+        return _mergeRanges(address(this) != _self);
+    }
+
+    /// @dev `_settlementRanges` for a contract running behind a proxy (`proxied`) or not. Pure,
+    ///      so the constructor can validate both.
+    function _mergeRanges(bool proxied) private pure returns (StorageGuard.ProtectedRange[] memory out) {
         StorageGuard.ProtectedRange[] memory consumer = _protectedRanges();
-        // The whole namespace, not the struct's current two slots, so a field added later is
-        // covered without anyone remembering to widen this.
-        StorageGuard.ProtectedRange memory config =
-            StorageGuard.ProtectedRange(uint256(STORAGE_LOCATION), CONFIG_NAMESPACE_END, StorageGuard.FULL);
-        StorageGuard.ProtectedRange[5] memory sdk = [
-            config,
-            StorageGuard.ProtectedRange(EIP1967_IMPLEMENTATION, EIP1967_IMPLEMENTATION, StorageGuard.FULL),
-            StorageGuard.ProtectedRange(EIP1967_BEACON, EIP1967_BEACON, StorageGuard.FULL),
-            StorageGuard.ProtectedRange(EIP1967_ADMIN, EIP1967_ADMIN, StorageGuard.FULL),
-            StorageGuard.ProtectedRange(
-                uint256(STATE_TRACKER_STORAGE_LOCATION), uint256(STATE_TRACKER_STORAGE_LOCATION), StorageGuard.FULL
-            )
-        ];
-        // Only the array of pointers: `new ProtectedRange[](n)` would also allocate and zero a
-        // struct behind every slot, and the merge below overwrites every pointer.
-        uint256 outLength = consumer.length + 5;
+        out = _pointerArray(consumer.length + (proxied ? 5 : 2));
+        uint256 configEnd = CONFIG_NAMESPACE_END;
+        // The SDK's ranges, ascending: the config namespace (the whole of it, not the struct's
+        // current slots, so a field added later is covered), the EIP-1967 slots behind a proxy,
+        // and the counter. Before each, the consumer entries starting below it.
         assembly ("memory-safe") {
-            out := mload(0x40)
-            mstore(out, outLength)
-            mstore(0x40, add(add(out, 0x20), shl(5, outLength)))
-        }
-        assembly ("memory-safe") {
+            // Copies consumer entries from `src` that start below `start`.
+            function below(src, end, dst, start) -> s, d {
+                s := src
+                d := dst
+                for {} lt(s, end) {} {
+                    let r := mload(s)
+                    if iszero(lt(mload(r), start)) { break }
+                    mstore(d, r)
+                    s := add(s, 0x20)
+                    d := add(d, 0x20)
+                }
+            }
+            // Appends a new full-mask range `[start, end]` at `dst`.
+            function put(dst, start, end) -> d {
+                let r := mload(0x40)
+                mstore(r, start)
+                mstore(add(r, 0x20), end)
+                mstore(add(r, 0x40), not(0))
+                mstore(0x40, add(r, 0x60))
+                mstore(dst, r)
+                d := add(dst, 0x20)
+            }
             let src := add(consumer, 0x20)
             let end := add(src, shl(5, mload(consumer)))
             let dst := add(out, 0x20)
-            // For each SDK range: the consumer entries starting below it, then the range.
-            for { let i := 0 } lt(i, 5) { i := add(i, 1) } {
-                let fixedRange := mload(add(sdk, shl(5, i)))
-                let fixedStart := mload(fixedRange)
-                for {} lt(src, end) {} {
-                    let r := mload(src)
-                    if iszero(lt(mload(r), fixedStart)) { break }
-                    mstore(dst, r)
-                    src := add(src, 0x20)
-                    dst := add(dst, 0x20)
-                }
-                mstore(dst, fixedRange)
-                dst := add(dst, 0x20)
+            src, dst := below(src, end, dst, STORAGE_LOCATION)
+            dst := put(dst, STORAGE_LOCATION, configEnd)
+            if proxied {
+                src, dst := below(src, end, dst, EIP1967_IMPLEMENTATION)
+                dst := put(dst, EIP1967_IMPLEMENTATION, EIP1967_IMPLEMENTATION)
+                src, dst := below(src, end, dst, EIP1967_BEACON)
+                dst := put(dst, EIP1967_BEACON, EIP1967_BEACON)
+                src, dst := below(src, end, dst, EIP1967_ADMIN)
+                dst := put(dst, EIP1967_ADMIN, EIP1967_ADMIN)
             }
+            src, dst := below(src, end, dst, STATE_TRACKER_STORAGE_LOCATION)
+            dst := put(dst, STATE_TRACKER_STORAGE_LOCATION, STATE_TRACKER_STORAGE_LOCATION)
             for {} lt(src, end) {} {
                 mstore(dst, mload(src))
                 src := add(src, 0x20)
                 dst := add(dst, 0x20)
             }
+        }
+    }
+
+    /// @dev A `ProtectedRange[]` of `length` uninitialized pointers: `new ProtectedRange[](n)`
+    ///      would also allocate and zero a struct behind every slot, and callers set every pointer.
+    function _pointerArray(uint256 length) private pure returns (StorageGuard.ProtectedRange[] memory a) {
+        assembly ("memory-safe") {
+            a := mload(0x40)
+            mstore(a, length)
+            mstore(0x40, add(add(a, 0x20), shl(5, length)))
         }
     }
 
