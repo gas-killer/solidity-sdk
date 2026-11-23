@@ -29,8 +29,8 @@ interface ISchnorrStakeRegistry {
 /// @notice Checks a signed program's `STORE` writes against a denylist of protected storage
 ///         ranges, so a quorum-signed update cannot overwrite slots such as an `Ownable` owner,
 ///         the `StateTracker` counter, the SDK's own configuration or EIP-1967 proxy slots. The
-///         SDK protects its own counter and configuration; anything else, proxy slots included,
-///         is protected only if the consumer lists it in `_protectedRanges`.
+///         SDK protects its own counter and configuration and, behind a proxy, the EIP-1967 slots;
+///         anything else is protected only if the consumer lists it in `_protectedRanges`.
 ///         `StateChangeHandlerLib._run` calls `advance` right before every STORE executes.
 /// @dev The list denies rather than allows. Honest writes to mappings and dynamic arrays land on
 ///      keccak-derived slots spread across the whole slot space, which an allowlist of ranges
@@ -437,8 +437,9 @@ library StateChangeHandlerLib {
 
     /// @dev `_runStateUpdates` without validating `ranges`. **`ranges` must already have passed
     ///      `StorageGuard.validateRanges`**: a malformed list fails open, silently letting writes
-    ///      to protected slots through. `GasKillerSDK` uses it with `_settlementRanges()`, which
-    ///      is a constant of the contract's code and validated by its constructor. An empty list
+    ///      to protected slots through. `GasKillerSDK` uses it with `_settlementRanges()`, one of two
+    ///      constants of the contract's code (with and without the proxy slots), both validated
+    ///      by its constructor. An empty list
     ///      still reverts with `NoProtectedRanges`.
     function _runStateUpdatesPrevalidated(
         StateUpdateType[] memory types,

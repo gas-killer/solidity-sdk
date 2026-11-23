@@ -7,6 +7,7 @@ import {ISchnorrStakeRegistry} from "../src/interface/ISchnorrStakeRegistry.sol"
 import {TaskSubmission} from "../src/interface/IGasKillerSDKBatch.sol";
 import {StateUpdateType} from "../src/StateChangeHandlerLib.sol";
 import {StorageGuard} from "../src/libraries/StorageGuard.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 /// Accepts every signature, so these tests exercise what settlement does with a program the
 /// quorum signed, including a malicious one.
@@ -68,6 +69,14 @@ contract UnguardedVault is GuardedVault {
 /// A consumer that declares nothing: it still gets the SDK's own protection.
 contract PlainConsumer is GasKillerSDK {
     constructor(address registry) {
+        _setSchnorrRegistry(registry);
+    }
+}
+
+/// A consumer meant to run behind a proxy: its registry is set by the initializer.
+contract UpgradeableConsumer is GasKillerSDK {
+    function initialize(address registry) external {
+        require(address(_schnorrRegistry()) == address(0), "initialized");
         _setSchnorrRegistry(registry);
     }
 }
@@ -154,7 +163,7 @@ contract Poker {
 }
 
 /// Re-declares the transition counter, which the SDK already protects.
-/// Lists the EIP-1967 proxy slots as the README shows.
+/// Lists the EIP-1967 proxy slots, which the SDK already protects.
 contract ProxySlotConsumer is GasKillerSDK {
     bytes32 constant IMPLEMENTATION = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
     bytes32 constant BEACON = 0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50;
@@ -170,6 +179,18 @@ contract ProxySlotConsumer is GasKillerSDK {
         r[0] = StorageGuard.ProtectedRange(uint256(IMPLEMENTATION), uint256(IMPLEMENTATION), StorageGuard.FULL);
         r[1] = StorageGuard.ProtectedRange(uint256(BEACON), uint256(BEACON), StorageGuard.FULL);
         r[2] = StorageGuard.ProtectedRange(uint256(ADMIN), uint256(ADMIN), StorageGuard.FULL);
+    }
+}
+
+/// Ranges between and around every SDK range, to exercise each step of the merge.
+contract InterleavedConsumer is GasKillerSDK {
+    function _protectedRanges() internal pure override returns (StorageGuard.ProtectedRange[] memory r) {
+        r = new StorageGuard.ProtectedRange[](5);
+        r[0] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL); // below the config namespace
+        r[1] = StorageGuard.ProtectedRange(2 << 252, 2 << 252, StorageGuard.FULL); // config < r < implementation
+        r[2] = StorageGuard.ProtectedRange(5 << 252, 6 << 252, StorageGuard.FULL); // implementation < r < beacon
+        r[3] = StorageGuard.ProtectedRange(0xc << 252, 0xc << 252, StorageGuard.FULL); // admin < r < counter
+        r[4] = StorageGuard.ProtectedRange(0xf << 252, type(uint256).max, StorageGuard.FULL); // above the counter
     }
 }
 
@@ -426,11 +447,18 @@ contract GasKillerSDKProtectedStorageTest is Test {
 
     // ---------------------------------------------------------------- the consumer's slots
 
-    /// The README's EIP-1967 list deploys alongside the SDK's ranges and rejects a signed
-    /// upgrade through each slot.
-    function test_proxySlotListFromTheReadmeProtects() public {
-        ProxySlotConsumer c = new ProxySlotConsumer(address(registry));
+    /// Behind a proxy the EIP-1967 slots are protected without the consumer listing them: a
+    /// signed upgrade through each is rejected. Listing them too overlaps the SDK's ranges and
+    /// fails deployment.
+    function test_proxySlotsAreProtectedBehindAProxy() public {
+        UpgradeableConsumer impl = new UpgradeableConsumer();
+        UpgradeableConsumer c = UpgradeableConsumer(
+            address(
+                new ERC1967Proxy(address(impl), abi.encodeCall(UpgradeableConsumer.initialize, (address(registry))))
+            )
+        );
         assertEq(c.gasKillerProtectedRanges().length, 5);
+        assertEq(impl.gasKillerProtectedRanges().length, 2, "not behind a proxy");
         bytes32[3] memory slots = [
             bytes32(0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc),
             0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50,
@@ -441,6 +469,18 @@ contract GasKillerSDKProtectedStorageTest is Test {
             _store(p, slots[i], bytes32(uint256(uint160(ATTACKER))));
             _settle(c, p, _rejection(1, slots[i]));
         }
+        vm.expectRevert(StorageGuard.InvalidRanges.selector);
+        new ProxySlotConsumer(address(registry));
+    }
+
+    /// Not behind a proxy, nothing reads the EIP-1967 slots, so a write to one applies.
+    function test_proxySlotsAreUnprotectedWithoutAProxy() public {
+        PlainConsumer c = new PlainConsumer(address(registry));
+        bytes32 slot = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+        Program memory p = _tracked(c, 1);
+        _store(p, slot, bytes32(uint256(uint160(ATTACKER))));
+        _settle(c, p);
+        assertEq(vm.load(address(c), slot), bytes32(uint256(uint160(ATTACKER))));
     }
 
     function test_ownerRewriteRejected() public {
@@ -483,6 +523,33 @@ contract GasKillerSDKProtectedStorageTest is Test {
         assertEq(rs[1].end, uint256(SDK_STORAGE) + 255, "the config struct's whole ERC-7201 namespace");
         assertEq(rs[2].start, uint256(TRACKER_SLOT));
         assertEq(rs[2].end, uint256(TRACKER_SLOT));
+        StorageGuard.validateRanges(rs);
+    }
+
+    /// Consumer ranges between and around every SDK range merge into one ascending list, behind
+    /// a proxy and without one.
+    function test_consumerRangesInterleaveWithTheSdkRanges() public {
+        InterleavedConsumer impl = new InterleavedConsumer();
+        assertEq(impl.gasKillerProtectedRanges().length, 7);
+        StorageGuard.validateRanges(impl.gasKillerProtectedRanges());
+        StorageGuard.ProtectedRange[] memory rs =
+            InterleavedConsumer(address(new ERC1967Proxy(address(impl), ""))).gasKillerProtectedRanges();
+        uint256[10] memory starts = [
+            uint256(0),
+            uint256(SDK_STORAGE),
+            2 << 252,
+            0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc,
+            5 << 252,
+            0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50,
+            0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103,
+            0xc << 252,
+            uint256(TRACKER_SLOT),
+            0xf << 252
+        ];
+        assertEq(rs.length, 10);
+        for (uint256 i = 0; i < 10; ++i) {
+            assertEq(rs[i].start, starts[i]);
+        }
         StorageGuard.validateRanges(rs);
     }
 
