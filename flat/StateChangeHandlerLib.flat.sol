@@ -750,18 +750,25 @@ library StateChangeHandlerLib {
     }
 
     /// @dev A `CALL`: `(target, value, callargs, resultHash, gasLimit)`.
-    ///      `gasLimit` is the gas operand the traced `CALL` passed, replayed as is. The EVM
-    ///      caps it at 63/64 of the gas left, as it did in the trace, and adds the 2,300 stipend
-    ///      when value is sent. So a `transfer` or `send` (operand 0 with value, 2,300 without)
-    ///      gets the stipend here too. Forwarding all gas instead would let a callee that only
-    ///      had the stipend in the trace run real code mid-transition, such as re-entering the
-    ///      consumer's other functions while the program is half applied. A call that forwarded
-    ///      all its gas in the trace should be encoded as `type(uint256).max`, and gets
-    ///      everything left, as before.
+    ///      `gasLimit` is the gas the callee gets, and never more than the traced `CALL` passed:
+    ///      forwarding all gas instead would let a callee that only had the stipend in the trace
+    ///      run real code mid-transition, such as re-entering the consumer's other functions
+    ///      while the program is half applied. The EVM adds the 2,300 stipend when value is
+    ///      sent, so a `transfer` or `send` (operand 0 with value, 2,300 without) gets the
+    ///      stipend here too. A larger cap is the least gas with which the callee, re-simulated,
+    ///      reproduces the trace, or the traced operand itself.
+    ///      Settlement reverts with `InsufficientCallGas` unless the callee can get all of
+    ///      `gasLimit`, so whoever submits the settlement can't starve the callee into another
+    ///      path (an inner call that runs out of gas and is caught) while the call still
+    ///      succeeds. A cap more than a settlement can supply, such as one recorded in a trace
+    ///      run past the block gas limit, therefore makes the program unsettleable. The analyzer
+    ///      clamps it.
+    ///      `type(uint256).max` forwards everything left, unchecked, as before. The settler then
+    ///      decides how much gas the callee gets: the fallback for a callee whose needed gas
+    ///      wasn't worked out.
     ///      A callee that runs out of gas returns no data, which can't match a pin, so
-    ///      settlement reverts. With a large operand, a settler can retry with a higher gas
-    ///      limit. A capped callee can also run out where it fit in the trace, because an
-    ///      account or slot that was warm there is cold here. More gas doesn't help that; a
+    ///      settlement reverts. A capped callee can run out where it fit in the trace, because
+    ///      an account or slot that was warm there is cold here. More gas doesn't help that; a
     ///      settlement transaction whose EIP-2930 access list warms what the trace had warm
     ///      does.
     ///      Gas spent here also starves later items of a batch (e.g.
@@ -782,6 +789,7 @@ library StateChangeHandlerLib {
             abi.decode(arg, (address, uint256, bytes, bytes32, uint256));
         if (target == address(this)) _checkSelfCall(policy, i, callargs);
         _authorize(policy, i, StateUpdateType.CALL, target, value, callargs);
+        if (gasLimit != type(uint256).max) _requireCallGas(i, gasLimit);
         bool success;
         assembly {
             success := call(gasLimit, target, value, add(callargs, 0x20), mload(callargs), 0, 0)
@@ -793,6 +801,20 @@ library StateChangeHandlerLib {
             if (success) revert ObservationMismatch(i, expected, actual);
         }
         if (!success) revert RevertingContext(i, target, _returnData(), callargs);
+    }
+
+    /// @dev The most a `CALL` itself can cost before its callee starts: a cold account (2,600),
+    ///      a value transfer (9,000) and a new account (25,000), plus the few operations between
+    ///      the check and the `CALL`. Generous on purpose: overestimating only asks the settler
+    ///      for a little more gas, which is refunded.
+    uint256 private constant _CALL_OVERHEAD = 40_000;
+
+    /// @dev Reverts unless the next `CALL` can give its callee all of `gasLimit`: the EVM passes
+    ///      at most 63/64 of the gas left after the `CALL`'s own cost.
+    function _requireCallGas(uint256 i, uint256 gasLimit) private view {
+        uint256 left = gasleft();
+        uint256 available = left > _CALL_OVERHEAD ? left - _CALL_OVERHEAD : 0;
+        require(available - available / 64 >= gasLimit, InsufficientCallGas(i, gasLimit));
     }
 
     /// @dev A `CREATE`: `(value, initcode, expected)`. A nonzero `expected` pins the deployed
@@ -1042,6 +1064,12 @@ library StateChangeHandlerLib {
     ///         one from before result pinning
     /// @param index The zero-based position of the operation
     error MalformedOp(uint256 index);
+
+    /// @notice Thrown when the gas left can't give a CALL op's callee all of its signed
+    ///         `gasLimit`. Retrying with a higher gas limit settles it.
+    /// @param index The zero-based position of the operation
+    /// @param gasLimit The gas the callee must get
+    error InsufficientCallGas(uint256 index, uint256 gasLimit);
 
     /// @notice Thrown when a batch item spent ETH that later items in the batch brought: on its
     ///         own, it couldn't have

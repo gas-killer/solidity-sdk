@@ -28,10 +28,12 @@ interface IStateUpdateTypes {
         /// @notice `keccak256(abi.encodePacked(success, returndata))` the trace observed, or zero
         ///         to require success without checking the return data
         bytes32 resultHash;
-        /// @notice The gas operand the traced CALL passed, replayed as is: 0 for a `transfer` or
-        ///         `send` with value (the EVM adds the stipend), 2,300 for one without, and the
-        ///         cap for `f{gas: n}()`. A call that forwarded all its gas should be encoded as
-        ///         `type(uint256).max` rather than the `gas()` the trace happened to have.
+        /// @notice The gas the callee gets, never more than the traced CALL passed: 0 for a
+        ///         `transfer` or `send` with value (the EVM adds the stipend), 2,300 for one
+        ///         without, otherwise the least gas with which the callee reproduces the trace
+        ///         (or the traced operand). Settlement reverts with `InsufficientCallGas` unless
+        ///         the callee can get all of it. `type(uint256).max` forwards everything left,
+        ///         unchecked.
         uint256 gasLimit;
     }
 
