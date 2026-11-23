@@ -236,7 +236,7 @@ contract GasKillerSDKNestedTest is Test {
         NestedTreeBuilder.Frame[] memory frames = new NestedTreeBuilder.Frame[](1);
         frames[0] = _frame(address(a), address(0), 0, 0, _ops1(_store(SLOT_X, 77)));
         NestedTreeBuilder.Tree memory tree = frames.build(expiryBlock);
-        assertEq(tree.frameLeaves[0], a.getMessageHash(0, TASK, program), "root leaf is the legacy digest");
+        assertEq(tree.frameLeaves[0], a.getMessageHash(0, TASK, program), "root leaf is the single-transition digest");
         a.verifyAndUpdateTree(_submission(tree, 0));
 
         assertEq(_load(a, SLOT_X), _load(twin, SLOT_X));
