@@ -289,8 +289,8 @@ contract GasKillerSDKHardeningTest is Test {
         );
         bytes4 fn = bytes4(keccak256("set()"));
 
-        // Inner transition 1 (what the attacker will try mid-flight): STORE 666. Its
-        // digest/index are exactly what a legitimate *next* submission would carry — the
+        // Inner transition 1 (what the attacker will try mid-flight): STORE 666. Its fields and
+        // index are exactly what a legitimate *next* submission would carry, and the permissive
         // mock registry would approve it, so only the guard stands in the way.
         bytes memory innerUpdates = _storeUpdate(bytes32(0), bytes32(uint256(666)));
         attacker.stage(uint32(block.number - 1), innerUpdates, 1, fn);

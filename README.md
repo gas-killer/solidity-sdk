@@ -143,6 +143,10 @@ The `IGasKillerSDK` interface ID is the `verifyAndUpdate` selector, so it identi
 | `0x57a9b002` (this release) | no | yes |
 | `0x82b35a01` (v0.1.0 and earlier) | yes, as its first argument | no |
 
+Unreleased builds from `main` between v0.1.0 and this change report `0x82b35a01` but do bind the
+chain id. If one of those could be deployed, call its `getMessageHash` and compare the result with
+both encodings computed off-chain.
+
 The ID didn't move when the digest started binding the value, so among `0x82b35a01` consumers it
 can't tell one that binds the value from one that accepts a value-bearing signature with any
 `msg.value`. Consumers that bind it also report `IGasKillerValueBound` (`0x0fd29ece`, the
