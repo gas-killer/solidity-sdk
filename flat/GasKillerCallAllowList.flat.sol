@@ -1057,9 +1057,16 @@ interface IGasKillerNested {
 // src/StateChangeHandlerLib.sol
 
 /// @notice Discriminator enum for the type of state update operation to execute
-/// @dev Each variant maps to a different EVM operation: storage writes, external calls, log emissions, or contract deployment
+/// @dev Two groups, kept contiguous:
+///      - EVM ops (0-8), each the replay of one opcode the consumer executed in the trace:
+///        `SSTORE`, `CALL`, `LOG0`-`LOG4`, `CREATE`, `CREATE2`. `CALL` and `CREATE` carry an
+///        optional pin of their result.
+///      - SDK ops (9 and up), which have no single opcode behind them: `NESTED` hands a callee
+///        its own signed frame, and the `*_CHECK` ops re-check a read the trace made.
+///      New SDK ops go at the end.
 enum StateUpdateType {
-    /// @notice Write a 32-byte value directly to a storage slot
+    // ---- EVM ops: replay an opcode
+    /// @notice Write a 32-byte value directly to a storage slot (`SSTORE`)
     STORE,
     /// @notice Execute an external call with optional ETH value transfer
     CALL,
@@ -1077,6 +1084,7 @@ enum StateUpdateType {
     CREATE,
     /// @notice Deploy a contract using CREATE2 (salt-derived deterministic address)
     CREATE2,
+    // ---- SDK ops: no single opcode behind them
     /// @notice Apply an SDK-enabled callee's own signed frame of a nested tree
     NESTED,
     /// @notice Re-run a read-only call and check its result against the trace
