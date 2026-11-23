@@ -1234,8 +1234,8 @@ struct CallPolicy {
 ///      A result hash is `keccak256(abi.encodePacked(success, returndata))`. Pinning a `CALL` or
 ///      `CREATE` is optional: with a zero hash a `CALL` must still succeed, but its return data
 ///      isn't checked, and a zero address leaves a deployment's address unchecked. A pinned
-///      `CALL` that sends no value may revert if the trace saw it revert (a caught revert): its
-///      hash then covers the failure, and the program goes on. Its policy hooks ran before it,
+///      `CALL` that sends no value may revert if the trace saw it revert with data (a caught
+///      revert): its hash then covers the failure, and the program goes on. Its policy hooks ran before it,
 ///      so they charge it as if it had gone through (a deposit `transferFrom` that now fails is
 ///      charged as tokens out): never less than it moved. A caught revert whose result depended
 ///      on a gas cap (an out-of-gas from `f{gas: n}()`) can't be pinned, as settlement forwards
@@ -1589,7 +1589,7 @@ library StateChangeHandlerLib {
         assembly {
             success := call(gas(), target, value, add(callargs, 0x20), mload(callargs), 0, 0)
         }
-        if (expected != bytes32(0) && (success || value == 0)) {
+        if (expected != bytes32(0) && (success || _pinnableFailure(value))) {
             bytes32 actual = _resultHash(success);
             if (actual == expected) return;
             // A failure is reported with its revert data, which says more than a hash.
@@ -1619,11 +1619,16 @@ library StateChangeHandlerLib {
     /// @dev The read checks. They change no state, so the call policy doesn't see them.
     ///      - `STATICCALL_CHECK`: `(target, data, resultHash)`. Re-runs the read with all
     ///        remaining gas and compares its result hash; a read that reverted in the trace is
-    ///        pinned as a failure the same way.
+    ///        pinned as a failure the same way, if it reverted with data (as for `CALL`).
     ///      - `BALANCE_CHECK`: `(account, balance)`, this contract included (`SELFBALANCE`),
-    ///        less the value the trace didn't see (`UNATTRIBUTED_VALUE_SLOT`).
+    ///        less the value the trace didn't see (`UNATTRIBUTED_VALUE_SLOT`), floored at 0.
+    ///        Exact, so anyone who can push ETH to the account (even by `SELFDESTRUCT`) can make
+    ///        it fail: pin a balance only when a write depends on it.
     ///      - `CODEHASH_CHECK`: `(account, codehash)`. Pins `EXTCODESIZE` too: the same code hash
-    ///        means the same code. An account with no code and no balance or nonce hashes to 0.
+    ///        means the same code. An account with no code hashes to 0 until it holds a balance or
+    ///        a nonce, then to `keccak256("")`; the two count as equal, so a wei sent to an empty
+    ///        address doesn't fail the check (which also means 0 and `keccak256("")` can't be
+    ///        told apart).
     function _check(StateUpdateType kind, uint256 i, bytes memory arg) private view {
         bytes32 expected;
         bytes32 actual;
@@ -1635,22 +1640,41 @@ library StateChangeHandlerLib {
             assembly {
                 success := staticcall(gas(), target, add(data, 0x20), mload(data), 0, 0)
             }
+            if (!success && !_pinnableFailure(0)) revert RevertingContext(i, target, "", data);
             actual = _resultHash(success);
         } else if (kind == StateUpdateType.BALANCE_CHECK) {
             (address account, uint256 balance) = abi.decode(arg, (address, uint256));
             uint256 held = account.balance;
             if (account == address(this)) {
+                uint256 unattributed;
                 assembly {
-                    held := sub(held, tload(UNATTRIBUTED_VALUE_SLOT))
+                    unattributed := tload(UNATTRIBUTED_VALUE_SLOT)
                 }
+                // Below it only if an earlier op spent value later items brought.
+                held = held > unattributed ? held - unattributed : 0;
             }
             (expected, actual) = (bytes32(balance), bytes32(held));
         } else {
             address account;
             (account, expected) = abi.decode(arg, (address, bytes32));
             actual = account.codehash;
+            if (actual == _EMPTY_CODEHASH) actual = 0;
+            if (expected == _EMPTY_CODEHASH) expected = 0;
         }
         if (actual != expected) revert ObservationMismatch(i, expected, actual);
+    }
+
+    /// @dev `keccak256("")`: the code hash of an account with no code that exists.
+    bytes32 private constant _EMPTY_CODEHASH = 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470;
+
+    /// @dev Whether the last call's failure may match a pinned failure. Not with value, nor with
+    ///      empty return data: the EVM's own failures (a value shortfall, out of gas from the
+    ///      settler's gas limit, call depth) return nothing, and the trace didn't see them. So
+    ///      only a revert with data can be pinned; the analyzer rejects a caught `revert()`.
+    function _pinnableFailure(uint256 value) private pure returns (bool ok) {
+        assembly {
+            ok := and(iszero(value), gt(returndatasize(), 0))
+        }
     }
 
     /// @dev Reverts with `MalformedOp` unless the word at `at` in `arg` is `offset`: the head
