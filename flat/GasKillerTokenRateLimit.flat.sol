@@ -2416,6 +2416,8 @@ library OutgoingRateLimit {
         }
         assembly ("memory-safe") {
             sstore(b.slot, word)
+            // Counted for `endNative`, so a window around this program doesn't charge it again.
+            tstore(_NATIVE_CHARGED, add(tload(_NATIVE_CHARGED), value))
         }
     }
 
@@ -2902,8 +2904,7 @@ library TokenRateLimit {
 
     /// @dev Lowers the snapshot balance of token `index` at every depth around the running one by
     ///      `amount`, which the running program has charged, so they don't charge it again. Floors
-    ///      at zero: a snapshot below what was charged inside it then charges nothing more, as the
-    ///      exact (negative) value would. A region not yet snapshotted is overwritten when it is.
+    ///      at zero, which can only charge the one around it more, never less. A region not yet snapshotted is overwritten when it is.
     function _lowerSnapshots(uint256 index, uint256 amount) private {
         uint256 depth;
         assembly ("memory-safe") {
