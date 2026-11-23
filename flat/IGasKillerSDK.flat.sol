@@ -45,10 +45,13 @@ interface IGasKillerSDK is IERC165 {
     ///      `msg.value` cannot be settled without its ETH. Value moved by state updates is fixed
     ///      inside the signed `storageUpdates`; a shortfall reverts the whole transition.
     ///
+    ///      The quorum signs `getMessageHash` (or `getMessageHashWithValue`) over these fields.
+    ///      The caller doesn't pass the digest: the contract rebuilds it from the arguments and
+    ///      `msg.value`, so a payload that differs in any signed field fails the signature check.
+    ///
     ///      `payable` does not change the function selector, so
     ///      `type(IGasKillerSDK).interfaceId` — which the router's ERC-165 preflight
     ///      probes — is unaffected.
-    /// @param msgHash The hash of the message to verify (sha256 of the encoded task)
     /// @param referenceBlockNumber The block number at which operator keys and stake
     ///        weights are evaluated by the stake registry
     /// @param storageUpdates The storage updates to verify and apply
@@ -58,7 +61,6 @@ interface IGasKillerSDK is IERC165 {
     /// @param Raddr Aggregate nonce address `address(R)`
     /// @param nonSigners Operators that did not sign, in strictly ascending order
     function verifyAndUpdate(
-        bytes32 msgHash,
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
