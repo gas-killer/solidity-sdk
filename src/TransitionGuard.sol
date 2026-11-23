@@ -6,11 +6,12 @@ pragma solidity ^0.8.27;
 ///         "in transition" latch external contracts can query.
 /// @dev Two holes in the unguarded settlement path, one mechanism:
 ///
-///      1. **Reentrancy.** `StateChangeHandlerLib`'s `CALL` update forwards all remaining
-///         gas to an arbitrary target *mid-transition* — after `trackState` has already
-///         bumped the counter and before the transition's later updates have executed. A
-///         re-entrant `verifyAndUpdate` carrying transition N+1's valid quorum signature
-///         would pass the transition-index check and interleave N+1's updates inside N.
+///      1. **Reentrancy.** `StateChangeHandlerLib`'s `CALL` update runs an arbitrary target
+///         with the gas the trace gave it, often all that's left, *mid-transition*: after
+///         `trackState` has already bumped the counter and before the transition's later
+///         updates have executed. A re-entrant `verifyAndUpdate` carrying transition N+1's
+///         valid quorum signature would pass the transition-index check and interleave
+///         N+1's updates inside N.
 ///         `guardTransition` makes the re-entrant call revert instead.
 ///
 ///      2. **Midway state.** During a `CALL` update the called contract observes storage

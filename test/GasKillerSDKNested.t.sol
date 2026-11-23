@@ -464,7 +464,7 @@ contract GasKillerSDKNestedTest is Test {
     }
 
     function _call(address target, bytes memory data) private pure returns (Op memory) {
-        return Op(StateUpdateType.CALL, abi.encode(target, uint256(0), data, bytes32(0)));
+        return Op(StateUpdateType.CALL, abi.encode(target, uint256(0), data, bytes32(0), type(uint256).max));
     }
 
     function _log1(bytes32 topic) private pure returns (Op memory) {

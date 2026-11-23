@@ -222,7 +222,7 @@ contract GasKillerSDKCallPolicyTest is Test {
 
     function _call(Program memory p, address target, uint256 value, bytes memory data) internal pure {
         p.types[p.n] = StateUpdateType.CALL;
-        p.args[p.n++] = abi.encode(target, value, data, bytes32(0));
+        p.args[p.n++] = abi.encode(target, value, data, bytes32(0), type(uint256).max);
     }
 
     function _create(Program memory p, uint256 value) internal pure {

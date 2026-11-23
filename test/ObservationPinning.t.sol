@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.29;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {GasKillerSDK} from "../src/GasKillerSDK.sol";
 import {StateChangeHandlerLib, StateUpdateType} from "../src/StateChangeHandlerLib.sol";
 import {TaskSubmission} from "../src/interface/IGasKillerSDKBatch.sol";
@@ -32,6 +32,28 @@ contract Pool {
 }
 
 contract Deployed {}
+
+/// Logs the gas a call arrived with: cheap enough to run on the 2,300 stipend.
+contract GasProbe {
+    event Arrived(uint256 gas);
+
+    receive() external payable {
+        emit Arrived(gasleft());
+    }
+
+    function probe() external {
+        emit Arrived(gasleft());
+    }
+
+    /// Needs far more than 2,300 gas.
+    function burn() external {
+        for (uint256 i = 0; i < 1000; ++i) {
+            assembly {
+                sstore(i, add(i, 1))
+            }
+        }
+    }
+}
 
 contract Consumer is GasKillerSDK {
     constructor(address registry) {
@@ -98,7 +120,11 @@ contract ObservationPinningTest is Test {
     }
 
     function _swap(Program memory p, bytes32 expected) internal view {
-        _op(p, StateUpdateType.CALL, abi.encode(address(pool), uint256(0), abi.encodeCall(Pool.swap, ()), expected));
+        _op(
+            p,
+            StateUpdateType.CALL,
+            abi.encode(address(pool), uint256(0), abi.encodeCall(Pool.swap, ()), expected, type(uint256).max)
+        );
     }
 
     function _store(Program memory p, uint256 slot, uint256 value) internal pure {
@@ -194,7 +220,7 @@ contract ObservationPinningTest is Test {
     function test_pinnedFailureMustSucceedWhenItSendsValue() public {
         bytes32 failed = _hash(false, "");
         Program memory p = _tracked(1);
-        _op(p, StateUpdateType.CALL, abi.encode(address(pool), uint256(1 ether), "", failed));
+        _op(p, StateUpdateType.CALL, abi.encode(address(pool), uint256(1 ether), "", failed, type(uint256).max));
         _settle(p, abi.encodeWithSelector(StateChangeHandlerLib.RevertingContext.selector, 1, address(pool), "", ""));
     }
 
@@ -202,7 +228,11 @@ contract ObservationPinningTest is Test {
     /// caused.
     function test_emptyFailureCantBePinned() public {
         Program memory p = _tracked(1);
-        _op(p, StateUpdateType.CALL, abi.encode(address(pool), uint256(0), hex"deadbeef", _hash(false, "")));
+        _op(
+            p,
+            StateUpdateType.CALL,
+            abi.encode(address(pool), uint256(0), hex"deadbeef", _hash(false, ""), type(uint256).max)
+        );
         _settle(
             p,
             abi.encodeWithSelector(StateChangeHandlerLib.RevertingContext.selector, 1, address(pool), "", hex"deadbeef")
@@ -216,15 +246,78 @@ contract ObservationPinningTest is Test {
         );
     }
 
-    /// The layouts from before pinning are rejected, not misread.
+    /// The layouts from before pinning, and the `CALL` layout from before its gas limit, are
+    /// rejected, not misread.
     function test_oldLayoutsAreRejected() public {
         Program memory p = _tracked(1);
         _op(p, StateUpdateType.CALL, abi.encode(address(pool), uint256(0), abi.encodeCall(Pool.swap, ())));
         _settle(p, abi.encodeWithSelector(StateChangeHandlerLib.MalformedOp.selector, 1));
 
         p = _tracked(1);
+        _op(p, StateUpdateType.CALL, abi.encode(address(pool), uint256(0), abi.encodeCall(Pool.swap, ()), bytes32(0)));
+        _settle(p, abi.encodeWithSelector(StateChangeHandlerLib.MalformedOp.selector, 1));
+
+        p = _tracked(1);
         _op(p, StateUpdateType.CREATE, abi.encode(uint256(0), type(Deployed).creationCode));
         _settle(p, abi.encodeWithSelector(StateChangeHandlerLib.MalformedOp.selector, 1));
+    }
+
+    // ---------------------------------------------------------------- gas limit (#11)
+
+    function _gasArrived(Program memory p) internal returns (uint256) {
+        vm.recordLogs();
+        _settle(p, "");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; ++i) {
+            if (logs[i].topics[0] == GasProbe.Arrived.selector) return abi.decode(logs[i].data, (uint256));
+        }
+        revert("probe not called");
+    }
+
+    /// A traced `transfer` passes a gas operand of 0: the recipient gets only the stipend, as
+    /// it did in the trace, not every gas the settler sent.
+    function test_callGas_transferGetsOnlyTheStipend() public {
+        GasProbe probe = new GasProbe();
+        vm.deal(address(c), 1);
+        Program memory p = _tracked(1);
+        _op(p, StateUpdateType.CALL, abi.encode(address(probe), uint256(1), "", bytes32(0), uint256(0)));
+        assertLe(_gasArrived(p), 2300, "stipend only");
+        assertEq(address(probe).balance, 1);
+    }
+
+    function test_callGas_capIsReplayed() public {
+        GasProbe probe = new GasProbe();
+        Program memory p = _tracked(1);
+        _op(
+            p,
+            StateUpdateType.CALL,
+            abi.encode(address(probe), uint256(0), abi.encodeCall(GasProbe.probe, ()), bytes32(0), uint256(50_000))
+        );
+        uint256 arrived = _gasArrived(p);
+        assertLe(arrived, 50_000, "capped");
+        assertGt(arrived, 40_000, "not starved");
+    }
+
+    /// A call the trace made with all its gas records a large operand and gets all that's left.
+    function test_callGas_largeOperandForwardsWhatIsLeft() public {
+        GasProbe probe = new GasProbe();
+        Program memory p = _tracked(1);
+        _op(
+            p,
+            StateUpdateType.CALL,
+            abi.encode(address(probe), uint256(0), abi.encodeCall(GasProbe.probe, ()), bytes32(0), type(uint256).max)
+        );
+        assertGt(_gasArrived(p), 1_000_000);
+    }
+
+    /// Too little gas for the callee reverts the settlement, even with a pinned failure: an
+    /// out-of-gas returns no data, so it can't match one.
+    function test_callGas_outOfGasRevertsSettlement() public {
+        GasProbe probe = new GasProbe();
+        bytes memory data = abi.encodeCall(GasProbe.burn, ());
+        Program memory p = _tracked(1);
+        _op(p, StateUpdateType.CALL, abi.encode(address(probe), uint256(0), data, _hash(false, ""), uint256(10_000)));
+        _settle(p, abi.encodeWithSelector(StateChangeHandlerLib.RevertingContext.selector, 1, address(probe), "", data));
     }
 
     // ---------------------------------------------------------------- reads
@@ -312,7 +405,7 @@ contract ObservationPinningTest is Test {
             a[0] = abi.encode(TRACKER_SLOT, bytes32(i + 1));
             if (i == 0) {
                 t[1] = StateUpdateType.CALL;
-                a[1] = abi.encode(address(0xBEEF), uint256(1 ether), "", bytes32(0));
+                a[1] = abi.encode(address(0xBEEF), uint256(1 ether), "", bytes32(0), type(uint256).max);
             }
             bytes memory updates = abi.encode(t, a);
             uint256 value = i == 0 ? 0 : 1 ether;

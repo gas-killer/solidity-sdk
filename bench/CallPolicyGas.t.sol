@@ -219,7 +219,7 @@ contract CallPolicyGasTest is Test {
         a[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(1)));
         for (uint256 i = 1; i <= m; ++i) {
             t[i] = StateUpdateType.CALL;
-            a[i] = abi.encode(address(sink), uint256(0), "", bytes32(0));
+            a[i] = abi.encode(address(sink), uint256(0), "", bytes32(0), type(uint256).max);
         }
         return abi.encode(t, a);
     }
@@ -248,7 +248,7 @@ contract CallPolicyGasTest is Test {
         a[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(1)));
         for (uint256 i = 1; i <= m; ++i) {
             t[i] = StateUpdateType.CALL;
-            a[i] = abi.encode(address(sink), uint256(1), "", bytes32(0));
+            a[i] = abi.encode(address(sink), uint256(1), "", bytes32(0), type(uint256).max);
         }
         bytes memory updates = abi.encode(t, a);
         bytes32 h = target.getMessageHash(0, FN, updates);
@@ -293,7 +293,7 @@ contract CallPolicyGasTest is Test {
         a[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(1)));
         for (uint256 i = 1; i <= m; ++i) {
             t[i] = StateUpdateType.CALL;
-            a[i] = abi.encode(tokens[0], uint256(0), abi.encodeCall(IERC20.transfer, (address(sink), 1)), bytes32(0));
+            a[i] = abi.encode(tokens[0], uint256(0), abi.encodeCall(IERC20.transfer, (address(sink), 1)), bytes32(0), type(uint256).max);
         }
         bytes memory updates = abi.encode(t, a);
         bytes32 h = target.getMessageHash(0, FN, updates);
@@ -334,7 +334,7 @@ contract CallPolicyGasTest is Test {
         a[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(1)));
         for (uint256 i = 1; i <= m; ++i) {
             t[i] = StateUpdateType.CALL;
-            a[i] = abi.encode(address(target), uint256(0), abi.encodeCall(SelfCaller.ping, ()), bytes32(0));
+            a[i] = abi.encode(address(target), uint256(0), abi.encodeCall(SelfCaller.ping, ()), bytes32(0), type(uint256).max);
         }
         bytes memory updates = abi.encode(t, a);
         bytes32 h = target.getMessageHash(0, FN, updates);

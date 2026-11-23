@@ -526,7 +526,7 @@ contract StorageGuardTest is Test {
         t[0] = StateUpdateType.STORE;
         a[0] = _store(5);
         t[1] = StateUpdateType.CALL;
-        a[1] = abi.encode(address(0), uint256(0), bytes(""), bytes32(0)); // first word 0 would read as slot 0 if decoded
+        a[1] = abi.encode(address(0), uint256(0), bytes(""), bytes32(0), type(uint256).max); // first word 0 would read as slot 0 if decoded
         t[2] = StateUpdateType.LOG1;
         a[2] = abi.encode(bytes(""), bytes32(0));
         t[3] = StateUpdateType.STORE;
@@ -545,7 +545,7 @@ contract StorageGuardTest is Test {
         t[1] = StateUpdateType.STORE;
         a[1] = _store(9);
         t[2] = StateUpdateType.CALL;
-        a[2] = abi.encode(address(1), uint256(0), bytes(""), bytes32(0));
+        a[2] = abi.encode(address(1), uint256(0), bytes(""), bytes32(0), type(uint256).max);
         t[3] = StateUpdateType.STORE;
         a[3] = _store(0);
         bytes memory p = abi.encode(t, a);
@@ -640,7 +640,8 @@ contract StorageGuardTest is Test {
             address(h),
             uint256(0),
             abi.encodeCall(h.poke, (bytes32(uint256(7)), _ownerSlot(address(0xB0B), 41))),
-            bytes32(0)
+            bytes32(0),
+            type(uint256).max
         );
         t[1] = StateUpdateType.STORE;
         a[1] = abi.encode(bytes32(uint256(7)), _ownerSlot(address(0xA11CE), 42));
@@ -708,7 +709,7 @@ contract StorageGuardTest is Test {
         t[0] = StateUpdateType.STORE;
         a[0] = abi.encode(bytes32(uint256(7)), _ownerSlot(address(0xA11CE), 42)); // counter bump: fine
         t[1] = StateUpdateType.CALL;
-        a[1] = abi.encode(address(1), uint256(0), bytes(""), bytes32(0));
+        a[1] = abi.encode(address(1), uint256(0), bytes(""), bytes32(0), type(uint256).max);
         t[2] = StateUpdateType.STORE;
         a[2] = abi.encode(bytes32(uint256(9)), bytes32(uint256(1))); // unprotected: fine after a CALL
         h.program(abi.encode(t, a), _maskedOwnerRange());
@@ -833,8 +834,13 @@ contract StorageGuardTest is Test {
                 p.args[i] = abi.encode(bytes32(slot), value);
             } else if (kind < 7) {
                 p.types[i] = StateUpdateType.CALL;
-                p.args[i] =
-                    abi.encode(address(h), uint256(0), abi.encodeCall(h.poke, (bytes32(slot), value)), bytes32(0));
+                p.args[i] = abi.encode(
+                    address(h),
+                    uint256(0),
+                    abi.encodeCall(h.poke, (bytes32(slot), value)),
+                    bytes32(0),
+                    type(uint256).max
+                );
                 p.ranCode = true;
             } else {
                 p.types[i] = StateUpdateType.LOG0;

@@ -212,7 +212,7 @@ contract GasKillerSDKHardeningTest is Test {
         types[1] = StateUpdateType.CALL;
         bytes[] memory args = new bytes[](2);
         args[0] = abi.encode(slot, val);
-        args[1] = abi.encode(callTarget, uint256(0), callData, bytes32(0));
+        args[1] = abi.encode(callTarget, uint256(0), callData, bytes32(0), type(uint256).max);
         return abi.encode(types, args);
     }
 
@@ -222,7 +222,7 @@ contract GasKillerSDKHardeningTest is Test {
         StateUpdateType[] memory types = new StateUpdateType[](1);
         types[0] = StateUpdateType.CALL;
         bytes[] memory args = new bytes[](1);
-        args[0] = abi.encode(target, val, callData, bytes32(0));
+        args[0] = abi.encode(target, val, callData, bytes32(0), type(uint256).max);
         return abi.encode(types, args);
     }
 

@@ -275,7 +275,13 @@ contract NestedCycleTest is Test {
             frames[2],
             1,
             StateUpdateType.CALL,
-            abi.encode(address(observer), uint256(0), abi.encodeCall(CycleObserver.check, (root, n)), bytes32(0))
+            abi.encode(
+                address(observer),
+                uint256(0),
+                abi.encodeCall(CycleObserver.check, (root, n)),
+                bytes32(0),
+                type(uint256).max
+            )
         );
         _op(frames[2], 2, StateUpdateType.STORE, abi.encode(bytes32(uint256(1)), bytes32(n)));
         _op(frames[2], 3, StateUpdateType.STORE, abi.encode(bytes32(uint256(2)), _digest(n)));

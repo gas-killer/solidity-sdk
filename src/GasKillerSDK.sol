@@ -217,11 +217,11 @@ abstract contract GasKillerSDK is
     ///      Reverts (`InvalidTransitionIndex`) only on a genuine gap — an index above the
     ///      next expected one.
     ///
-    ///      Batch assemblers: a `CALL` state update forwards all remaining gas to its target
-    ///      with no cap (see `StateChangeHandlerLib`). A greedy/griefing target in an early
-    ///      sub-transition can therefore starve every later one in the same batch, reverting
-    ///      the whole (atomic) batch — no partial-state hazard, but it does nullify the
-    ///      amortization this function exists for.
+    ///      Batch assemblers: a `CALL` state update gives its target the gas the trace gave
+    ///      it, often all that's left (see `StateChangeHandlerLib`). A greedy/griefing target
+    ///      in an early sub-transition can therefore starve every later one in the same batch,
+    ///      reverting the whole (atomic) batch — no partial-state hazard, but it does nullify
+    ///      the amortization this function exists for.
     ///
     ///      Each submission's digest binds its own `value`, and `msg.value` must cover the sum
     ///      over the submissions actually applied (`InsufficientBatchValue` otherwise), so no

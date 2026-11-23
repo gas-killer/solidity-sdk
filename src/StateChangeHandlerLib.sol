@@ -109,9 +109,11 @@ struct CallPolicy {
 ///      revert): its hash then covers the failure, and the program goes on. Its policy hooks ran before it,
 ///      so they charge it as if it had gone through (a deposit `transferFrom` that now fails is
 ///      charged as tokens out): never less than it moved. A caught revert whose result depended
-///      on a gas cap (an out-of-gas from `f{gas: n}()`) can't be pinned, as settlement forwards
-///      all gas: the analyzer has to reject the task. The read checks run code at any address
-///      without the call policy (the allow list doesn't cover them); they can't change state.
+///      on a gas cap (an out-of-gas from `f{gas: n}()`) can't be pinned: settlement replays the
+///      cap, but an out-of-gas returns no data, and the callee's gas use differs from the trace
+///      (other slots are warm), so the analyzer has to reject the task. The read checks run code
+///      at any address without the call policy (the allow list doesn't cover them); they can't
+///      change state.
 library StateChangeHandlerLib {
     /// @dev keccak256("gasKiller.unattributedValue") - 1. The part of the contract's balance the
     ///      running program's trace didn't see: in a batch, the value later items brought, and
@@ -436,29 +438,37 @@ library StateChangeHandlerLib {
         if (ctx.consumed != ctx.children.length) revert UnconsumedWitnesses(ctx.children.length, ctx.consumed);
     }
 
-    /// @dev A `CALL`: `(target, value, callargs, resultHash)`. Forwards all remaining gas (no
-    ///      stipend cap). In a batched settlement (e.g. GasKillerSDK.verifyAndUpdateBatch) this
-    ///      is amplified: a greedy or griefing target in an earlier sub-transition's CALL can
-    ///      consume enough gas to starve every later sub-transition in the same batch, reverting
-    ///      the whole (atomic) batch. No partial-state hazard, it's all or nothing, but it does
-    ///      nullify the batch's cost amortization. See IGasKillerSDKBatch for the batch-assembly-
-    ///      side note.
+    /// @dev A `CALL`: `(target, value, callargs, resultHash, gasLimit)`.
+    ///      `gasLimit` is the gas operand the traced `CALL` passed, replayed as is (#11). The EVM
+    ///      caps it at 63/64 of the gas left, as it did in the trace, and adds the 2,300 stipend
+    ///      when value is sent, so a `transfer` (operand 0) gets the stipend here too. Forwarding
+    ///      all gas instead would let a callee that only had the stipend in the trace run real
+    ///      code mid-transition, such as re-entering the consumer's other functions while the
+    ///      program is half applied. A call the trace made with all its gas records a large
+    ///      operand and gets everything left, as before. If the settler's gas limit leaves the
+    ///      callee less than it used in the trace, the call runs out of gas with no return data,
+    ///      which can't match a pin, and settlement reverts, to be retried with more gas.
+    ///      Gas spent here also starves later items of a batch (e.g.
+    ///      GasKillerSDK.verifyAndUpdateBatch): a greedy or griefing target can make the whole
+    ///      atomic batch revert. No partial-state hazard, but it nullifies the batch's cost
+    ///      amortization. See IGasKillerSDKBatch for the batch-assembly side.
     ///      A nonzero `resultHash` pins the result: a call that succeeds with other return data,
     ///      or fails when the trace saw it succeed, reverts. A pinned failure lets the program go
     ///      on, unless the call sends value: a failure with empty data can also be the EVM's own
     ///      (a value shortfall, call depth), which the trace didn't see, so such a call must
     ///      succeed.
     function _call(CallPolicy memory policy, uint256 i, bytes memory arg) private {
-        // The pre-#101 layout `(target, value, callargs)` would decode with its calldata length
-        // as the hash: reject anything but the canonical offset.
-        _requireOffset(arg, 0x40, 0x80, i);
-        (address target, uint256 value, bytes memory callargs, bytes32 expected) =
-            abi.decode(arg, (address, uint256, bytes, bytes32));
+        // Earlier layouts, `(target, value, callargs)` and `(target, value, callargs,
+        // resultHash)`, would decode with other words in place of the hash and the gas limit:
+        // reject anything but the canonical offset.
+        _requireOffset(arg, 0x40, 0xa0, i);
+        (address target, uint256 value, bytes memory callargs, bytes32 expected, uint256 gasLimit) =
+            abi.decode(arg, (address, uint256, bytes, bytes32, uint256));
         if (target == address(this)) _checkSelfCall(policy, i, callargs);
         _authorize(policy, i, StateUpdateType.CALL, target, value, callargs);
         bool success;
         assembly {
-            success := call(gas(), target, value, add(callargs, 0x20), mload(callargs), 0, 0)
+            success := call(gasLimit, target, value, add(callargs, 0x20), mload(callargs), 0, 0)
         }
         if (expected != bytes32(0) && (success || _pinnableFailure(value))) {
             bytes32 actual = _resultHash(success);
