@@ -1129,7 +1129,8 @@ struct NestedContext {
 
 /// @notice What a program may send out of its contract. Checked before every op that runs other
 ///         code with the contract's authority or moves its ETH: `CALL`, `CREATE`, `CREATE2` and
-///         `NESTED`.
+///         `NESTED`. Not before the read checks (`STATICCALL_CHECK` and the like): they can run
+///         code at any address, as the consumer, but can't change state.
 /// @dev `StorageGuard` only sees `STORE`s. A signed `CALL` runs real code as the consumer, so a
 ///      malicious quorum could otherwise spend anything the consumer holds or controls elsewhere.
 ///      Before each such op, `_run` adds its value to `sent`, reverts with
@@ -1565,7 +1566,9 @@ library StateChangeHandlerLib {
     ///        remaining gas and compares its result hash; a read that reverted in the trace is
     ///        pinned as a failure the same way, if it reverted with data (as for `CALL`).
     ///      - `BALANCE_CHECK`: `(account, balance)`, this contract included (`SELFBALANCE`),
-    ///        less the value the trace didn't see (`UNATTRIBUTED_VALUE_SLOT`), floored at 0.
+    ///        less the value the trace didn't see (`UNATTRIBUTED_VALUE_SLOT`). Reverts with
+    ///        `UnattributedValueSpent` if the balance is below that value: the program spent
+    ///        ETH later batch items brought.
     ///        Exact, so anyone who can push ETH to the account (even by `SELFDESTRUCT`) can make
     ///        it fail: pin a balance only when a write depends on it.
     ///      - `CODEHASH_CHECK`: `(account, codehash)`. Pins `EXTCODESIZE` too: the same code hash
@@ -1594,8 +1597,8 @@ library StateChangeHandlerLib {
                 assembly {
                     unattributed := tload(UNATTRIBUTED_VALUE_SLOT)
                 }
-                // Below it only if an earlier op spent value later items brought.
-                held = held > unattributed ? held - unattributed : 0;
+                require(held >= unattributed, UnattributedValueSpent());
+                held -= unattributed;
             }
             (expected, actual) = (bytes32(balance), bytes32(held));
         } else {
@@ -1787,6 +1790,10 @@ library StateChangeHandlerLib {
     ///         one from before result pinning
     /// @param index The zero-based position of the operation
     error MalformedOp(uint256 index);
+
+    /// @notice Thrown when a batch item spent ETH that later items in the batch brought: on its
+    ///         own, it couldn't have
+    error UnattributedValueSpent();
 }
 
 // src/GasKillerSDK.sol
@@ -2023,8 +2030,10 @@ abstract contract GasKillerSDK is
             // Already settled (e.g. front-run or redelivered) → skip, don't poison the batch.
             if (sub.transitionIndex + 1 <= stateTransitionCount()) continue;
             required += sub.value;
-            // What later items and any surplus brought: this item's trace didn't see it.
-            StateChangeHandlerLib._setUnattributedValue(msg.value > required ? msg.value - required : 0);
+            // What later items and any surplus brought: this item's trace didn't see it, and it
+            // may not spend it.
+            uint256 unattributed = msg.value > required ? msg.value - required : 0;
+            StateChangeHandlerLib._setUnattributedValue(unattributed);
             _verifyTransition(
                 sub.msgHash,
                 sub.referenceBlockNumber,
@@ -2037,6 +2046,7 @@ abstract contract GasKillerSDK is
                 sub.nonSigners
             );
             _stateChangeHandler(sub.storageUpdates, ranges);
+            require(address(this).balance >= unattributed, StateChangeHandlerLib.UnattributedValueSpent());
         }
         StateChangeHandlerLib._setUnattributedValue(0);
         require(msg.value >= required, InsufficientBatchValue(msg.value, required));
