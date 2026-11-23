@@ -2416,6 +2416,8 @@ library OutgoingRateLimit {
         }
         assembly ("memory-safe") {
             sstore(b.slot, word)
+            // Counted for `endNative`, so a window around this program doesn't charge it again.
+            tstore(_NATIVE_CHARGED, add(tload(_NATIVE_CHARGED), value))
         }
     }
 
@@ -2437,8 +2439,13 @@ library OutgoingRateLimit {
     ///      sees the same `msg.value`, so excluding it would let one deposit offset the payout of
     ///      each limited function the call runs. So ETH a limited function receives with its call
     ///      and sends on is charged; only ETH that arrives during the window offsets a send.
-    function beginNative() internal view returns (uint256 baseline) {
-        return address(this).balance;
+    /// @return baseline The ETH balance as the window opens.
+    /// @return charged What windows have charged so far in this transaction, for `endNative`.
+    function beginNative() internal view returns (uint256 baseline, uint256 charged) {
+        assembly ("memory-safe") {
+            charged := tload(_NATIVE_CHARGED)
+        }
+        return (address(this).balance, charged);
     }
 
     /// @notice Closes the window `beginNative` opened: spends the net decrease of the contract's
@@ -2446,10 +2453,22 @@ library OutgoingRateLimit {
     /// @dev Net: ETH the function received offsets ETH it sent, so unwrapping WETH held by the
     ///      contract and sending the ETH on isn't charged here; limit WETH as a token too. A
     ///      window nested in another (one limited function calling another, possibly through a
-    ///      callback) is charged both to itself and to the window around it.
-    function endNative(GasKillerSDK.OutgoingBucket storage b, uint256 baseline) internal {
-        uint256 balance = address(this).balance;
-        if (balance < baseline) spendNative(b, baseline - balance);
+    ///      callback) charges its own outflow; the window around it charges only what it sent
+    ///      beyond that, so nothing is charged twice and an outer inflow can't cover an inner send.
+    function endNative(GasKillerSDK.OutgoingBucket storage b, uint256 baseline, uint256 charged) internal {
+        uint256 total;
+        assembly ("memory-safe") {
+            total := tload(_NATIVE_CHARGED)
+        }
+        // `total - charged`: what windows inside this one charged.
+        uint256 covered = address(this).balance + (total - charged);
+        if (covered < baseline) {
+            uint256 value = baseline - covered;
+            spendNative(b, value);
+            assembly ("memory-safe") {
+                tstore(_NATIVE_CHARGED, add(total, value))
+            }
+        }
     }
 
     /// @dev Takes `value` from the budget if it holds that much, as `spend` does inline. One
@@ -2485,6 +2504,10 @@ library OutgoingRateLimit {
         (available,) = _refilled(word);
         return (available, uint96(word), uint32(word >> 192));
     }
+
+    /// @dev Transient running total of what native windows have charged in this transaction.
+    ///      keccak256("gaskiller.OutgoingRateLimit.nativeCharged").
+    bytes32 private constant _NATIVE_CHARGED = 0x5ed743e67466768939762aa6e4ef54f7960c929570346f1a66cc31313be87a77;
 
     /// @dev The `limit` and `period` bits of the packed slot.
     uint256 private constant _KEEP = uint256(type(uint96).max) | (uint256(type(uint32).max) << 192);
@@ -2560,10 +2583,10 @@ library OutgoingRateLimit {
 ///      deposit function should not let programs call untrusted contracts. Users' allowances on
 ///      unlisted tokens aren't guarded at all.
 ///
-///      The limit errs towards charging twice. An allowance left standing is charged when the
-///      program ends, and again through the balance when a later program has the spender pull
-///      it. A frame that re-enters this contract is charged for its outflow, and so is the
-///      frame around it.
+///      An allowance left standing is charged when the program ends, and again through the
+///      balance when a later program has the spender pull it. A program or window nested in
+///      another charges its own outflow, and lowers the snapshots around it by that much, so the
+///      one around it charges only what it moved beyond that.
 ///
 ///      A token is recognized by the address it is listed under. Don't list a token that can also
 ///      be reached through a second address sharing its balances and allowances (a legacy proxy
@@ -2842,12 +2865,14 @@ library TokenRateLimit {
             }
             // Net outflow plus those charges, per token.
             uint256 n = (head >> 1) & 0xff;
+            bool nested = r != uint256(_DEPTH) + (1 << 64);
             for (uint256 at = r + 1; at < r + 1 + 3 * n; at += 3) {
                 address token = address(uint160(_tload(at)));
                 uint256 before = _tload(at + 1);
                 uint256 balance = IERC20(token).balanceOf(address(this));
                 uint256 charge = _tload(at + 2);
                 if (balance < before) charge = _add(charge, before - balance);
+                if (nested && balance < before) _lowerSnapshots((at - r - 1) / 3, before - balance);
                 if (charge != 0) {
                     _spend(t, token, charge);
                     _tstore(at + 2, 0);
@@ -2874,6 +2899,24 @@ library TokenRateLimit {
                 at = uint256(_DEPTH) + (depth << 64) + 2 + 3 * index;
             }
             _tstore(at, _add(_tload(at), amount));
+        }
+    }
+
+    /// @dev Lowers the snapshot balance of token `index` at every depth around the running one by
+    ///      `amount`, which the running program has charged, so they don't charge it again. Floors
+    ///      at zero, which can only charge the one around it more, never less. A region not yet snapshotted is overwritten when it is.
+    function _lowerSnapshots(uint256 index, uint256 amount) private {
+        uint256 depth;
+        assembly ("memory-safe") {
+            depth := tload(_DEPTH)
+        }
+        for (--depth; depth != 0; --depth) {
+            uint256 at;
+            unchecked {
+                at = uint256(_DEPTH) + (depth << 64) + 2 + 3 * index;
+            }
+            uint256 v = _tload(at);
+            _tstore(at, v > amount ? v - amount : 0);
         }
     }
 
@@ -3137,8 +3180,8 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
     ///      withdrawals then share the budget, so size `limit` for normal traffic. Measured by
     ///      balance, so every route out of the function counts, including callbacks. The call's
     ///      `msg.value` is in the balance before the function runs, so it doesn't offset what the
-    ///      function sends. A limited function that calls another, directly or through a callback, is
-    ///      charged for both windows: conservative, never under-counted. Reverts with
+    ///      function sends. Windows that nest, directly or through a callback, each charge their own
+    ///      outflow, and the window around one charges only what it sent beyond that. Reverts with
     ///      `OutgoingRateLimit.NativeOutflowRateLimitExceeded` (or
     ///      `TokenRateLimit.TokenRateLimitExceeded`) after the function, rolling it back. In the
     ///      token drop-in the function runs as a program does, so it can't set or clear token
@@ -3159,11 +3202,11 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
     ///      of the window, or pay out without a callback that can reach them (a pull pattern).
     ///      Charging gross outflow instead is tracked in #117.
     modifier limitsOutflow() {
-        uint256 ethBaseline = OutgoingRateLimit.beginNative();
+        (uint256 ethBaseline, uint256 ethCharged) = OutgoingRateLimit.beginNative();
         _beginTokenOutflow();
         _;
         _endTokenOutflow();
-        OutgoingRateLimit.endNative(_outgoingBucket(), ethBaseline);
+        OutgoingRateLimit.endNative(_outgoingBucket(), ethBaseline, ethCharged);
     }
 
     /// @dev For `GasKillerTokenRateLimit`, which opens and closes its token window here, inside
@@ -3231,8 +3274,8 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
     ///      withdrawals then share the budget, so size `limit` for normal traffic. Measured by
     ///      balance, so every route out of the function counts, including callbacks. The call's
     ///      `msg.value` is in the balance before the function runs, so it doesn't offset what the
-    ///      function sends. A limited function that calls another, directly or through a callback, is
-    ///      charged for both windows: conservative, never under-counted. Reverts with
+    ///      function sends. Windows that nest, directly or through a callback, each charge their own
+    ///      outflow, and the window around one charges only what it sent beyond that. Reverts with
     ///      `OutgoingRateLimit.NativeOutflowRateLimitExceeded` (or
     ///      `TokenRateLimit.TokenRateLimitExceeded`) after the function, rolling it back. In the
     ///      token drop-in the function runs as a program does, so it can't set or clear token
@@ -3253,11 +3296,11 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
     ///      of the window, or pay out without a callback that can reach them (a pull pattern).
     ///      Charging gross outflow instead is tracked in #117.
     modifier limitsOutflow() {
-        uint256 ethBaseline = OutgoingRateLimit.beginNative();
+        (uint256 ethBaseline, uint256 ethCharged) = OutgoingRateLimit.beginNative();
         _beginTokenOutflow();
         _;
         _endTokenOutflow();
-        OutgoingRateLimit.endNative(_outgoingBucket(), ethBaseline);
+        OutgoingRateLimit.endNative(_outgoingBucket(), ethBaseline, ethCharged);
     }
 
     /// @dev For `GasKillerTokenRateLimit`, which opens and closes its token window here, inside

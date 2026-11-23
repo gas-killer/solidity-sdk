@@ -95,7 +95,29 @@ contract NestingHarness is GasKillerSDK {
         TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
         token.transfer(to, 20);
         TokenRateLimit.endProgram(_tokenLimits()); // the inner program: 20
-        TokenRateLimit.endProgram(_tokenLimits()); // the outer one: 10 + 20
+        TokenRateLimit.endProgram(_tokenLimits()); // the outer one: 10, beyond the inner's 20
+    }
+
+    /// The outer program receives 20 (a mint stands in for any inflow), then the inner one sends 20.
+    function nestedAfterInflow(IERC20 token, address to) external {
+        TokenRateLimit.begin();
+        TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
+        MintableToken(address(token)).mint(address(this), 20);
+        TokenRateLimit.begin();
+        TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
+        token.transfer(to, 20);
+        TokenRateLimit.endProgram(_tokenLimits()); // the inner program: 20
+        TokenRateLimit.endProgram(_tokenLimits()); // the outer one: nothing more
+    }
+
+    /// The inner program starts before the outer one has run an op.
+    function nestedBeforeOuterOp(IERC20 token, address to) external {
+        TokenRateLimit.begin();
+        TokenRateLimit.begin();
+        TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
+        token.transfer(to, 20);
+        TokenRateLimit.endProgram(_tokenLimits()); // the inner program: 20
+        TokenRateLimit.endProgram(_tokenLimits()); // the outer one: nothing, never snapshotted
     }
 
     /// The outer program sends 50; the inner one pulls 50 in from `user` as a deposit.
@@ -531,13 +553,29 @@ contract TokenRateLimitTest is Test {
         v.verifyAndUpdateBatch(subs);
     }
 
-    /// A program nested in another on the same contract is charged on its own, and again as part
-    /// of the program around it.
-    function test_nestedProgramsKeepTheirOwnSnapshots() public {
+    /// A program nested in another on the same contract charges its own outflow; the one around it only
+    /// the rest.
+    function test_nestedProgramsAreChargedOnce() public {
         NestingHarness h = new NestingHarness(address(token));
         token.mint(address(h), 100);
         h.nested(token, ATTACKER);
-        assertEq(h.available(address(token)), 100 - 20 - 30);
+        assertEq(h.available(address(token)), 100 - 30);
+    }
+
+    /// An inflow to the outer program doesn't cover what the inner one sends.
+    function test_outerInflowDoesNotCoverAnInnerSend() public {
+        NestingHarness h = new NestingHarness(address(token));
+        token.mint(address(h), 100);
+        h.nestedAfterInflow(token, ATTACKER);
+        assertEq(h.available(address(token)), 100 - 20);
+    }
+
+    /// An inner program that starts before the outer one has run an op charges what it moves.
+    function test_innerProgramBeforeTheOuterOpIsCharged() public {
+        NestingHarness h = new NestingHarness(address(token));
+        token.mint(address(h), 100);
+        h.nestedBeforeOuterOp(token, ATTACKER);
+        assertEq(h.available(address(token)), 100 - 20);
     }
 
     /// A deposit in an inner program doesn't offset a send in the program around it either.

@@ -1922,10 +1922,10 @@ abstract contract GasKillerSDK is
 ///      deposit function should not let programs call untrusted contracts. Users' allowances on
 ///      unlisted tokens aren't guarded at all.
 ///
-///      The limit errs towards charging twice. An allowance left standing is charged when the
-///      program ends, and again through the balance when a later program has the spender pull
-///      it. A frame that re-enters this contract is charged for its outflow, and so is the
-///      frame around it.
+///      An allowance left standing is charged when the program ends, and again through the
+///      balance when a later program has the spender pull it. A program or window nested in
+///      another charges its own outflow, and lowers the snapshots around it by that much, so the
+///      one around it charges only what it moved beyond that.
 ///
 ///      A token is recognized by the address it is listed under. Don't list a token that can also
 ///      be reached through a second address sharing its balances and allowances (a legacy proxy
@@ -2204,12 +2204,14 @@ library TokenRateLimit {
             }
             // Net outflow plus those charges, per token.
             uint256 n = (head >> 1) & 0xff;
+            bool nested = r != uint256(_DEPTH) + (1 << 64);
             for (uint256 at = r + 1; at < r + 1 + 3 * n; at += 3) {
                 address token = address(uint160(_tload(at)));
                 uint256 before = _tload(at + 1);
                 uint256 balance = IERC20(token).balanceOf(address(this));
                 uint256 charge = _tload(at + 2);
                 if (balance < before) charge = _add(charge, before - balance);
+                if (nested && balance < before) _lowerSnapshots((at - r - 1) / 3, before - balance);
                 if (charge != 0) {
                     _spend(t, token, charge);
                     _tstore(at + 2, 0);
@@ -2236,6 +2238,24 @@ library TokenRateLimit {
                 at = uint256(_DEPTH) + (depth << 64) + 2 + 3 * index;
             }
             _tstore(at, _add(_tload(at), amount));
+        }
+    }
+
+    /// @dev Lowers the snapshot balance of token `index` at every depth around the running one by
+    ///      `amount`, which the running program has charged, so they don't charge it again. Floors
+    ///      at zero, which can only charge the one around it more, never less. A region not yet snapshotted is overwritten when it is.
+    function _lowerSnapshots(uint256 index, uint256 amount) private {
+        uint256 depth;
+        assembly ("memory-safe") {
+            depth := tload(_DEPTH)
+        }
+        for (--depth; depth != 0; --depth) {
+            uint256 at;
+            unchecked {
+                at = uint256(_DEPTH) + (depth << 64) + 2 + 3 * index;
+            }
+            uint256 v = _tload(at);
+            _tstore(at, v > amount ? v - amount : 0);
         }
     }
 

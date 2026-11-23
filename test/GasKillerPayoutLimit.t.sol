@@ -79,9 +79,55 @@ contract ForwardingVault is GasKillerOutgoingRateLimit {
         _payout(amount);
     }
 
+    /// A limited function calling another.
+    function payNested(uint256 amount) external limitsOutflow {
+        _payout(amount);
+    }
+
+    /// Takes ETH in from `source` during the window, then pays out through a nested one.
+    function refillThenPayNested(EthSource source, uint256 amount) external limitsOutflow {
+        source.drain();
+        _payout(amount);
+    }
+
     function _payout(uint256 amount) internal limitsOutflow {
         (bool ok,) = msg.sender.call{value: amount}("");
         require(ok, "send");
+    }
+}
+
+/// Takes a limited payout and, in its `receive`, settles a signed program on the vault.
+contract Settler {
+    ForwardingVault public immutable vault;
+    bytes32 hash;
+    bytes updates;
+    uint256 index;
+    bytes4 fn;
+    bool armed;
+
+    constructor(ForwardingVault v) {
+        vault = v;
+    }
+
+    function run(bytes32 h, bytes memory u, uint256 ti, bytes4 f, uint256 amount) external {
+        (hash, updates, index, fn, armed) = (h, u, ti, f, true);
+        vault.payNested(amount);
+    }
+
+    receive() external payable {
+        if (!armed) return;
+        armed = false;
+        vault.verifyAndUpdate(hash, uint32(block.number - 1), updates, index, fn, 1, address(1), new address[](0));
+    }
+}
+
+/// Sends its whole balance to whoever calls `drain`.
+contract EthSource {
+    receive() external payable {}
+
+    function drain() external {
+        (bool ok,) = msg.sender.call{value: address(this).balance}("");
+        require(ok, "drain");
     }
 }
 
@@ -99,6 +145,25 @@ contract TokenVault is GasKillerTokenRateLimit {
     function withdraw(uint256 amount) external limitsOutflow {
         balances[msg.sender] -= amount;
         require(token.transfer(msg.sender, amount), "transfer");
+    }
+
+    /// A limited function calling another.
+    function withdrawNested(uint256 amount) external limitsOutflow {
+        _send(msg.sender, amount);
+    }
+
+    /// For signed programs, through an allowed self-call.
+    function payTo(address to, uint256 amount) external {
+        require(msg.sender == address(this), "only self");
+        _send(to, amount);
+    }
+
+    function _send(address to, uint256 amount) internal limitsOutflow {
+        require(token.transfer(to, amount), "transfer");
+    }
+
+    function _allowSelfCall(bytes4 selector) internal pure override returns (bool) {
+        return selector == this.payTo.selector;
     }
 }
 
@@ -265,7 +330,84 @@ contract GasKillerPayoutLimitTest is Test {
         assertEq(available, 0.9 ether, "the payout is charged");
     }
 
+    /// The inner window charges the payout; the one around it charges only the rest.
+    function test_nestedWindowsChargeOnce() public {
+        ForwardingVault v = new ForwardingVault(address(registry));
+        vm.deal(address(v), 50 ether);
+        vm.prank(USER);
+        v.payNested(0.6 ether);
+        (uint256 available,,) = v.gasKillerOutgoingAllowance();
+        assertEq(available, 0.4 ether, "0.6 charged once");
+
+        vm.prank(USER);
+        vm.expectRevert(_ethExceeded(0.6 ether, 0.4 ether));
+        v.payNested(0.6 ether);
+    }
+
+    /// ETH the outer window takes in doesn't cover what a window inside it pays out.
+    function test_outerInflowDoesNotCoverAnInnerPayout() public {
+        ForwardingVault v = new ForwardingVault(address(registry));
+        vm.deal(address(v), 50 ether);
+        EthSource source = new EthSource();
+        vm.deal(address(source), 0.6 ether);
+        vm.prank(USER);
+        v.refillThenPayNested(source, 0.6 ether);
+        (uint256 available,,) = v.gasKillerOutgoingAllowance();
+        assertEq(available, 0.4 ether, "the inner payout is charged");
+    }
+
+    /// A signed program settled inside a window charges its ETH per op; the window around it
+    /// doesn't charge that again.
+    function test_programInsideAWindowIsChargedOnce() public {
+        ForwardingVault v = new ForwardingVault(address(registry));
+        vm.deal(address(v), 50 ether);
+        Settler s = new Settler(v);
+        StateUpdateType[] memory types = new StateUpdateType[](2);
+        bytes[] memory args = new bytes[](2);
+        uint256 ti = v.stateTransitionCount();
+        args[0] = abi.encode(TRACKER_SLOT, bytes32(ti + 1));
+        types[1] = StateUpdateType.CALL;
+        args[1] = abi.encode(ATTACKER, 0.3 ether, "");
+        bytes memory updates = abi.encode(types, args);
+        s.run(v.getMessageHash(ti, FN, updates), updates, ti, FN, 0.2 ether);
+        assertEq(ATTACKER.balance, 0.3 ether);
+        (uint256 available,,) = v.gasKillerOutgoingAllowance();
+        assertEq(available, 0.5 ether, "0.2 paid out and 0.3 sent, each charged once");
+    }
+
     // ---------------------------------------------------------------- tokens
+
+    function test_nestedTokenWindowsChargeOnce() public {
+        TokenVault v = new TokenVault(address(registry), IERC20(address(token)));
+        token.mint(address(v), 10_000);
+        vm.prank(USER);
+        v.withdrawNested(60);
+        (uint256 available,,) = v.gasKillerTokenAllowance(address(token));
+        assertEq(available, 40, "60 charged once");
+
+        vm.prank(USER);
+        vm.expectRevert(abi.encodeWithSelector(TokenRateLimit.TokenRateLimitExceeded.selector, address(token), 60, 40));
+        v.withdrawNested(60);
+    }
+
+    /// A limited function a signed program reaches through a self-call is charged once: its window
+    /// charges the payout, and the program only the rest.
+    function test_limitedSelfCallInAProgramChargesOnce() public {
+        TokenVault v = new TokenVault(address(registry), IERC20(address(token)));
+        token.mint(address(v), 10_000);
+        StateUpdateType[] memory types = new StateUpdateType[](2);
+        bytes[] memory args = new bytes[](2);
+        uint256 ti = v.stateTransitionCount();
+        args[0] = abi.encode(TRACKER_SLOT, bytes32(ti + 1));
+        types[1] = StateUpdateType.CALL;
+        args[1] = abi.encode(address(v), 0, abi.encodeCall(TokenVault.payTo, (ATTACKER, 60)));
+        bytes memory updates = abi.encode(types, args);
+        bytes32 h = v.getMessageHash(ti, FN, updates);
+        v.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
+        assertEq(token.balanceOf(ATTACKER), 60);
+        (uint256 available,,) = v.gasKillerTokenAllowance(address(token));
+        assertEq(available, 40, "60 charged once");
+    }
 
     function test_limitedTokenWithdrawOfACreditedBalanceIsCapped() public {
         TokenVault v = new TokenVault(address(registry), IERC20(address(token)));
