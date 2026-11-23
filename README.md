@@ -376,7 +376,9 @@ A signed `CALL` runs real code with your contract's authority, and protected sto
 With no policy, a program signed by a compromised quorum can transfer or approve the tokens your
 contract holds, and send its ETH through the value of a `CALL`, `CREATE`, `CREATE2` or `NESTED` op.
 Settlement rejects calls to your own contract by default and gives you hooks to restrict the rest.
-They all run before the op does, and a revert in any of them reverts the whole transition.
+They all run before the op does, and a revert in any of them reverts the whole transition. The read
+checks (`STATICCALL_CHECK` and the like) don't go through them: they can run code at any address,
+but can't change state.
 
 **What these limits cover, and what they don't.** The call policy and the rate limits below see only
 what a program's own ops do. A compromised quorum can also `STORE` into your contract's own state,
@@ -868,8 +870,9 @@ silently back a credit of the 100 the trace saw.
 
 - A `CALL`'s `resultHash` is `keccak256(abi.encodePacked(success, returndata))`. With zero the
   call must still succeed, but its return data isn't checked, for results that reach no write. A
-  call that sends no value and that the trace saw revert and catch is pinned as a failure: it may
-  revert at settlement, and the program goes on. Its policy hooks and rate limits still charge it
+  call that sends no value and that the trace saw revert with data and catch is pinned as a
+  failure: it may revert at settlement, and the program goes on. A failure without data can't be
+  pinned, as it can't be told from an out-of-gas the settler caused. Its policy hooks and rate limits still charge it
   as if it had gone through. A caught revert that depended on a gas cap can't be pinned, since
   settlement forwards all gas.
 - `CREATE`'s `expected` pins the deployed address, which moves with the contract's nonce; zero
@@ -877,7 +880,10 @@ silently back a credit of the 100 the trace saw.
 - The `*_CHECK` ops pin reads that changed no state: `STATICCALL` (with the same result hash),
   `BALANCE` and `SELFBALANCE`, `EXTCODEHASH` and `EXTCODESIZE`. They run no policy hooks, and
   the call allow-list doesn't cover them: they can't change state. In a batch, the contract's own
-  balance is checked less the value later items brought.
+  balance is checked less the value later items brought; each item is traced on top of the ones
+  before it, as the transition counter already requires.
+- Pinning makes settlement fail when what it pins moves, and some of it anyone can move: ETH can be
+  pushed to any account, even by `SELFDESTRUCT`. Pin only observations a write depends on.
 - Block values (`block.timestamp` and the like) can't be pinned, as settlement lands in a later
   block: a transition is defined as of its reference block, and carries the values the trace saw
   there. The reference block can be at most the staleness bound old.

@@ -198,6 +198,24 @@ contract ObservationPinningTest is Test {
         _settle(p, abi.encodeWithSelector(StateChangeHandlerLib.RevertingContext.selector, 1, address(pool), "", ""));
     }
 
+    /// A failure without data can't be pinned: it can't be told from an out-of-gas the settler
+    /// caused.
+    function test_emptyFailureCantBePinned() public {
+        Program memory p = _tracked(1);
+        _op(p, StateUpdateType.CALL, abi.encode(address(pool), uint256(0), hex"deadbeef", _hash(false, "")));
+        _settle(
+            p,
+            abi.encodeWithSelector(StateChangeHandlerLib.RevertingContext.selector, 1, address(pool), "", hex"deadbeef")
+        );
+
+        p = _tracked(1);
+        _op(p, StateUpdateType.STATICCALL_CHECK, abi.encode(address(pool), hex"deadbeef", _hash(false, "")));
+        _settle(
+            p,
+            abi.encodeWithSelector(StateChangeHandlerLib.RevertingContext.selector, 1, address(pool), "", hex"deadbeef")
+        );
+    }
+
     /// The layouts from before pinning are rejected, not misread.
     function test_oldLayoutsAreRejected() public {
         Program memory p = _tracked(1);
@@ -296,6 +314,17 @@ contract ObservationPinningTest is Test {
         p = _tracked(1);
         _op(p, StateUpdateType.CODEHASH_CHECK, abi.encode(empty, bytes32(0)));
         _settle(p, _mismatch(1, bytes32(0), keccak256(hex"00")));
+    }
+
+    /// A wei sent to an empty address turns its code hash from 0 into `keccak256("")`. It still
+    /// has no code, so the check passes.
+    function test_codehashCheckIgnoresAWeiSentToAnEmptyAddress() public {
+        address empty = address(0xE1);
+        vm.deal(empty, 1);
+        assertEq(empty.codehash, keccak256(""));
+        Program memory p = _tracked(1);
+        _op(p, StateUpdateType.CODEHASH_CHECK, abi.encode(empty, bytes32(0)));
+        _settle(p, "");
     }
 
     // ---------------------------------------------------------------- CREATE
