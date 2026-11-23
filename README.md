@@ -130,13 +130,24 @@ The chain id stops a signature from settling on another chain. Without it, a con
 the same address on two chains (a deterministic factory, or the same deployer nonce), behind
 registries that resolve the same operator keys and at the same transition count, would accept on
 one chain a payload the quorum signed for the other. SDK v0.1.0 and earlier hash the same fields
-without `block.chainid`. To tell which format a deployed consumer signs, call `getMessageHash` on
-it and compare the result with each encoding computed off-chain.
+without `block.chainid`. The `IGasKillerSDK` interface ID tells the two apart (see below).
 
-The `IGasKillerSDK` interface ID (`0x82b35a01`) is unchanged, so it can't tell a consumer that binds
-the value from one built on an older SDK, which accepts a value-bearing signature with any
+The settler doesn't pass the digest. `verifyAndUpdate` and each `TaskSubmission` carry only the
+signed fields, the contract rebuilds the digest from them, and the registry checks the signature
+against that. A payload that differs in any signed field fails with `InvalidQuorumSignature`.
+
+The `IGasKillerSDK` interface ID is the `verifyAndUpdate` selector, so it identifies the format:
+
+| `IGasKillerSDK` ID | `verifyAndUpdate` takes the digest | Digest binds the chain id |
+|---|---|---|
+| `0x57a9b002` (this release) | no | yes |
+| `0x82b35a01` (v0.1.0 and earlier) | yes, as its first argument | no |
+
+The ID didn't move when the digest started binding the value, so among `0x82b35a01` consumers it
+can't tell one that binds the value from one that accepts a value-bearing signature with any
 `msg.value`. Consumers that bind it also report `IGasKillerValueBound` (`0x0fd29ece`, the
-`getMessageHashWithValue` selector) through ERC-165. Check for it before sending a task with value.
+`getMessageHashWithValue` selector) through ERC-165. Every consumer that reports `0x57a9b002`
+binds the value and reports it too.
 
 This is what makes inbound value safe. A tracked function that credits `msg.value` (a deposit, a
 mint for ETH, a payable purchase) replays as plain `STORE` updates, so without the binding anyone
@@ -825,8 +836,8 @@ Operators then settle a transition through `verifyAndUpdate`, which requires tha
 
 - the reference block is below the current block and within `blockStaleMeasure` blocks of it,
 - `transitionIndex + 1` matches the current `stateTransitionCount`,
-- the recomputed message hash matches the one signed,
-- the aggregate signature verifies against the registry, and the signers hold at least the
+- the aggregate signature verifies, against the registry, over the digest the contract rebuilds
+  from the submitted fields, and the signers hold at least the
   registry's `thresholdNum / thresholdDen` share of its total weight.
 
 Each `STORE` the program carries must also leave protected storage unchanged: the SDK's own slots

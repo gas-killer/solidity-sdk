@@ -117,7 +117,7 @@ contract Settler {
     receive() external payable {
         if (!armed) return;
         armed = false;
-        vault.verifyAndUpdate(hash, uint32(block.number - 1), updates, index, fn, 1, address(1), new address[](0));
+        vault.verifyAndUpdate(uint32(block.number - 1), updates, index, fn, 1, address(1), new address[](0));
     }
 }
 
@@ -206,9 +206,8 @@ contract GasKillerPayoutLimitTest is Test {
             args[i++] = abi.encode(ATTACKER, sendValue, "", bytes32(0), type(uint256).max);
         }
         bytes memory updates = abi.encode(types, args);
-        bytes32 h = vault.getMessageHash(ti, FN, updates);
         if (revertData.length != 0) vm.expectRevert(revertData);
-        vault.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
+        vault.verifyAndUpdate(uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
     }
 
     function _ethExceeded(uint256 value, uint256 available) internal pure returns (bytes memory) {
@@ -316,8 +315,7 @@ contract GasKillerPayoutLimitTest is Test {
             type(uint256).max
         );
         bytes memory updates = abi.encode(types, args);
-        bytes32 h = v.getMessageHash(ti, FN, updates);
-        v.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
+        v.verifyAndUpdate(uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
         assertEq(ATTACKER.balance, 0.6 ether);
         (uint256 available,,) = v.gasKillerOutgoingAllowance();
         assertEq(available, 0.4 ether, "the payout is charged");
@@ -409,8 +407,7 @@ contract GasKillerPayoutLimitTest is Test {
         args[1] =
             abi.encode(address(v), 0, abi.encodeCall(TokenVault.payTo, (ATTACKER, 60)), bytes32(0), type(uint256).max);
         bytes memory updates = abi.encode(types, args);
-        bytes32 h = v.getMessageHash(ti, FN, updates);
-        v.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
+        v.verifyAndUpdate(uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
         assertEq(token.balanceOf(ATTACKER), 60);
         (uint256 available,,) = v.gasKillerTokenAllowance(address(token));
         assertEq(available, 40, "60 charged once");

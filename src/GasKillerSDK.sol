@@ -139,7 +139,6 @@ abstract contract GasKillerSDK is
     error FutureBlockNumber();
     error StaleBlockNumber();
     error InvalidTransitionIndex();
-    error InvalidSignature();
     error InvalidQuorumSignature();
     error EmptyBatch();
     error InsufficientBatchValue(uint256 sent, uint256 required);
@@ -163,7 +162,6 @@ abstract contract GasKillerSDK is
     ///      inside the signed `storageUpdates` and paid out of this contract's balance, which
     ///      includes `msg.value`; a shortfall reverts the whole transition (`RevertingContext` for
     ///      a CALL, `DeploymentFailed` for a CREATE/CREATE2).
-    /// @param msgHash             the task digest (recomputed and checked below).
     /// @param referenceBlockNumber block at which stake/keys are evaluated by the registry.
     /// @param storageUpdates      ABI-encoded `(StateUpdateType[], bytes[])`.
     /// @param transitionIndex     expected `stateTransitionCount() - 1`.
@@ -172,7 +170,6 @@ abstract contract GasKillerSDK is
     /// @param Raddr               aggregate nonce address `address(R)`.
     /// @param nonSigners          operators that did not sign, strictly ascending.
     function verifyAndUpdate(
-        bytes32 msgHash,
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
@@ -182,15 +179,7 @@ abstract contract GasKillerSDK is
         address[] calldata nonSigners
     ) external payable guardTransition {
         _verifyTransition(
-            msgHash,
-            referenceBlockNumber,
-            storageUpdates,
-            transitionIndex,
-            targetFunction,
-            msg.value,
-            s,
-            Raddr,
-            nonSigners
+            referenceBlockNumber, storageUpdates, transitionIndex, targetFunction, msg.value, s, Raddr, nonSigners
         );
         // Inline rather than a helper: a helper isn't inlined and costs ~22 gas per settlement.
         // Must match `_guardRanges`.
@@ -250,7 +239,6 @@ abstract contract GasKillerSDK is
             uint256 unattributed = msg.value > required ? msg.value - required : 0;
             StateChangeHandlerLib._setUnattributedValue(unattributed);
             _verifyTransition(
-                sub.msgHash,
                 sub.referenceBlockNumber,
                 sub.storageUpdates,
                 sub.transitionIndex,
@@ -278,7 +266,6 @@ abstract contract GasKillerSDK is
     ///      `guardTransition` latch and apply the program with `_stateChangeHandler` straight
     ///      after, which keeps the order the same as before: count, check, run.
     function _verifyTransition(
-        bytes32 msgHash,
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
@@ -292,19 +279,22 @@ abstract contract GasKillerSDK is
         require((uint256(referenceBlockNumber) + _getBlockStaleMeasure()) >= block.number, StaleBlockNumber());
 
         require(transitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
-        require(_digest(transitionIndex, targetFunction, storageUpdates, value) == msgHash, InvalidSignature());
 
-        _verifyQuorum(msgHash, s, Raddr, nonSigners, referenceBlockNumber);
+        // The digest is rebuilt from the submitted fields, never taken from the caller, so a
+        // payload that doesn't match what the quorum signed fails the signature check.
+        _verifyQuorum(
+            _digest(transitionIndex, targetFunction, storageUpdates, value), s, Raddr, nonSigners, referenceBlockNumber
+        );
     }
 
     function _verifyQuorum(
-        bytes32 msgHash,
+        bytes32 digest,
         uint256 s,
         address Raddr,
         address[] calldata nonSigners,
         uint32 referenceBlockNumber
     ) private view {
-        bool ok = _schnorrRegistry().isValidSignature(msgHash, s, Raddr, nonSigners, referenceBlockNumber);
+        bool ok = _schnorrRegistry().isValidSignature(digest, s, Raddr, nonSigners, referenceBlockNumber);
         require(ok, InvalidQuorumSignature());
     }
 

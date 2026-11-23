@@ -164,9 +164,8 @@ contract ObservationPinningTest is Test {
         }
         bytes memory updates = abi.encode(t, a);
         uint256 ti = c.stateTransitionCount();
-        bytes32 h = c.getMessageHash(ti, FN, updates);
         if (revertData.length != 0) vm.expectRevert(revertData);
-        c.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
+        c.verifyAndUpdate(uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
     }
 
     function _mismatch(uint256 index, bytes32 expected, bytes32 actual) internal pure returns (bytes memory) {
@@ -364,17 +363,7 @@ contract ObservationPinningTest is Test {
     function _settleWithGas(bytes memory updates, uint256 txGas) internal returns (bool ok, bytes memory ret) {
         uint256 ti = c.stateTransitionCount();
         bytes memory data = abi.encodeCall(
-            c.verifyAndUpdate,
-            (
-                c.getMessageHash(ti, FN, updates),
-                uint32(block.number - 1),
-                updates,
-                ti,
-                FN,
-                1,
-                address(1),
-                new address[](0)
-            )
+            c.verifyAndUpdate, (uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0))
         );
         (ok, ret) = address(c).call{gas: txGas}(data);
     }
@@ -477,17 +466,7 @@ contract ObservationPinningTest is Test {
             t[1] = StateUpdateType.BALANCE_CHECK;
             a[1] = abi.encode(address(c), (i + 1) * 1 ether);
             bytes memory updates = abi.encode(t, a);
-            subs[i] = TaskSubmission(
-                c.getMessageHashWithValue(i, FN, updates, 1 ether),
-                uint32(block.number - 1),
-                updates,
-                i,
-                FN,
-                1,
-                address(1),
-                new address[](0),
-                1 ether
-            );
+            subs[i] = TaskSubmission(uint32(block.number - 1), updates, i, FN, 1, address(1), new address[](0), 1 ether);
         }
         c.verifyAndUpdateBatch{value: 3 ether}(subs); // 1 ether of surplus, refunded
         assertEq(address(c).balance, 2 ether);
@@ -506,17 +485,7 @@ contract ObservationPinningTest is Test {
             }
             bytes memory updates = abi.encode(t, a);
             uint256 value = i == 0 ? 0 : 1 ether;
-            subs[i] = TaskSubmission(
-                c.getMessageHashWithValue(i, FN, updates, value),
-                uint32(block.number - 1),
-                updates,
-                i,
-                FN,
-                1,
-                address(1),
-                new address[](0),
-                value
-            );
+            subs[i] = TaskSubmission(uint32(block.number - 1), updates, i, FN, 1, address(1), new address[](0), value);
         }
         vm.expectRevert(StateChangeHandlerLib.UnattributedValueSpent.selector);
         c.verifyAndUpdateBatch{value: 1 ether}(subs);

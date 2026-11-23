@@ -109,11 +109,10 @@ contract SettlementGasTest is Test {
 
     function _settleGas(GasKillerSDK target, uint256 n) internal returns (uint256 used) {
         bytes memory updates = _updates(n);
-        bytes32 h = target.getMessageHash(0, FN, updates);
         address[] memory none = new address[](0);
         uint32 ref = uint32(block.number - 1);
         uint256 g = gasleft();
-        target.verifyAndUpdate(h, ref, updates, 0, FN, 1, address(1), none);
+        target.verifyAndUpdate(ref, updates, 0, FN, 1, address(1), none);
         used = g - gasleft();
     }
 
@@ -151,7 +150,6 @@ contract SettlementGasTest is Test {
             a[1] = abi.encode(bytes32(i + 1), bytes32(i + 1));
             bytes memory updates = abi.encode(t, a);
             subs[i] = TaskSubmission(
-                target.getMessageHash(i, FN, updates),
                 uint32(block.number - 1),
                 updates,
                 i,

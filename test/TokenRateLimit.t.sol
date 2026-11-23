@@ -265,9 +265,8 @@ contract TokenRateLimitTest is Test {
     function _settle(Program memory p, bytes memory revertData) internal {
         bytes memory updates = _encode(p);
         uint256 ti = v.stateTransitionCount();
-        bytes32 h = v.getMessageHash(ti, FN, updates);
         if (revertData.length != 0) vm.expectRevert(revertData);
-        v.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
+        v.verifyAndUpdate(uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
     }
 
     function _send(uint256 amount, bytes memory revertData) internal {
@@ -620,17 +619,7 @@ contract TokenRateLimitTest is Test {
             p.n = 1;
             _transfer(p, token, ATTACKER, 60);
             bytes memory updates = _encode(p);
-            subs[i] = TaskSubmission(
-                v.getMessageHash(i, FN, updates),
-                uint32(block.number - 1),
-                updates,
-                i,
-                FN,
-                1,
-                address(1),
-                new address[](0),
-                0
-            );
+            subs[i] = TaskSubmission(uint32(block.number - 1), updates, i, FN, 1, address(1), new address[](0), 0);
         }
         vm.expectRevert(_exceeded(60, 40));
         v.verifyAndUpdateBatch(subs);

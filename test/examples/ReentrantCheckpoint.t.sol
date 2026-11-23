@@ -64,18 +64,10 @@ contract ReentrantCheckpointTest is Test {
 
     /// The digest verifyAndUpdate reconstructs. Computed OUTSIDE any expectRevert so the
     /// sha256 precompile staticcall doesn't confuse the cheatcode.
-    function _digest(uint256 transitionIndex, bytes memory program) internal view returns (bytes32) {
-        return sha256(
-            abi.encode(
-                transitionIndex, block.chainid, address(checkpoint), ReentrantCheckpoint.advance.selector, program
-            )
-        );
-    }
 
     function _submit(uint256 transitionIndex, bytes memory program) internal {
         address[] memory none = new address[](0);
         checkpoint.verifyAndUpdate(
-            _digest(transitionIndex, program),
             uint32(block.number - 1),
             program,
             transitionIndex,
@@ -121,7 +113,6 @@ contract ReentrantCheckpointTest is Test {
         (types[0], args[0]) = _observeCall(1); // call FIRST — counter still 0
         (types[1], args[1]) = _store(SLOT_COUNTER, bytes32(uint256(1)));
         bytes memory program = abi.encode(types, args);
-        bytes32 h = _digest(0, program); // sha256 done before expectRevert
         address[] memory none = new address[](0);
 
         // The observe() call is program index 0; the re-entrant read sees counter=0 but
@@ -137,7 +128,7 @@ contract ReentrantCheckpointTest is Test {
             )
         );
         checkpoint.verifyAndUpdate(
-            h, uint32(block.number - 1), program, 0, ReentrantCheckpoint.advance.selector, 1, address(0x1234), none
+            uint32(block.number - 1), program, 0, ReentrantCheckpoint.advance.selector, 1, address(0x1234), none
         );
         assertEq(checkpoint.stateTransitionCount(), 0, "nothing settled");
         assertEq(observer.confirmations(), 0, "observer rejected the stale read");
@@ -153,7 +144,6 @@ contract ReentrantCheckpointTest is Test {
         (types[1], args[1]) = _store(SLOT_LAST_OBSERVED, bytes32(uint256(1))); // WRONG: too early
         (types[2], args[2]) = _observeCall(1);
         bytes memory program = abi.encode(types, args);
-        bytes32 h = _digest(0, program);
         address[] memory none = new address[](0);
 
         // The observe() call is program index 2; by then lastObserved already equals the
@@ -169,7 +159,7 @@ contract ReentrantCheckpointTest is Test {
             )
         );
         checkpoint.verifyAndUpdate(
-            h, uint32(block.number - 1), program, 0, ReentrantCheckpoint.advance.selector, 1, address(0x1234), none
+            uint32(block.number - 1), program, 0, ReentrantCheckpoint.advance.selector, 1, address(0x1234), none
         );
         assertEq(checkpoint.stateTransitionCount(), 0, "nothing settled");
     }
