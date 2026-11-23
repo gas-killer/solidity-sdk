@@ -212,7 +212,7 @@ contract GasKillerSDKHardeningTest is Test {
         types[1] = StateUpdateType.CALL;
         bytes[] memory args = new bytes[](2);
         args[0] = abi.encode(slot, val);
-        args[1] = abi.encode(callTarget, uint256(0), callData);
+        args[1] = abi.encode(callTarget, uint256(0), callData, bytes32(0));
         return abi.encode(types, args);
     }
 
@@ -222,7 +222,7 @@ contract GasKillerSDKHardeningTest is Test {
         StateUpdateType[] memory types = new StateUpdateType[](1);
         types[0] = StateUpdateType.CALL;
         bytes[] memory args = new bytes[](1);
-        args[0] = abi.encode(target, val, callData);
+        args[0] = abi.encode(target, val, callData, bytes32(0));
         return abi.encode(types, args);
     }
 
@@ -646,8 +646,9 @@ contract GasKillerSDKHardeningTest is Test {
         assertEq(sdk.stateTransitionCount(), 2);
     }
 
-    /// The pool is shared, so a shortfall on the *last* sub-transition still unwinds the
-    /// fully-funded earlier one — atomicity applies to value as much as to storage.
+    /// Submissions signed with no value can't draw on what the batch sent: the first one's
+    /// payout would spend ETH no item brought (`UnattributedValueSpent`), and the whole batch
+    /// unwinds, value as much as storage.
     function test_batch_underFundedRevertsAtomically() public {
         ValueSink sink = new ValueSink();
         uint256 a = 0.2 ether;
@@ -659,11 +660,7 @@ contract GasKillerSDKHardeningTest is Test {
         subs[0] = _submission(0, _callUpdate(address(sink), a, callData));
         subs[1] = _submission(1, _callUpdate(address(sink), b, callData));
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                StateChangeHandlerLib.RevertingContext.selector, 0, address(sink), bytes(""), callData
-            )
-        );
+        vm.expectRevert(StateChangeHandlerLib.UnattributedValueSpent.selector);
         sdk.verifyAndUpdateBatch{value: a + b - 1}(subs);
 
         assertEq(sink.received(), 0, "nothing applied");

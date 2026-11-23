@@ -137,7 +137,7 @@ contract GasKillerCallAllowListTest is Test {
     function _call(GasKillerSDK target, address to, uint256 value, bytes memory data, bytes memory revertData)
         internal
     {
-        _settle(target, StateUpdateType.CALL, abi.encode(to, value, data), revertData);
+        _settle(target, StateUpdateType.CALL, abi.encode(to, value, data, bytes32(0)), revertData);
     }
 
     function _notAllowed(address target, bytes4 selector) internal pure returns (bytes memory) {
@@ -218,7 +218,7 @@ contract GasKillerCallAllowListTest is Test {
     // ---------------------------------------------------------------- deployments and NESTED
 
     function test_deploymentsRejectedUnlessAllowed() public {
-        bytes memory create = abi.encode(uint256(0), hex"00");
+        bytes memory create = abi.encode(uint256(0), hex"00", address(0));
         _settle(
             _treasury(false),
             StateUpdateType.CREATE,

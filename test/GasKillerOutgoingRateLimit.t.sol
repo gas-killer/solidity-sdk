@@ -121,7 +121,7 @@ contract GasKillerOutgoingRateLimitTest is Test {
     }
 
     function _send(Program memory p, address to, uint256 value) internal pure {
-        _op(p, StateUpdateType.CALL, abi.encode(to, value, ""));
+        _op(p, StateUpdateType.CALL, abi.encode(to, value, "", bytes32(0)));
     }
 
     function _encode(Program memory p) internal pure returns (bytes memory) {
@@ -168,7 +168,7 @@ contract GasKillerOutgoingRateLimitTest is Test {
     function test_oneProgramCanSpendUpToTheLimit() public {
         Program memory p = _tracked(t, 3);
         _send(p, ATTACKER, 0.5 ether);
-        _op(p, StateUpdateType.CREATE, abi.encode(0.3 ether, hex"00"));
+        _op(p, StateUpdateType.CREATE, abi.encode(0.3 ether, hex"00", address(0)));
         _send(p, ATTACKER, 0.2 ether);
         _settle(t, p, "");
         assertEq(ATTACKER.balance, 0.7 ether);
@@ -189,7 +189,11 @@ contract GasKillerOutgoingRateLimitTest is Test {
     function test_allowedSelfCallValueDoesNotSpendTheBudget() public {
         uint256 before = _available(t);
         Program memory p = _tracked(t, 2);
-        _op(p, StateUpdateType.CALL, abi.encode(address(t), 5 ether, abi.encodeCall(RateLimitedTreasury.deposit, ())));
+        _op(
+            p,
+            StateUpdateType.CALL,
+            abi.encode(address(t), 5 ether, abi.encodeCall(RateLimitedTreasury.deposit, ()), bytes32(0))
+        );
         _send(p, ATTACKER, 1 ether);
         _settle(t, p, "");
         assertEq(t.deposits(), 5 ether);
@@ -274,7 +278,7 @@ contract GasKillerOutgoingRateLimitTest is Test {
     function test_zeroValueOpsSpendNothing() public {
         Program memory p = _tracked(t, 2);
         _send(p, ATTACKER, 0);
-        _op(p, StateUpdateType.CREATE, abi.encode(uint256(0), hex"00"));
+        _op(p, StateUpdateType.CREATE, abi.encode(uint256(0), hex"00", address(0)));
         _settle(t, p, "");
         assertEq(_available(t), 1 ether);
     }

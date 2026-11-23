@@ -145,7 +145,9 @@ contract GasKillerSDKSelfCallNestedTest is Test {
         StateUpdateType[] memory types = new StateUpdateType[](1);
         bytes[] memory args = new bytes[](1);
         types[0] = StateUpdateType.CALL;
-        args[0] = abi.encode(address(r), uint256(0), abi.encodeCall(LibraryRunner.setBeneficiary, (NEW_BENEFICIARY)));
+        args[0] = abi.encode(
+            address(r), uint256(0), abi.encodeCall(LibraryRunner.setBeneficiary, (NEW_BENEFICIARY)), bytes32(0)
+        );
 
         vm.expectRevert(
             abi.encodeWithSelector(StateChangeHandlerLib.SelfCall.selector, 0, LibraryRunner.setBeneficiary.selector)
@@ -167,7 +169,9 @@ contract GasKillerSDKSelfCallNestedTest is Test {
     }
 
     function _setBeneficiaryCall(NestedSelfCaller t) private pure returns (bytes memory) {
-        return abi.encode(address(t), uint256(0), abi.encodeCall(NestedSelfCaller.setBeneficiary, (NEW_BENEFICIARY)));
+        return abi.encode(
+            address(t), uint256(0), abi.encodeCall(NestedSelfCaller.setBeneficiary, (NEW_BENEFICIARY)), bytes32(0)
+        );
     }
 
     function _submission(NestedTreeBuilder.Frame[] memory frames) private returns (TreeSubmission memory) {

@@ -376,7 +376,9 @@ A signed `CALL` runs real code with your contract's authority, and protected sto
 With no policy, a program signed by a compromised quorum can transfer or approve the tokens your
 contract holds, and send its ETH through the value of a `CALL`, `CREATE`, `CREATE2` or `NESTED` op.
 Settlement rejects calls to your own contract by default and gives you hooks to restrict the rest.
-They all run before the op does, and a revert in any of them reverts the whole transition.
+They all run before the op does, and a revert in any of them reverts the whole transition. The read
+checks (`STATICCALL_CHECK` and the like) don't go through them: they can run code at any address,
+but can't change state.
 
 **What these limits cover, and what they don't.** The call policy and the rate limits below see only
 what a program's own ops do. A compromised quorum can also `STORE` into your contract's own state,
@@ -763,7 +765,7 @@ access (2,600) and its callee's work, so the share is smaller than against this 
   - `GasKillerNestedSDK.sol` — `GasKillerSDK` plus nested settlement; inherit this instead in a contract that roots or joins a tree
   - `SchnorrStakeRegistry.sol` — Aggregate-key registry with proof-of-possession registration and non-signer subtraction
   - `StateTracker.sol` — Tracks state transitions via an ERC-7201 storage slot
-  - `StateChangeHandlerLib.sol` — Executes batched `STORE`, `CALL`, `LOG`, `CREATE` and `NESTED` operations
+  - `StateChangeHandlerLib.sol` — Executes batched `STORE`, `CALL`, `LOG`, `CREATE`, `NESTED` and observation-check operations
   - `TransitionGuard.sol` — EIP-1153 reentrancy / in-transition latch, keyed by the active nested root
   - `interface/` — `IGasKillerSDK`, `IGasKillerSDKBatch`, `IGasKillerNested`, `ISchnorrStakeRegistry`, `ISchnorrApprovalRegistry`, and the Alloy-compatible `IStateUpdateTypes`
   - `libraries/` — `Secp256k1` (affine point math), `SchnorrVerify` (constant-gas `ecrecover`-trick verify), `NestedFrames` (nested-settlement leaves, tree membership and witnesses) `StorageGuard` (protected storage ranges for `STORE` updates) `OutgoingRateLimit` (token bucket over the ETH signed programs send) `TokenRateLimit` (per-token budgets over measured ERC-20 outflow) and `CallAllowList` (default-deny `(target, selector)` check for signed ops)
@@ -834,20 +836,58 @@ deliberately not repeated in this repo.
 ### State Update Types
 
 The `storageUpdates` payload is an ABI-encoded `(StateUpdateType[], bytes[])` pair. Each entry is one
-of the following, applied in order:
+of the following, applied in order.
+
+**EVM ops** (0–8) each replay one opcode the consumer executed in the trace:
 
 | Type | Effect | Encoded args |
 |------|--------|--------------|
-| `STORE` | Write to a storage slot | `(bytes32 slot, bytes32 value)` |
-| `CALL` | External call with optional ETH | `(address target, uint256 value, bytes calldata)` |
+| `STORE` | Write to a storage slot (`SSTORE`) | `(bytes32 slot, bytes32 value)` |
+| `CALL` | External call with optional ETH | `(address target, uint256 value, bytes calldata, bytes32 resultHash)` |
 | `LOG0`–`LOG4` | Emit a log with 0–4 topics | `(bytes data[, bytes32 topic1, ...])` |
-| `CREATE` | Deploy via `CREATE` | `(uint256 value, bytes initcode)` |
+| `CREATE` | Deploy via `CREATE` | `(uint256 value, bytes initcode, address expected)` |
 | `CREATE2` | Deploy via `CREATE2` | `(bytes32 salt, uint256 value, bytes initcode)` |
+
+**SDK ops** (9 and up) have no single opcode behind them: `NESTED` hands a callee its own signed
+frame, and the checks re-verify a read the trace made (see pinned observations below):
+
+| Type | Effect | Encoded args |
+|------|--------|--------------|
 | `NESTED` | Apply an SDK callee's own frame of a nested tree (tree settlement only) | `(address target, uint256 value, bytes32 childLeaf)` |
+| `STATICCALL_CHECK` | Re-run a read and check its result | `(address target, bytes data, bytes32 resultHash)` |
+| `BALANCE_CHECK` | Check an account's ETH balance | `(address account, uint256 balance)` |
+| `CODEHASH_CHECK` | Check an account's code hash | `(address account, bytes32 codehash)` |
 
 See [Settling with value](#settling-with-value) for how `CALL`,
 `CREATE`, `CREATE2` and `NESTED` are paid for. A `NESTED` op forwards its value out of the parent's
 balance, exactly as the native call would have.
+
+**Pinned observations.** The consumer's writes were computed against external state as of the
+trace, but its `CALL`s run against external state as of settlement. So a program pins what its
+contract observed from outside, at the position the trace observed it, and settlement reverts with
+`ObservationMismatch` if anything moved. Otherwise a swap that returns 95 at settlement would
+silently back a credit of the 100 the trace saw.
+
+- A `CALL`'s `resultHash` is `keccak256(abi.encodePacked(success, returndata))`. With zero the
+  call must still succeed, but its return data isn't checked, for results that reach no write. A
+  call that sends no value and that the trace saw revert with data and catch is pinned as a
+  failure: it may revert at settlement, and the program goes on. A failure without data can't be
+  pinned, as it can't be told from an out-of-gas the settler caused. Its policy hooks and rate limits still charge it
+  as if it had gone through. A caught revert that depended on a gas cap can't be pinned, since
+  settlement forwards all gas.
+- `CREATE`'s `expected` pins the deployed address, which moves with the contract's nonce; zero
+  leaves it unchecked. `CREATE2`'s address is fixed by its signed salt and initcode.
+- The `*_CHECK` ops pin reads that changed no state: `STATICCALL` (with the same result hash),
+  `BALANCE` and `SELFBALANCE`, `EXTCODEHASH` and `EXTCODESIZE`. They run no policy hooks, and
+  the call allow-list doesn't cover them: they can't change state. In a batch, the contract's own
+  balance is checked less the value later items brought, and no item may spend that value
+  (`UnattributedValueSpent`); each item is traced on top of the ones before it, as the transition
+  counter already requires.
+- Pinning makes settlement fail when what it pins moves, and some of it anyone can move: ETH can be
+  pushed to any account, even by `SELFDESTRUCT`. Pin only observations a write depends on.
+- Block values (`block.timestamp` and the like) can't be pinned, as settlement lands in a later
+  block: a transition is defined as of its reference block, and carries the values the trace saw
+  there. The reference block can be at most the staleness bound old.
 
 ## Development
 
