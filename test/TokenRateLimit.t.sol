@@ -20,6 +20,14 @@ contract Puller {
     }
 }
 
+/// Pulls tokens with an allowance it holds and pays as many back, in one call.
+contract RoundTrip {
+    function run(MintableToken token, address from, uint256 amount) external {
+        token.transferFrom(from, address(this), amount);
+        token.mint(from, amount);
+    }
+}
+
 /// A legacy-style token whose `decreaseAllowance` subtracts unchecked, so it can wrap.
 contract WrappingToken is MintableToken {
     function decreaseAllowance(address spender, uint256 subtracted) public override returns (bool) {
@@ -53,6 +61,29 @@ contract TokenVault is GasKillerTokenRateLimit {
     /// `mint` grants no allowance, so it is safe to allow; the inflow tests use it.
     function _allowTokenCall(address, bytes4 selector, bytes memory) internal pure override returns (bool) {
         return selector == MintableToken.mint.selector;
+    }
+}
+
+/// Consumer hooks that bring tokens in: after the program, or before each op from the second.
+contract RefillingVault is GasKillerTokenRateLimit {
+    MintableToken immutable token;
+    bool immutable afterProgram;
+
+    constructor(address registry, MintableToken token_, bool afterProgram_)
+        GasKillerTokenRateLimit(type(uint96).max, 1)
+    {
+        _setSchnorrRegistry(registry);
+        _setTokenRateLimit(address(token_), 100, 1 hours);
+        token = token_;
+        afterProgram = afterProgram_;
+    }
+
+    function _authorizeLimitedCall(uint256 index, StateUpdateType, address, uint256, bytes memory) internal override {
+        if (!afterProgram && index > 1) token.mint(address(this), 150);
+    }
+
+    function _afterLimitedProgram() internal override {
+        if (afterProgram) token.mint(address(this), 150);
     }
 }
 
@@ -108,6 +139,20 @@ contract NestingHarness is GasKillerSDK {
         token.transfer(to, 20);
         TokenRateLimit.endProgram(_tokenLimits()); // the inner program: 20
         TokenRateLimit.endProgram(_tokenLimits()); // the outer one: nothing more
+    }
+
+    /// In one outer op, the inner program receives 20 and sends it on, then the outer one sends 30.
+    function nestedReceiveThenSend(IERC20 token, address to) external {
+        TokenRateLimit.begin();
+        TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
+        TokenRateLimit.begin();
+        TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
+        MintableToken(address(token)).mint(address(this), 20);
+        TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
+        token.transfer(to, 20);
+        TokenRateLimit.endProgram(_tokenLimits()); // the inner program: 20
+        token.transfer(to, 30);
+        TokenRateLimit.endProgram(_tokenLimits()); // the outer one: 30, not hidden by the inner 20
     }
 
     /// The inner program starts before the outer one has run an op.
@@ -500,11 +545,49 @@ contract TokenRateLimitTest is Test {
         assertEq(_available(), 60);
     }
 
-    /// The charge is the net outflow: tokens received in the program offset tokens sent.
-    function test_inflowOffsetsOutflow() public {
+    /// Tokens one op receives don't offset what another op sends (#117): a borrow, or a
+    /// position unwound, then sent on is charged in full. A mint stands in for the receipt.
+    function test_inflowDoesNotOffsetALaterSend() public {
+        Program memory p = _tracked(2);
+        _call(p, address(token), abi.encodeCall(MintableToken.mint, (address(v), 150)));
+        _transfer(p, token, ATTACKER, 150);
+        _settle(p, _exceeded(150, 100));
+    }
+
+    /// Nor an earlier one.
+    function test_inflowDoesNotOffsetAnEarlierSend() public {
         Program memory p = _tracked(2);
         _transfer(p, token, ATTACKER, 150);
         _call(p, address(token), abi.encodeCall(MintableToken.mint, (address(v), 150)));
+        _settle(p, _exceeded(150, 100));
+    }
+
+    /// Tokens the after-program hook receives don't offset the program's sends.
+    function test_afterProgramHookReceiptDoesNotOffset() public {
+        v = TokenVault(address(new RefillingVault(address(registry), token, true)));
+        token.mint(address(v), 1000);
+        Program memory p = _tracked(1);
+        _transfer(p, token, ATTACKER, 150);
+        _settle(p, _exceeded(150, 100));
+    }
+
+    /// Nor do tokens `_authorizeLimitedCall` receives before a later op.
+    function test_authorizeHookReceiptDoesNotOffset() public {
+        v = TokenVault(address(new RefillingVault(address(registry), token, false)));
+        token.mint(address(v), 1000);
+        Program memory p = _tracked(2);
+        _transfer(p, token, ATTACKER, 150);
+        _transfer(p, token, ATTACKER, 0);
+        _settle(p, _exceeded(150, 100));
+    }
+
+    /// Within one op the change is net: a swap that pulls the token and pays it back in the
+    /// same `CALL` is charged nothing.
+    function test_receiptWithinTheSameOpOffsets() public {
+        RoundTrip router = new RoundTrip();
+        v.approveNatively(token, address(router), 150);
+        Program memory p = _tracked(1);
+        _call(p, address(router), abi.encodeCall(RoundTrip.run, (token, address(v), 150)));
         _settle(p, "");
         assertEq(_available(), 100);
     }
@@ -568,6 +651,14 @@ contract TokenRateLimitTest is Test {
         token.mint(address(h), 100);
         h.nestedAfterInflow(token, ATTACKER);
         assertEq(h.available(address(token)), 100 - 20);
+    }
+
+    /// What an inner program received and sent on doesn't hide a send of the outer one.
+    function test_innerReceiptDoesNotHideAnOuterSend() public {
+        NestingHarness h = new NestingHarness(address(token));
+        token.mint(address(h), 100);
+        h.nestedReceiveThenSend(token, ATTACKER);
+        assertEq(h.available(address(token)), 100 - 50);
     }
 
     /// An inner program that starts before the outer one has run an op charges what it moves.

@@ -2653,8 +2653,9 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
         bytes memory data
     ) internal virtual {}
 
-    /// @dev For `GasKillerTokenRateLimit`, which adds its own per-op step here. Runs after the ETH
-    ///      limit. Not meant for consumers: put policy in `_authorizeLimitedCall`.
+    /// @dev For `GasKillerTokenRateLimit`, which adds its own per-op step here. Runs before
+    ///      `_authorizeLimitedCall`, so the token reading isn't offset by tokens consumer code
+    ///      receives there. Not meant for consumers: put policy in `_authorizeLimitedCall`.
     function _rateLimitOp(uint256 index, StateUpdateType kind, address target, bytes memory data) internal virtual {}
 
     /// @notice Wrap each of this contract's own functions that can pay out ETH (or, in the token
@@ -2686,7 +2687,7 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
     ///      ERC-777 or ERC-1155 hook) can trigger such an inflow, a credited balance can leave
     ///      uncharged, covered by funds that belonged to others. Keep such inflows out of reach
     ///      of the window, or pay out without a callback that can reach them (a pull pattern).
-    ///      Charging gross outflow instead is tracked in #117.
+    ///      Signed programs are charged per op instead; a native function has no ops to split.
     modifier limitsOutflow() {
         (uint256 ethBaseline, uint256 ethCharged) = OutgoingRateLimit.beginNative();
         _beginTokenOutflow();
@@ -2709,9 +2710,9 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
         override
     {
         super._authorizeCall(index, kind, target, value, data);
+        _rateLimitOp(index, kind, target, data);
         _authorizeLimitedCall(index, kind, target, value, data);
         OutgoingRateLimit.spend(_outgoingBucket(), index, target, value);
-        _rateLimitOp(index, kind, target, data);
     }
 }
 
@@ -2780,7 +2781,7 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
     ///      ERC-777 or ERC-1155 hook) can trigger such an inflow, a credited balance can leave
     ///      uncharged, covered by funds that belonged to others. Keep such inflows out of reach
     ///      of the window, or pay out without a callback that can reach them (a pull pattern).
-    ///      Charging gross outflow instead is tracked in #117.
+    ///      Signed programs are charged per op instead; a native function has no ops to split.
     modifier limitsOutflow() {
         (uint256 ethBaseline, uint256 ethCharged) = OutgoingRateLimit.beginNative();
         _beginTokenOutflow();
@@ -2803,8 +2804,8 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
         override
     {
         super._authorizeCall(index, kind, target, value, data);
+        _rateLimitOp(index, kind, target, data);
         _authorizeLimitedCall(index, kind, target, value, data);
         OutgoingRateLimit.spend(_outgoingBucket(), index, target, value);
-        _rateLimitOp(index, kind, target, data);
     }
 }

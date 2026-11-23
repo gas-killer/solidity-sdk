@@ -549,24 +549,33 @@ contract Vault is GasKillerTokenRateLimit {
 
 Pass `type(uint96).max` as the ETH limit to leave ETH effectively unlimited.
 
-**What is charged: net outflow, measured.** A token can leave through `transfer`, through a
+**What is charged: each op's outflow, measured.** A token can leave through `transfer`, through a
 `transferFrom` by a contract holding an allowance (a router pulling during a signed `CALL`), or
 through whatever else the token implements, so the limit reads `balanceOf(this)` for every listed
-token right before the program's first op that runs code, and again when the program ends, and
-charges the decrease. Tokens the program receives offset tokens it sends, so a program could pull
-tokens in from users who approved your contract (`transferFrom(user, this, x)`) and send them on
-uncharged. So a deposit like that doesn't offset: the amount pulled in is added to the starting
-balance (a fee-on-transfer token's fee is charged), and a `transferFrom` between two others is
-rejected (see below). Other receipts still offset sends. A program can unwind a position you hold in
-a form you haven't listed (an aToken, an LP or staking token), or borrow against your collateral,
-and send the proceeds out uncharged. So can a deposit that isn't a signed op: a contract the
-program calls can call back into your own deposit function, get credited, and the tokens it brings
-in offset a send. List the tokens your positions are held in, reject calls to lending and debt
-markets (anything that can pay your contract out against a future obligation) in
-`_authorizeLimitedCall`, and if your contract takes deposits, don't let programs call untrusted
-contracts. A signed deposit is counted at its calldata amount, so a token that delivers less (a fee
-on transfer, a `false` return) is charged the difference, and one that reads `type(uint256).max` as
-"the whole balance" reverts the program. Users' allowances on unlisted tokens aren't guarded.
+token before each op that runs code and again when the program ends, and charges every decrease
+between two readings. Tokens one op receives never offset what another op sends: proceeds of a
+borrow, an unwound position or a deposit that land in your contract and are sent on are charged in
+full. Only your contract's balance of listed tokens is measured, though: one `CALL` that unwinds a
+position or borrows straight to another recipient moves nothing there. So list the tokens your
+positions are held in, and reject calls to lending and debt markets (anything that can pay out
+against your position or credit) in `_authorizeLimitedCall`.
+
+Within one op the change is net, including inside any `limitsOutflow` function the op reaches, so a swap that pulls a token and pays it back in the same `CALL`
+is charged nothing. That also means a called contract holding an allowance could pull tokens out
+and have a third party pay as much back in (a public `harvest()`, a vault withdrawal it was
+approved for) in that one `CALL`, and a recipient's callback (an ERC-777 hook) could call back into
+your own deposit function, getting credited for tokens that offset the send. Don't let programs
+hand allowances to untrusted contracts, on listed tokens or on unlisted position tokens, and if
+your contract takes deposits, don't let programs call untrusted contracts or send hooked tokens to
+them. A `transferFrom` into your contract is a deposit and
+offsets nothing even within its op; it is counted at its calldata amount, so a token that delivers
+less (a fee on transfer, a `false` return) is charged the difference, and one that reads
+`type(uint256).max` as "the whole balance" reverts the program. A `transferFrom` between two others
+is rejected (see below). Users' allowances on unlisted tokens aren't guarded.
+
+Each listed token costs a `balanceOf` read per op that runs code: about 1,200 to 1,500 gas for a
+plain ERC-20, several times that for a proxied or rebasing token;
+a program that runs no code reads no balances.
 
 A token is recognized by the address it is listed under: don't list a token that is also reachable
 through a second address sharing its balances (a legacy proxy or alias). Listing your contract
@@ -660,7 +669,8 @@ contract Vault is GasKillerTokenRateLimit {
   recipient gets a callback (ETH `receive`, ERC-777 or ERC-1155 hooks) and can trigger such an
   inflow from it, a credited balance can leave uncharged, covered by funds that belonged to others.
   Keep those inflows out of reach of limited functions and their callbacks, or pay out through a
-  pull pattern. Charging gross outflow instead is #117.
+  pull pattern. Signed programs are charged per op (see above); a native function has no ops to
+  split it at.
 - **Listed tokens must stay readable.** In the token drop-in every limited call reads `balanceOf`
   on every listed token. One whose `balanceOf` reverts (paused, broken by an upgrade) blocks every
   limited function, ETH-only payouts included, until it is cleared. Limits can't be set or cleared

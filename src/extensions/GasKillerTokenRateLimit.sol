@@ -94,6 +94,8 @@ abstract contract GasKillerTokenRateLimit is GasKillerOutgoingRateLimit {
     }
 
     function _afterProgram() internal override {
+        // Read first, so tokens the hook receives don't offset what the program sent.
+        TokenRateLimit.checkpoint(_tokenLimits());
         _afterLimitedProgram();
         TokenRateLimit.endProgram(_tokenLimits());
         super._afterProgram();
@@ -167,6 +169,8 @@ abstract contract GasKillerNestedTokenRateLimit is GasKillerNestedOutgoingRateLi
     }
 
     function _afterProgram() internal override {
+        // Read first, so tokens the hook receives don't offset what the program sent.
+        TokenRateLimit.checkpoint(_tokenLimits());
         _afterLimitedProgram();
         TokenRateLimit.endProgram(_tokenLimits());
         super._afterProgram();
