@@ -14,7 +14,7 @@ contract AcceptAll is ISchnorrStakeRegistry {
     }
 }
 
-/// A consumer declaring no ranges of its own; the SDK's five still apply.
+/// A consumer declaring no ranges of its own; the SDK's two still apply.
 contract RangedConsumer0 is GasKillerSDK {
     constructor(address registry) {
         _setSchnorrRegistry(registry);
@@ -53,7 +53,7 @@ contract UnguardedConsumer is RangedConsumer0 {
     }
 }
 
-/// @notice Whole-settlement gas through `verifyAndUpdate`: the SDK's five ranges plus k consumer
+/// @notice Whole-settlement gas through `verifyAndUpdate`: the SDK's two ranges plus k consumer
 ///         ranges, or opted out of the check, for a program of the counter copy plus n STOREs to
 ///         fresh slots, and for a 20-item batch. Each figure is one settlement, measured as a
 ///         delta around the call, so it includes the cold zero-to-nonzero writes (22,100 each).
@@ -69,7 +69,8 @@ contract UnguardedConsumer is RangedConsumer0 {
 ///         Protected: about 340 gas per STORE, about 500 per declared range per call (building
 ///         and merging the list; it is validated at deployment, not here), and about 1,400 fixed,
 ///         plus about 70 per transition for the counter's forward rule (added later, #116) and
-///         about 1,300 per call and 475 per transition for the EIP-1967 ranges (added later, #118).
+///         about 400 per call for detecting a proxy; behind one, the EIP-1967 ranges add about
+///         1,100 per call and 475 per transition (added later, #118).
 ///         Opted out: about 60 per STORE. `test_batch`: a 20-item batch builds the list once,
 ///         +34,750 (+5.3%) at k = 0, +46,963 (+7.2%) at k = 4 and +8,323 (+1.3%) opted out, over
 ///         653,659.

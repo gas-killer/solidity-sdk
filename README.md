@@ -237,10 +237,11 @@ function _protectedRanges() internal pure override returns (StorageGuard.Protect
 }
 ```
 
-> **Proxy slots are protected by default.** The SDK also protects the EIP-1967 implementation,
-> beacon and admin slots, so a signed `STORE` can't replace an upgradeable contract's code. Don't
-> list them yourself: the overlap fails deployment with `InvalidRanges`. A tracked function that
-> upgrades the contract can't be settled through Gas Killer.
+> **Proxy slots are protected automatically.** When the contract runs behind a proxy (its code
+> executing at an address other than the one it was deployed to), the SDK also protects the
+> EIP-1967 implementation, beacon and admin slots, so a signed `STORE` can't replace its code.
+> Don't list them yourself: the overlap fails deployment with `InvalidRanges`. A tracked function
+> that upgrades the contract can't be settled through Gas Killer.
 
 - `StorageGuard.FULL` protects every bit of every slot in the range. A narrower mask, on a single
   slot, protects part of a packed slot, such as an owner address that shares its slot with a counter.
@@ -286,7 +287,7 @@ slot, the transition counter, and the SDK's configuration, including the registr
 signatures. The hook is `pure`, so the choice is fixed in the contract's code at deployment. No
 signed program, owner or setter can switch it at runtime. It applies to single, batched and nested
 settlement, and an opted-out contract's `gasKillerProtectedRanges()` returns an empty list, so
-tooling can tell; a protected one always lists at least the SDK's five ranges. Nested settlement
+tooling can tell; a protected one always lists at least the SDK's two ranges, five behind a proxy. Nested settlement
 checks each frame against its own contract, so one opted-out contract in a tree doesn't weaken the
 others.
 
@@ -302,8 +303,9 @@ for a consumer declaring k ranges, or opted out.
 
 Protected, that is about 340 gas per `STORE` (the counter copy included), about 500 per declared
 range per settlement call (building and merging the list), and about 1,400 fixed, plus about 70 per
-transition for the counter's forward rule and about 1,300 per call and 475 per transition for
-the EIP-1967 ranges (both measured after these figures). Opted out, about
+transition for the counter's forward rule and about 400 per call for detecting a proxy; behind
+one, the EIP-1967 ranges add about 1,100 per call and 475 per transition (all measured after
+these figures). Opted out, about
 60 per `STORE` remains, the cost of skipping the check. A `verifyAndUpdateBatch` builds the list
 once for all of its items. A 20-item batch of single-`STORE` transitions, over 653,659 before,
 costs +34,750 (+5.3%) at k = 0, +46,963 (+7.2%) at k = 4, and +8,323 (+1.3%) opted out.
