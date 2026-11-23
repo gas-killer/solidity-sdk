@@ -834,15 +834,23 @@ deliberately not repeated in this repo.
 ### State Update Types
 
 The `storageUpdates` payload is an ABI-encoded `(StateUpdateType[], bytes[])` pair. Each entry is one
-of the following, applied in order:
+of the following, applied in order.
+
+**EVM ops** (0–8) each replay one opcode the consumer executed in the trace:
 
 | Type | Effect | Encoded args |
 |------|--------|--------------|
-| `STORE` | Write to a storage slot | `(bytes32 slot, bytes32 value)` |
+| `STORE` | Write to a storage slot (`SSTORE`) | `(bytes32 slot, bytes32 value)` |
 | `CALL` | External call with optional ETH | `(address target, uint256 value, bytes calldata, bytes32 resultHash)` |
 | `LOG0`–`LOG4` | Emit a log with 0–4 topics | `(bytes data[, bytes32 topic1, ...])` |
 | `CREATE` | Deploy via `CREATE` | `(uint256 value, bytes initcode, address expected)` |
 | `CREATE2` | Deploy via `CREATE2` | `(bytes32 salt, uint256 value, bytes initcode)` |
+
+**SDK ops** (9 and up) have no single opcode behind them: `NESTED` hands a callee its own signed
+frame, and the checks re-verify a read the trace made (see pinned observations below):
+
+| Type | Effect | Encoded args |
+|------|--------|--------------|
 | `NESTED` | Apply an SDK callee's own frame of a nested tree (tree settlement only) | `(address target, uint256 value, bytes32 childLeaf)` |
 | `STATICCALL_CHECK` | Re-run a read and check its result | `(address target, bytes data, bytes32 resultHash)` |
 | `BALANCE_CHECK` | Check an account's ETH balance | `(address account, uint256 balance)` |
