@@ -205,7 +205,7 @@ contract GasKillerSDKNestedTest is Test {
     }
 
     /// The root leaf binds the root's `msg.value` like the single-transition digest does, so a
-    /// tree signed for a deposit cannot settle without it (gas-killer/solidity-sdk#104).
+    /// tree signed for a deposit cannot settle without it.
     function test_rootSettledWithAnotherValueFailsItsLeaf() public {
         NestedTreeBuilder.Frame[] memory frames = new NestedTreeBuilder.Frame[](1);
         frames[0] = _frame(address(a), address(0), 0, 1 ether, _ops1(_store(SLOT_X, 9)));

@@ -142,7 +142,7 @@ contract RateLimitedCaller is GasKillerOutgoingRateLimit {
 ///         `_maxOutgoingValue` and `_allowSelfCall` not overridden) and with the small one above.
 ///
 ///         Reference measurements (forge 1.5.1, solc 0.8.33, cancun). "Before" is the same
-///         settlement before the call policy (#108's tree, 0944508):
+///         settlement before the call policy (0944508):
 ///
 ///           m   | before | default policy  | small policy
 ///           1   | 33,576 | +446 (+1.3%)    | +488 (+1.5%)
@@ -177,7 +177,7 @@ contract RateLimitedCaller is GasKillerOutgoingRateLimit {
 ///           32  | 229,014   | +31,408 (+13.7%) | +84,530 (+36.9%) | +199,970 (+87.3%)
 ///
 ///         Each listed token costs a `balanceOf` read per op that runs code (about 1,200 to 1,500
-///         gas, #117), one more at the end and a budget read and write; a program that runs no
+///         gas), one more at the end and a budget read and write; a program that runs no
 ///         code reads no balances.
 ///
 ///         `test_selfCalls`: the counter copy plus m allowed CALLs to the consumer's own `ping()`,

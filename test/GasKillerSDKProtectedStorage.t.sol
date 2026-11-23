@@ -661,7 +661,7 @@ contract GasKillerSDKProtectedStorageTest is Test {
         assertEq(v.hits(), 1);
     }
 
-    // ---------------------------------------------------------------- nested trackState (#116)
+    // ---------------------------------------------------------------- nested trackState
 
     /// @dev `depositAndStake()` as gas-analyzer emits it. The canonical extraction writes each
     ///      slot's final value once; the journal-order one replays every SSTORE, so the counter

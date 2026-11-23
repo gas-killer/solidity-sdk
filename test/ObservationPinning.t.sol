@@ -77,7 +77,7 @@ contract LockedConsumer is Consumer {
     }
 }
 
-/// @notice Observation pinning (#101): a program's view of external state is checked at settlement.
+/// @notice Observation pinning: a program's view of external state is checked at settlement.
 contract ObservationPinningTest is Test {
     receive() external payable {}
 
@@ -262,7 +262,7 @@ contract ObservationPinningTest is Test {
         _settle(p, abi.encodeWithSelector(StateChangeHandlerLib.MalformedOp.selector, 1));
     }
 
-    // ---------------------------------------------------------------- gas limit (#11)
+    // ---------------------------------------------------------------- gas limit
 
     function _gasArrived(Program memory p) internal returns (uint256) {
         vm.recordLogs();

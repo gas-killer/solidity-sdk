@@ -17,7 +17,7 @@ import {ISchnorrApprovalRegistry, QuorumSignature} from "./interface/ISchnorrApp
 ///         `X_agg = X_all − Σ non-signers` in constant gas.
 ///
 /// @dev Mirrors the "aggressive snapshot" registry-cache design from the ECDSA gas-opt
-///      work (service #311): a `_effectiveBlock` watermark records the last operator-set
+///      work: a `_effectiveBlock` watermark records the last operator-set
 ///      mutation, and verification is **fail-closed** — it requires
 ///      `refBlock >= _effectiveBlock` so the cached aggregate/weights are guaranteed equal
 ///      to their historical values at `refBlock`. Plain (linear) key aggregation is safe

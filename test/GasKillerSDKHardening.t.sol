@@ -743,7 +743,7 @@ contract GasKillerSDKHardeningTest is Test {
     // ---- inbound value -------------------------------------------------------------
 
     /// A deposit replays as a plain STORE crediting the signed amount. The digest binds the
-    /// value, so it settles only with exactly that ETH (gas-killer/solidity-sdk#104).
+    /// value, so it settles only with exactly that ETH.
     function test_verifyAndUpdate_bindsInboundValue() public {
         uint256 deposit = 1 ether;
         vm.deal(address(this), 2 * deposit);
@@ -785,7 +785,7 @@ contract GasKillerSDKHardeningTest is Test {
         );
     }
 
-    /// #112: a consumer at the same address on another chain, behind a registry with the same
+    /// A consumer at the same address on another chain, behind a registry with the same
     /// keys and at the same transition count, must not accept a signature made for this chain.
     function test_digestBindsChainId() public {
         bytes memory updates = _storeUpdate(bytes32(0), bytes32(uint256(7)));
@@ -883,7 +883,7 @@ contract GasKillerSDKHardeningTest is Test {
         // signature, so `payable` leaves it untouched.
         assertEq(type(IGasKillerSDK).interfaceId, bytes4(0x82b35a01), "core id must not drift");
         // The batch ID is the `verifyAndUpdateBatch` selector, which covers the `TaskSubmission`
-        // tuple. It moved from 0x2ea5ee1d when submissions gained `value` (#104): batch callers
+        // tuple. It moved from 0x2ea5ee1d when submissions gained `value`: batch callers
         // and probes built for the old struct do not match contracts built from this SDK. Move
         // it again only as a deliberate, announced break.
         assertEq(type(IGasKillerSDKBatch).interfaceId, bytes4(0xce8e6efc), "batch id must not drift");
