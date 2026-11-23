@@ -1944,8 +1944,11 @@ abstract contract GasKillerSDK is
 ///
 ///      Within one op, receipts still offset sends: a called contract holding an allowance can
 ///      pull tokens out and have a third party pay as much in (a public `harvest()`, a vault
-///      withdrawal it was approved for) in the same `CALL`. So don't let programs hand
-///      allowances to untrusted contracts, on listed tokens or on unlisted position tokens. A
+///      withdrawal it was approved for) in the same `CALL`, and a recipient's callback (an
+///      ERC-777 hook) can call back into this contract's own deposit function, getting credited
+///      for tokens that offset the send. So don't let programs hand allowances to untrusted
+///      contracts, on listed tokens or on unlisted position tokens, and if the contract takes
+///      deposits, don't let programs call untrusted contracts or send hooked tokens to them. A
 ///      `transferFrom` into this contract is a deposit and offsets nothing even within an op
 ///      (see `beforeOp`); one between two others is flagged. Users' allowances on unlisted
 ///      tokens aren't guarded at all. A native window (`snapshot`) has no ops, so it charges its
@@ -1969,8 +1972,8 @@ abstract contract GasKillerSDK is
 ///      `limitsOutflow`): without one, a balance a program credits with a `STORE` and the
 ///      contract later pays out isn't charged.
 library TokenRateLimit {
-    /// @notice A program's net outflow of `token`, with allowances it left standing, exceeds the
-    ///         token's budget.
+    /// @notice A program's outflow of `token` (the decreases over each op, or a window's net
+    ///         decrease), with allowances it left standing, exceeds the token's budget.
     error TokenRateLimitExceeded(address token, uint256 amount, uint256 available);
 
     /// @notice A token with no code, this contract itself, a limit above `type(uint128).max`, or
@@ -2007,8 +2010,9 @@ library TokenRateLimit {
     ///      has a region at `_DEPTH + (depth << 64)`:
     ///      - word 0, the head: bit 0 set once the snapshot is taken, bits 1-8 the number of
     ///        tokens in it, bits 16 and up the number of approvals recorded;
-    ///      - three words per snapshotted token i, from word `1 + 3i`: the token, its balance at
-    ///        the last reading, and what is charged to it so far;
+    ///      - four words per snapshotted token i, from word `1 + 4i`: the token, its balance at
+    ///        the last reading, what is charged to it so far, and its balance at the snapshot;
+    ///        deposits and inner programs move the first and last together;
     ///      - three words per approved (token, spender) pair j, from word `_APPROVALS + 3j`: the
     ///        token's index in the snapshot, the spender, and the lowest allowance the spender had
     ///        right before any of its approvals.
@@ -2019,7 +2023,7 @@ library TokenRateLimit {
     ///      `_DEPTH` is keccak256("gaskiller.TokenRateLimit.depth"), written out for assembly.
     bytes32 private constant _DEPTH = 0x4df36f89fc12c0e682f8b2d99add7fca126f9125095d9173ca32d3ee48882030;
 
-    uint256 private constant _APPROVALS = 1 + 3 * MAX_TOKENS;
+    uint256 private constant _APPROVALS = 1 + 4 * MAX_TOKENS;
 
     // ------------------------------------------------------------------ configuration
 
@@ -2030,9 +2034,10 @@ library TokenRateLimit {
     /// @dev **Do not call from a `trackState` function**: the budgets are protected storage, so a
     ///      program carrying the write can never settle. Reverts while a program is running
     ///      (`TokenRateLimitChangedMidProgram`), so a callback can't change the list under it.
-    ///      Every program that runs code reads each listed token's `balanceOf`, so a token whose
-    ///      `balanceOf` can revert (paused, upgraded, self-destructed) blocks all settlement
-    ///      until it is cleared. Call it from a constructor, an
+    ///      Every op that runs code reads each listed token's `balanceOf` (about 1,200 to 1,500
+    ///      gas per token per op, so size programs' gas for it), and a token whose `balanceOf`
+    ///      can revert (paused, upgraded, self-destructed) blocks all settlement until it is
+    ///      cleared. Call it from a constructor, an
     ///      initializer or an admin function that is not `trackState`.
     function set(GasKillerSDK.TokenLimits storage t, address token, uint256 limit, uint256 period) internal {
         require(
@@ -2141,7 +2146,7 @@ library TokenRateLimit {
         if (data.length >= 4 && selector == _TRANSFER) return false;
         uint256 n = (head >> 1) & 0xff;
         uint256 index;
-        while (index < n && _tload(r + 1 + 3 * index) != uint160(target)) ++index;
+        while (index < n && _tload(r + 1 + 4 * index) != uint160(target)) ++index;
         if (index == n) return false;
         if (data.length < 0x44) return true;
         // The first argument: `transferFrom`'s owner, or the spender of an allowance call.
@@ -2209,8 +2214,10 @@ library TokenRateLimit {
         uint256 count = t.count;
         for (uint256 i = 0; i < count; ++i) {
             address token = t.buckets[i].token;
-            _tstore(r + 1 + 3 * i, uint160(token));
-            _tstore(r + 2 + 3 * i, IERC20(token).balanceOf(address(this)));
+            uint256 held = IERC20(token).balanceOf(address(this));
+            _tstore(r + 1 + 4 * i, uint160(token));
+            _tstore(r + 2 + 4 * i, held);
+            _tstore(r + 4 + 4 * i, held);
         }
         head = 1 | (count << 1);
         _tstore(r, head);
@@ -2226,8 +2233,8 @@ library TokenRateLimit {
             let ptr := mload(0x40)
             mstore(ptr, shl(224, 0x70a08231)) // balanceOf(address)
             mstore(add(ptr, 4), address())
-            let end := add(r, add(1, mul(3, n)))
-            for { let at := add(r, 1) } lt(at, end) { at := add(at, 3) } {
+            let end := add(r, add(1, mul(4, n)))
+            for { let at := add(r, 1) } lt(at, end) { at := add(at, 4) } {
                 if iszero(staticcall(gas(), tload(at), ptr, 0x24, 0x00, 0x20)) {
                     returndatacopy(ptr, 0, returndatasize())
                     revert(ptr, returndatasize())
@@ -2257,24 +2264,26 @@ library TokenRateLimit {
         if (head > 1) {
             uint256 n = (head >> 1) & 0xff;
             _measure(r, n);
-            // What this program moved out is charged here, so the programs around it don't
-            // charge it again.
+            // The programs around this one don't charge its net decrease again. Net, not what it
+            // is charged: tokens it received and sent on are charged here, and must not hide a
+            // send of the program around it in the same op.
             if (r != uint256(_DEPTH) + (1 << 64)) {
-                for (uint256 i = 0; i < n; ++i) {
-                    uint256 moved = _tload(r + 3 + 3 * i);
-                    if (moved != 0) _lowerSnapshots(i, moved);
+                for (uint256 at = r + 1; at < r + 1 + 4 * n; at += 4) {
+                    uint256 first = _tload(at + 3);
+                    uint256 held = _tload(at + 1);
+                    if (held < first) _lowerSnapshots((at - r - 1) / 4, first - held);
                 }
             }
             // Allowances left above where they were, charged to their token's charge word.
             uint256 end = r + _APPROVALS + 3 * (head >> 16);
             for (uint256 slot = r + _APPROVALS; slot < end; slot += 3) {
-                uint256 at = r + 1 + 3 * _tload(slot);
+                uint256 at = r + 1 + 4 * _tload(slot);
                 address spender = address(uint160(_tload(slot + 1)));
                 uint256 left = IERC20(address(uint160(_tload(at)))).allowance(address(this), spender);
                 uint256 prior = _tload(slot + 2);
                 if (left > prior) _tstore(at + 2, _add(_tload(at + 2), left - prior));
             }
-            for (uint256 at = r + 1; at < r + 1 + 3 * n; at += 3) {
+            for (uint256 at = r + 1; at < r + 1 + 4 * n; at += 4) {
                 uint256 charge = _tload(at + 2);
                 if (charge != 0) {
                     _spend(t, address(uint160(_tload(at))), charge);
@@ -2288,8 +2297,8 @@ library TokenRateLimit {
         }
     }
 
-    /// @dev Adds `amount` to the snapshot balance of token `index` at the running depth and at
-    ///      every depth around it. Each has taken its snapshot (the op that started the inner
+    /// @dev Adds `amount` to the first and last readings of token `index` at the running depth
+    ///      and at every depth around it. Each has taken its snapshot (the op that started the inner
     ///      program ran code) and lists the same tokens, as the budgets can't change mid-program.
     function _raiseSnapshots(uint256 index, uint256 amount) private {
         uint256 depth;
@@ -2299,15 +2308,17 @@ library TokenRateLimit {
         for (; depth != 0; --depth) {
             uint256 at;
             unchecked {
-                at = uint256(_DEPTH) + (depth << 64) + 2 + 3 * index;
+                at = uint256(_DEPTH) + (depth << 64) + 2 + 4 * index;
             }
             _tstore(at, _add(_tload(at), amount));
+            _tstore(at + 2, _add(_tload(at + 2), amount));
         }
     }
 
-    /// @dev Lowers the snapshot balance of token `index` at every depth around the running one by
-    ///      `amount`, which the running program has charged, so they don't charge it again. Floors
-    ///      at zero, which can only charge the one around it more, never less. A region not yet snapshotted is overwritten when it is.
+    /// @dev Lowers the first and last readings of token `index` at every depth around the running
+    ///      one by `amount`, the running program's net decrease, so they don't charge it again.
+    ///      Floors at zero, which can only charge them more, never less. A region not yet
+    ///      snapshotted is overwritten when it is.
     function _lowerSnapshots(uint256 index, uint256 amount) private {
         uint256 depth;
         assembly ("memory-safe") {
@@ -2316,10 +2327,12 @@ library TokenRateLimit {
         for (--depth; depth != 0; --depth) {
             uint256 at;
             unchecked {
-                at = uint256(_DEPTH) + (depth << 64) + 2 + 3 * index;
+                at = uint256(_DEPTH) + (depth << 64) + 2 + 4 * index;
             }
             uint256 v = _tload(at);
             _tstore(at, v > amount ? v - amount : 0);
+            v = _tload(at + 2);
+            _tstore(at + 2, v > amount ? v - amount : 0);
         }
     }
 
