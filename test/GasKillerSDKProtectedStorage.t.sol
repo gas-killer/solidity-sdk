@@ -154,7 +154,7 @@ contract Poker {
 }
 
 /// Re-declares the transition counter, which the SDK already protects.
-/// Lists the EIP-1967 proxy slots as the README shows.
+/// Lists the EIP-1967 proxy slots, which the SDK already protects.
 contract ProxySlotConsumer is GasKillerSDK {
     bytes32 constant IMPLEMENTATION = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
     bytes32 constant BEACON = 0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50;
@@ -170,6 +170,18 @@ contract ProxySlotConsumer is GasKillerSDK {
         r[0] = StorageGuard.ProtectedRange(uint256(IMPLEMENTATION), uint256(IMPLEMENTATION), StorageGuard.FULL);
         r[1] = StorageGuard.ProtectedRange(uint256(BEACON), uint256(BEACON), StorageGuard.FULL);
         r[2] = StorageGuard.ProtectedRange(uint256(ADMIN), uint256(ADMIN), StorageGuard.FULL);
+    }
+}
+
+/// Ranges between and around every SDK range, to exercise each step of the merge.
+contract InterleavedConsumer is GasKillerSDK {
+    function _protectedRanges() internal pure override returns (StorageGuard.ProtectedRange[] memory r) {
+        r = new StorageGuard.ProtectedRange[](5);
+        r[0] = StorageGuard.ProtectedRange(0, 0, StorageGuard.FULL); // below the config namespace
+        r[1] = StorageGuard.ProtectedRange(2 << 252, 2 << 252, StorageGuard.FULL); // config < r < implementation
+        r[2] = StorageGuard.ProtectedRange(5 << 252, 6 << 252, StorageGuard.FULL); // implementation < r < beacon
+        r[3] = StorageGuard.ProtectedRange(0xc << 252, 0xc << 252, StorageGuard.FULL); // admin < r < counter
+        r[4] = StorageGuard.ProtectedRange(0xf << 252, type(uint256).max, StorageGuard.FULL); // above the counter
     }
 }
 
@@ -392,7 +404,7 @@ contract GasKillerSDKProtectedStorageTest is Test {
     function test_consumerWithNoRangesStillGetsSdkProtection() public {
         PlainConsumer plain = new PlainConsumer(address(registry));
         StorageGuard.ProtectedRange[] memory rs = plain.gasKillerProtectedRanges();
-        assertEq(rs.length, 2);
+        assertEq(rs.length, 5);
 
         Program memory p = _tracked(plain, 1);
         _store(p, bytes32(uint256(SDK_STORAGE) + 1), bytes32(uint256(uint160(ATTACKER))));
@@ -426,11 +438,10 @@ contract GasKillerSDKProtectedStorageTest is Test {
 
     // ---------------------------------------------------------------- the consumer's slots
 
-    /// The README's EIP-1967 list deploys alongside the SDK's ranges and rejects a signed
-    /// upgrade through each slot.
-    function test_proxySlotListFromTheReadmeProtects() public {
-        ProxySlotConsumer c = new ProxySlotConsumer(address(registry));
-        assertEq(c.gasKillerProtectedRanges().length, 5);
+    /// The EIP-1967 slots are protected without the consumer listing them: a signed upgrade
+    /// through each is rejected. Listing them too overlaps the SDK's ranges and fails deployment.
+    function test_proxySlotsAreProtectedByDefault() public {
+        PlainConsumer c = new PlainConsumer(address(registry));
         bytes32[3] memory slots = [
             bytes32(0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc),
             0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50,
@@ -441,6 +452,8 @@ contract GasKillerSDKProtectedStorageTest is Test {
             _store(p, slots[i], bytes32(uint256(uint160(ATTACKER))));
             _settle(c, p, _rejection(1, slots[i]));
         }
+        vm.expectRevert(StorageGuard.InvalidRanges.selector);
+        new ProxySlotConsumer(address(registry));
     }
 
     function test_ownerRewriteRejected() public {
@@ -475,14 +488,43 @@ contract GasKillerSDKProtectedStorageTest is Test {
 
     function test_protectedRangesIsTheMergedValidList() public view {
         StorageGuard.ProtectedRange[] memory rs = vault.gasKillerProtectedRanges();
-        assertEq(rs.length, 3);
+        assertEq(rs.length, 6);
         assertEq(rs[0].start, 0);
         assertEq(rs[0].end, 0);
         assertEq(rs[0].mask, bytes32(uint256(type(uint160).max)));
         assertEq(rs[1].start, uint256(SDK_STORAGE));
         assertEq(rs[1].end, uint256(SDK_STORAGE) + 255, "the config struct's whole ERC-7201 namespace");
-        assertEq(rs[2].start, uint256(TRACKER_SLOT));
-        assertEq(rs[2].end, uint256(TRACKER_SLOT));
+        assertEq(rs[2].start, 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc); // implementation
+        assertEq(rs[3].start, 0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50); // beacon
+        assertEq(rs[4].start, 0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103); // admin
+        for (uint256 i = 2; i < 5; ++i) {
+            assertEq(rs[i].end, rs[i].start);
+            assertEq(rs[i].mask, StorageGuard.FULL);
+        }
+        assertEq(rs[5].start, uint256(TRACKER_SLOT));
+        assertEq(rs[5].end, uint256(TRACKER_SLOT));
+        StorageGuard.validateRanges(rs);
+    }
+
+    /// Consumer ranges between and around every SDK range merge into one ascending list.
+    function test_consumerRangesInterleaveWithTheSdkRanges() public {
+        StorageGuard.ProtectedRange[] memory rs = new InterleavedConsumer().gasKillerProtectedRanges();
+        uint256[10] memory starts = [
+            uint256(0),
+            uint256(SDK_STORAGE),
+            2 << 252,
+            0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc,
+            5 << 252,
+            0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50,
+            0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103,
+            0xc << 252,
+            uint256(TRACKER_SLOT),
+            0xf << 252
+        ];
+        assertEq(rs.length, 10);
+        for (uint256 i = 0; i < 10; ++i) {
+            assertEq(rs[i].start, starts[i]);
+        }
         StorageGuard.validateRanges(rs);
     }
 
@@ -499,8 +541,8 @@ contract GasKillerSDKProtectedStorageTest is Test {
     /// @notice Protection is on unless the consumer overrides the hook: every guarded contract
     ///         reports the SDK's ranges, and the rejection tests above run against the default.
     function test_guardIsOnByDefault() public {
-        assertEq(new PlainConsumer(address(registry)).gasKillerProtectedRanges().length, 2);
-        assertEq(vault.gasKillerProtectedRanges().length, 3);
+        assertEq(new PlainConsumer(address(registry)).gasKillerProtectedRanges().length, 5);
+        assertEq(vault.gasKillerProtectedRanges().length, 6);
     }
 
     /// @notice An opted-out consumer applies writes the guard would reject: its owner, the SDK's
