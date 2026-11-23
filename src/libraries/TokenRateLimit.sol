@@ -47,10 +47,10 @@ import {StateUpdateType} from "../StateChangeHandlerLib.sol";
 ///      deposit function should not let programs call untrusted contracts. Users' allowances on
 ///      unlisted tokens aren't guarded at all.
 ///
-///      The limit errs towards charging twice. An allowance left standing is charged when the
+///      Programs and windows that nest are charged once: only the outermost charges balances,
+///      which cover what the inner ones moved. An allowance left standing is charged when its
 ///      program ends, and again through the balance when a later program has the spender pull
-///      it. A frame that re-enters this contract is charged for its outflow, and so is the
-///      frame around it.
+///      it.
 ///
 ///      A token is recognized by the address it is listed under. Don't list a token that can also
 ///      be reached through a second address sharing its balances and allowances (a legacy proxy
@@ -197,9 +197,18 @@ library TokenRateLimit {
     // ------------------------------------------------------------------ settlement
 
     /// @notice Starts a program. Call from `_beforeProgram`.
-    function begin() internal {
+    /// @dev Takes the snapshot of the program around this one, if any, so the outermost balances
+    ///      cover everything this one moves.
+    function begin(GasKillerSDK.TokenLimits storage t) internal {
+        uint256 depth;
         assembly ("memory-safe") {
-            tstore(_DEPTH, add(tload(_DEPTH), 1))
+            depth := tload(_DEPTH)
+            tstore(_DEPTH, add(depth, 1))
+        }
+        if (depth != 0) {
+            unchecked {
+                _snapshot(t, uint256(_DEPTH) + (depth << 64));
+            }
         }
     }
 
@@ -312,10 +321,11 @@ library TokenRateLimit {
 
     /// @notice Ends a program: charges each listed token's net outflow, plus allowances left
     ///         standing, and reverts with `TokenRateLimitExceeded` if a budget can't cover it. Call
-    ///         from `_afterProgram`.
+    ///         from `_afterProgram`. A nested program charges only its allowances.
     function endProgram(GasKillerSDK.TokenLimits storage t) internal {
         uint256 r = _region();
         uint256 head = _tload(r);
+        bool outermost = r == uint256(_DEPTH) + (1 << 64);
         // `head == 1`: a snapshot of no tokens, so nothing to charge.
         if (head > 1) {
             // Allowances left above where they were, charged to their token's charge word.
@@ -331,10 +341,12 @@ library TokenRateLimit {
             uint256 n = (head >> 1) & 0xff;
             for (uint256 at = r + 1; at < r + 1 + 3 * n; at += 3) {
                 address token = address(uint160(_tload(at)));
-                uint256 before = _tload(at + 1);
-                uint256 balance = IERC20(token).balanceOf(address(this));
                 uint256 charge = _tload(at + 2);
-                if (balance < before) charge = _add(charge, before - balance);
+                if (outermost) {
+                    uint256 before = _tload(at + 1);
+                    uint256 balance = IERC20(token).balanceOf(address(this));
+                    if (balance < before) charge = _add(charge, before - balance);
+                }
                 if (charge != 0) {
                     _spend(t, token, charge);
                     _tstore(at + 2, 0);

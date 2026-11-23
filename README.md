@@ -614,10 +614,9 @@ and `_afterLimitedProgram` instead.
   one whose `balanceOf` reverts (paused, upgraded) blocks every program that runs code until you
   clear it.
   `gasKillerTokenAllowance(token)` returns the budget.
-- The limit errs towards charging twice, never under-counting. An approval left standing is charged
-  when its program ends, and the spender's later pull is charged again through the balance. In a
-  nested tree that re-enters the same contract, the inner frame's outflow is charged to it and
-  again to the frame around it.
+- An approval left standing is charged when its program ends, and the spender's later pull is
+  charged again through the balance. Programs that nest on the same contract are charged once, by
+  the outermost.
 - A contract that already inherits another SDK base can use the `TokenRateLimit` library directly:
   `begin` in `_beforeProgram`, `beforeOp` in `_authorizeCall`, `endProgram` in `_afterProgram`.
   Reject the op when `beforeOp` returns true (an unrecognized call to a listed token), and make sure
@@ -685,12 +684,11 @@ contract Vault is GasKillerTokenRateLimit {
   a payable limited function that receives ETH and sends it on (a swap, a forwarder) is charged for
   what it sends. Excluding it would let one deposit offset every limited function a call runs.
 - **Nested windows.** A limited function that calls another, directly or through a callback, is
-  charged for both: conservative, never under-counted, but honest payouts can use the budget up
-  faster. The same applies to a limited function an allowed self-call reaches inside a signed
-  program. Charging only the outermost window is #119.
-- **Cost.** About +1,000 gas for an ETH payout with the budget slot warm, plus about 2,100 for the
-  first (cold) read of it in a transaction. A token payout costs about +4,000 with no tokens listed,
-  +9,100 with one and +26,400 with four: two `balanceOf` calls and a budget write per listed token.
+  charged once, by the outermost window. For tokens the same holds for a limited function an
+  allowed self-call reaches inside a signed program: the program charges it.
+- **Cost.** About +1,600 gas for an ETH payout with the budget slot warm, plus about 2,100 for the
+  first (cold) read of it in a transaction. A token payout costs about +4,600 with no tokens listed,
+  +9,700 with one and +27,000 with four: two `balanceOf` calls and a budget write per listed token.
 
 ### Allow-listing calls
 

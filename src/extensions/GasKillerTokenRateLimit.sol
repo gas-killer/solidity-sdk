@@ -69,7 +69,7 @@ abstract contract GasKillerTokenRateLimit is GasKillerOutgoingRateLimit {
 
     /// @dev Final, so a consumer can't drop the token charge from `limitsOutflow`.
     function _beginTokenOutflow() internal override {
-        TokenRateLimit.begin();
+        TokenRateLimit.begin(_tokenLimits());
         TokenRateLimit.snapshot(_tokenLimits());
     }
 
@@ -80,7 +80,7 @@ abstract contract GasKillerTokenRateLimit is GasKillerOutgoingRateLimit {
 
     function _beforeProgram() internal override {
         super._beforeProgram();
-        TokenRateLimit.begin();
+        TokenRateLimit.begin(_tokenLimits());
         _beforeLimitedProgram();
     }
 
@@ -142,7 +142,7 @@ abstract contract GasKillerNestedTokenRateLimit is GasKillerNestedOutgoingRateLi
 
     /// @dev Final, so a consumer can't drop the token charge from `limitsOutflow`.
     function _beginTokenOutflow() internal override {
-        TokenRateLimit.begin();
+        TokenRateLimit.begin(_tokenLimits());
         TokenRateLimit.snapshot(_tokenLimits());
     }
 
@@ -153,7 +153,7 @@ abstract contract GasKillerNestedTokenRateLimit is GasKillerNestedOutgoingRateLi
 
     function _beforeProgram() internal override {
         super._beforeProgram();
-        TokenRateLimit.begin();
+        TokenRateLimit.begin(_tokenLimits());
         _beforeLimitedProgram();
     }
 

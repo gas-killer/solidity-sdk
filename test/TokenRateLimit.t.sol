@@ -88,22 +88,32 @@ contract NestingHarness is GasKillerSDK {
     }
 
     function nested(IERC20 token, address to) external {
-        TokenRateLimit.begin();
+        TokenRateLimit.begin(_tokenLimits());
         TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
         token.transfer(to, 10);
-        TokenRateLimit.begin();
+        TokenRateLimit.begin(_tokenLimits());
         TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
         token.transfer(to, 20);
-        TokenRateLimit.endProgram(_tokenLimits()); // the inner program: 20
+        TokenRateLimit.endProgram(_tokenLimits()); // the inner program: nothing
         TokenRateLimit.endProgram(_tokenLimits()); // the outer one: 10 + 20
+    }
+
+    /// The inner program starts before the outer one has run an op.
+    function nestedBeforeOuterOp(IERC20 token, address to) external {
+        TokenRateLimit.begin(_tokenLimits());
+        TokenRateLimit.begin(_tokenLimits());
+        TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
+        token.transfer(to, 20);
+        TokenRateLimit.endProgram(_tokenLimits()); // the inner program: nothing
+        TokenRateLimit.endProgram(_tokenLimits()); // the outer one: 20, snapshotted as the inner began
     }
 
     /// The outer program sends 50; the inner one pulls 50 in from `user` as a deposit.
     function nestedDeposit(IERC20 token, address user, address to) external {
-        TokenRateLimit.begin();
+        TokenRateLimit.begin(_tokenLimits());
         TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
         token.transfer(to, 50);
-        TokenRateLimit.begin();
+        TokenRateLimit.begin(_tokenLimits());
         bytes memory pull = abi.encodeCall(IERC20.transferFrom, (user, address(this), 50));
         require(!TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(token), pull));
         token.transferFrom(user, address(this), 50);
@@ -113,12 +123,12 @@ contract NestingHarness is GasKillerSDK {
 
     /// A limit changed while a program is running, as a callback would.
     function setMidProgram(address token) external {
-        TokenRateLimit.begin();
+        TokenRateLimit.begin(_tokenLimits());
         TokenRateLimit.set(_tokenLimits(), token, 50, 1 hours);
     }
 
     function clearMidProgram(address token) external {
-        TokenRateLimit.begin();
+        TokenRateLimit.begin(_tokenLimits());
         TokenRateLimit.clear(_tokenLimits(), token);
     }
 
@@ -531,13 +541,21 @@ contract TokenRateLimitTest is Test {
         v.verifyAndUpdateBatch(subs);
     }
 
-    /// A program nested in another on the same contract is charged on its own, and again as part
-    /// of the program around it.
-    function test_nestedProgramsKeepTheirOwnSnapshots() public {
+    /// A program nested in another on the same contract is charged once, by the outermost.
+    function test_nestedProgramsAreChargedOnce() public {
         NestingHarness h = new NestingHarness(address(token));
         token.mint(address(h), 100);
         h.nested(token, ATTACKER);
-        assertEq(h.available(address(token)), 100 - 20 - 30);
+        assertEq(h.available(address(token)), 100 - 30);
+    }
+
+    /// The outer program is snapshotted when an inner one begins, even before its own first op, so
+    /// what the inner one moves is still charged.
+    function test_innerProgramBeforeTheOuterOpIsCharged() public {
+        NestingHarness h = new NestingHarness(address(token));
+        token.mint(address(h), 100);
+        h.nestedBeforeOuterOp(token, ATTACKER);
+        assertEq(h.available(address(token)), 100 - 20);
     }
 
     /// A deposit in an inner program doesn't offset a send in the program around it either.

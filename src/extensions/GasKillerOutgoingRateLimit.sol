@@ -62,8 +62,8 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
     ///      withdrawals then share the budget, so size `limit` for normal traffic. Measured by
     ///      balance, so every route out of the function counts, including callbacks. The call's
     ///      `msg.value` is in the balance before the function runs, so it doesn't offset what the
-    ///      function sends. A limited function that calls another, directly or through a callback, is
-    ///      charged for both windows: conservative, never under-counted. Reverts with
+    ///      function sends. Windows that nest, directly or through a callback, are charged once, by
+    ///      the outermost. Reverts with
     ///      `OutgoingRateLimit.NativeOutflowRateLimitExceeded` (or
     ///      `TokenRateLimit.TokenRateLimitExceeded`) after the function, rolling it back. In the
     ///      token drop-in the function runs as a program does, so it can't set or clear token
@@ -156,8 +156,8 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
     ///      withdrawals then share the budget, so size `limit` for normal traffic. Measured by
     ///      balance, so every route out of the function counts, including callbacks. The call's
     ///      `msg.value` is in the balance before the function runs, so it doesn't offset what the
-    ///      function sends. A limited function that calls another, directly or through a callback, is
-    ///      charged for both windows: conservative, never under-counted. Reverts with
+    ///      function sends. Windows that nest, directly or through a callback, are charged once, by
+    ///      the outermost. Reverts with
     ///      `OutgoingRateLimit.NativeOutflowRateLimitExceeded` (or
     ///      `TokenRateLimit.TokenRateLimitExceeded`) after the function, rolling it back. In the
     ///      token drop-in the function runs as a program does, so it can't set or clear token
