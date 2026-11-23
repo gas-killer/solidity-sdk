@@ -1922,10 +1922,10 @@ abstract contract GasKillerSDK is
 ///      deposit function should not let programs call untrusted contracts. Users' allowances on
 ///      unlisted tokens aren't guarded at all.
 ///
-///      Programs and windows that nest are charged once: only the outermost charges balances,
-///      which cover what the inner ones moved. An allowance left standing is charged when its
-///      program ends, and again through the balance when a later program has the spender pull
-///      it.
+///      An allowance left standing is charged when the program ends, and again through the
+///      balance when a later program has the spender pull it. A program or window nested in
+///      another charges its own outflow, and lowers the snapshots around it by that much, so the
+///      one around it charges only what it moved beyond that.
 ///
 ///      A token is recognized by the address it is listed under. Don't list a token that can also
 ///      be reached through a second address sharing its balances and allowances (a legacy proxy
@@ -2072,18 +2072,9 @@ library TokenRateLimit {
     // ------------------------------------------------------------------ settlement
 
     /// @notice Starts a program. Call from `_beforeProgram`.
-    /// @dev Takes the snapshot of the program around this one, if any, so the outermost balances
-    ///      cover everything this one moves.
-    function begin(GasKillerSDK.TokenLimits storage t) internal {
-        uint256 depth;
+    function begin() internal {
         assembly ("memory-safe") {
-            depth := tload(_DEPTH)
-            tstore(_DEPTH, add(depth, 1))
-        }
-        if (depth != 0) {
-            unchecked {
-                _snapshot(t, uint256(_DEPTH) + (depth << 64));
-            }
+            tstore(_DEPTH, add(tload(_DEPTH), 1))
         }
     }
 
@@ -2196,11 +2187,10 @@ library TokenRateLimit {
 
     /// @notice Ends a program: charges each listed token's net outflow, plus allowances left
     ///         standing, and reverts with `TokenRateLimitExceeded` if a budget can't cover it. Call
-    ///         from `_afterProgram`. A nested program charges only its allowances.
+    ///         from `_afterProgram`.
     function endProgram(GasKillerSDK.TokenLimits storage t) internal {
         uint256 r = _region();
         uint256 head = _tload(r);
-        bool outermost = r == uint256(_DEPTH) + (1 << 64);
         // `head == 1`: a snapshot of no tokens, so nothing to charge.
         if (head > 1) {
             // Allowances left above where they were, charged to their token's charge word.
@@ -2214,14 +2204,14 @@ library TokenRateLimit {
             }
             // Net outflow plus those charges, per token.
             uint256 n = (head >> 1) & 0xff;
+            bool nested = r != uint256(_DEPTH) + (1 << 64);
             for (uint256 at = r + 1; at < r + 1 + 3 * n; at += 3) {
                 address token = address(uint160(_tload(at)));
+                uint256 before = _tload(at + 1);
+                uint256 balance = IERC20(token).balanceOf(address(this));
                 uint256 charge = _tload(at + 2);
-                if (outermost) {
-                    uint256 before = _tload(at + 1);
-                    uint256 balance = IERC20(token).balanceOf(address(this));
-                    if (balance < before) charge = _add(charge, before - balance);
-                }
+                if (balance < before) charge = _add(charge, before - balance);
+                if (nested && balance < before) _lowerSnapshots((at - r - 1) / 3, before - balance);
                 if (charge != 0) {
                     _spend(t, token, charge);
                     _tstore(at + 2, 0);
@@ -2248,6 +2238,25 @@ library TokenRateLimit {
                 at = uint256(_DEPTH) + (depth << 64) + 2 + 3 * index;
             }
             _tstore(at, _add(_tload(at), amount));
+        }
+    }
+
+    /// @dev Lowers the snapshot balance of token `index` at every depth around the running one by
+    ///      `amount`, which the running program has charged, so they don't charge it again. Floors
+    ///      at zero: a snapshot below what was charged inside it then charges nothing more, as the
+    ///      exact (negative) value would. A region not yet snapshotted is overwritten when it is.
+    function _lowerSnapshots(uint256 index, uint256 amount) private {
+        uint256 depth;
+        assembly ("memory-safe") {
+            depth := tload(_DEPTH)
+        }
+        for (--depth; depth != 0; --depth) {
+            uint256 at;
+            unchecked {
+                at = uint256(_DEPTH) + (depth << 64) + 2 + 3 * index;
+            }
+            uint256 v = _tload(at);
+            _tstore(at, v > amount ? v - amount : 0);
         }
     }
 
