@@ -198,8 +198,9 @@ abstract contract GasKillerSDK is
     ///      permissionless, so a third party who lifts one submission from the mempool
     ///      and settles it standalone could otherwise nullify the whole batch with one
     ///      cheap front-run. An index below the counter was either settled or jumped over
-    ///      by a transition that moved the counter forward, so it can never settle. Reverts (`InvalidTransitionIndex`) only on a genuine gap — an index
-    ///      above the next expected one.
+    ///      by a transition that moved the counter forward, so it can never settle.
+    ///      Reverts (`InvalidTransitionIndex`) only on a genuine gap — an index above the
+    ///      next expected one.
     ///
     ///      Batch assemblers: a `CALL` state update forwards all remaining gas to its target
     ///      with no cap (see `StateChangeHandlerLib`). A greedy/griefing target in an early
@@ -444,8 +445,8 @@ abstract contract GasKillerSDK is
     ///         against protected storage. Saves about 1,400 gas per call, 70 per transition, 500 per
     ///         declared range, and about 280 per STORE (see `bench/SettlementGas.t.sol`).
     /// @dev With the check off, a quorum that signs a malicious program can overwrite any slot of
-    ///      this contract: an owner, an upgrade slot, the transition counter (replaying or
-    ///      skipping transitions) and the SDK's own configuration, including the registry that
+    ///      this contract: an owner, an upgrade slot, the transition counter (replaying old
+    ///      transitions) and the SDK's own configuration, including the registry that
     ///      verifies signatures and the rate-limit budgets (`OutgoingRateLimit`, `TokenRateLimit`),
     ///      which a program could then refill before spending them: the rate limits stay in the
     ///      code but bound nothing. Opt out only if the contract's correctness already rests on
