@@ -62,7 +62,6 @@ contract ReentrantAttacker {
     bool public reentrySucceeded;
 
     // Pre-staged arguments for the re-entrant verifyAndUpdate (transition N+1).
-    bytes32 public msgHash;
     uint32 public refBlock;
     bytes public storageUpdates;
     uint256 public transitionIndex;
@@ -72,14 +71,9 @@ contract ReentrantAttacker {
         sdk = _sdk;
     }
 
-    function stage(
-        bytes32 _msgHash,
-        uint32 _refBlock,
-        bytes calldata _storageUpdates,
-        uint256 _transitionIndex,
-        bytes4 _targetFunction
-    ) external {
-        msgHash = _msgHash;
+    function stage(uint32 _refBlock, bytes calldata _storageUpdates, uint256 _transitionIndex, bytes4 _targetFunction)
+        external
+    {
         refBlock = _refBlock;
         storageUpdates = _storageUpdates;
         transitionIndex = _transitionIndex;
@@ -90,9 +84,7 @@ contract ReentrantAttacker {
     function attack() external {
         sawInTransition = sdk.inTransition();
         address[] memory none = new address[](0);
-        try sdk.verifyAndUpdate(
-            msgHash, refBlock, storageUpdates, transitionIndex, targetFunction, 1, address(0x1), none
-        ) {
+        try sdk.verifyAndUpdate(refBlock, storageUpdates, transitionIndex, targetFunction, 1, address(0x1), none) {
             reentrySucceeded = true;
         } catch (bytes memory reason) {
             caughtSelector = bytes4(reason);
@@ -104,7 +96,6 @@ contract ReentrantAttacker {
         sawInTransition = sdk.inTransition();
         TaskSubmission[] memory subs = new TaskSubmission[](1);
         subs[0] = TaskSubmission({
-            msgHash: msgHash,
             referenceBlockNumber: refBlock,
             storageUpdates: storageUpdates,
             transitionIndex: transitionIndex,
@@ -168,7 +159,6 @@ contract ReenteringAssembler {
 
     receive() external payable {
         sdk.verifyAndUpdate(
-            next.msgHash,
             next.referenceBlockNumber,
             next.storageUpdates,
             next.transitionIndex,
@@ -251,7 +241,6 @@ contract GasKillerSDKHardeningTest is Test {
     {
         bytes4 fn = bytes4(keccak256("set()"));
         return TaskSubmission({
-            msgHash: _digest(transitionIndex, fn, updates, value),
             referenceBlockNumber: uint32(block.number - 1),
             storageUpdates: updates,
             transitionIndex: transitionIndex,
@@ -263,9 +252,19 @@ contract GasKillerSDKHardeningTest is Test {
         });
     }
 
+    function _digestOf(TaskSubmission memory sub) internal view returns (bytes32) {
+        return _digest(sub.transitionIndex, sub.targetFunction, sub.storageUpdates, sub.value);
+    }
+
+    /// Makes the registry accept `sub`'s signature only over the digest of `sub` as it stands
+    /// now, the way a real quorum signature works. Settling a payload that differs in any
+    /// signed field then fails the quorum check.
+    function _sign(TaskSubmission memory sub) internal {
+        mock.expect(_digestOf(sub), sub.s, sub.Raddr);
+    }
+
     function _settle(TaskSubmission memory sub, uint256 value) internal {
         sdk.verifyAndUpdate{value: value}(
-            sub.msgHash,
             sub.referenceBlockNumber,
             sub.storageUpdates,
             sub.transitionIndex,
@@ -289,16 +288,15 @@ contract GasKillerSDKHardeningTest is Test {
             bytes32(0), bytes32(uint256(42)), address(attacker), abi.encodeCall(ReentrantAttacker.attack, ())
         );
         bytes4 fn = bytes4(keccak256("set()"));
-        bytes32 outerHash = _digest(0, fn, outerUpdates);
 
-        // Inner transition 1 (what the attacker will try mid-flight): STORE 666. Its
-        // digest/index are exactly what a legitimate *next* submission would carry — the
+        // Inner transition 1 (what the attacker will try mid-flight): STORE 666. Its fields and
+        // index are exactly what a legitimate *next* submission would carry, and the permissive
         // mock registry would approve it, so only the guard stands in the way.
         bytes memory innerUpdates = _storeUpdate(bytes32(0), bytes32(uint256(666)));
-        attacker.stage(_digest(1, fn, innerUpdates), uint32(block.number - 1), innerUpdates, 1, fn);
+        attacker.stage(uint32(block.number - 1), innerUpdates, 1, fn);
 
         address[] memory none = new address[](0);
-        sdk.verifyAndUpdate(outerHash, uint32(block.number - 1), outerUpdates, 0, fn, 1, address(0x1234), none);
+        sdk.verifyAndUpdate(uint32(block.number - 1), outerUpdates, 0, fn, 1, address(0x1234), none);
 
         assertTrue(attacker.sawInTransition(), "latch visible mid-transition");
         assertFalse(attacker.reentrySucceeded(), "re-entry must not succeed");
@@ -319,13 +317,12 @@ contract GasKillerSDKHardeningTest is Test {
             bytes32(0), bytes32(uint256(7)), address(attacker), abi.encodeCall(ReentrantAttacker.attackViaBatch, ())
         );
         bytes4 fn = bytes4(keccak256("set()"));
-        bytes32 outerHash = _digest(0, fn, outerUpdates);
 
         bytes memory innerUpdates = _storeUpdate(bytes32(0), bytes32(uint256(666)));
-        attacker.stage(_digest(1, fn, innerUpdates), uint32(block.number - 1), innerUpdates, 1, fn);
+        attacker.stage(uint32(block.number - 1), innerUpdates, 1, fn);
 
         address[] memory none = new address[](0);
-        sdk.verifyAndUpdate(outerHash, uint32(block.number - 1), outerUpdates, 0, fn, 1, address(0x1234), none);
+        sdk.verifyAndUpdate(uint32(block.number - 1), outerUpdates, 0, fn, 1, address(0x1234), none);
 
         assertFalse(attacker.reentrySucceeded(), "batch re-entry must not succeed");
         assertEq(
@@ -349,11 +346,10 @@ contract GasKillerSDKHardeningTest is Test {
         bytes4 fn = bytes4(keccak256("set()"));
 
         bytes memory innerUpdates = _storeUpdate(bytes32(0), bytes32(uint256(666)));
-        attacker.stage(_digest(1, fn, innerUpdates), uint32(block.number - 1), innerUpdates, 1, fn);
+        attacker.stage(uint32(block.number - 1), innerUpdates, 1, fn);
 
         TaskSubmission[] memory subs = new TaskSubmission[](1);
         subs[0] = TaskSubmission({
-            msgHash: _digest(0, fn, outerUpdates),
             referenceBlockNumber: uint32(block.number - 1),
             storageUpdates: outerUpdates,
             transitionIndex: 0,
@@ -381,13 +377,13 @@ contract GasKillerSDKHardeningTest is Test {
         bytes memory updates0 = _storeUpdate(bytes32(0), bytes32(uint256(1)));
         TaskSubmission memory s0 = _submission(0, updates0);
         sdk.verifyAndUpdate(
-            s0.msgHash, s0.referenceBlockNumber, s0.storageUpdates, 0, s0.targetFunction, s0.s, s0.Raddr, s0.nonSigners
+            s0.referenceBlockNumber, s0.storageUpdates, 0, s0.targetFunction, s0.s, s0.Raddr, s0.nonSigners
         );
 
         bytes memory updates1 = _storeUpdate(bytes32(0), bytes32(uint256(2)));
         TaskSubmission memory s1 = _submission(1, updates1);
         sdk.verifyAndUpdate(
-            s1.msgHash, s1.referenceBlockNumber, s1.storageUpdates, 1, s1.targetFunction, s1.s, s1.Raddr, s1.nonSigners
+            s1.referenceBlockNumber, s1.storageUpdates, 1, s1.targetFunction, s1.s, s1.Raddr, s1.nonSigners
         );
 
         assertEq(sdk.value(), 2);
@@ -407,11 +403,10 @@ contract GasKillerSDKHardeningTest is Test {
             bytes32(0), bytes32(uint256(9)), address(reader), abi.encodeCall(LatchReader.observe, ())
         );
         bytes4 fn = bytes4(keccak256("set()"));
-        bytes32 h = _digest(0, fn, updates);
 
         assertFalse(sdk.inTransition(), "latch down before");
         address[] memory none = new address[](0);
-        sdk.verifyAndUpdate(h, uint32(block.number - 1), updates, 0, fn, 1, address(0x1234), none);
+        sdk.verifyAndUpdate(uint32(block.number - 1), updates, 0, fn, 1, address(0x1234), none);
 
         assertTrue(reader.sawInTransition(), "reader saw the latch up mid-transition");
         assertEq(reader.sawTransitionCount(), 1, "counter already bumped mid-transition (why the latch exists)");
@@ -431,7 +426,6 @@ contract GasKillerSDKHardeningTest is Test {
             _submission(0, _callUpdate(address(sink), forwarded, abi.encodeCall(ValueSink.take, ())), forwarded);
 
         sdk.verifyAndUpdate{value: forwarded}(
-            sub.msgHash,
             sub.referenceBlockNumber,
             sub.storageUpdates,
             sub.transitionIndex,
@@ -461,7 +455,6 @@ contract GasKillerSDKHardeningTest is Test {
             )
         );
         sdk.verifyAndUpdate{value: 0.1 ether}(
-            sub.msgHash,
             sub.referenceBlockNumber,
             sub.storageUpdates,
             sub.transitionIndex,
@@ -520,7 +513,6 @@ contract GasKillerSDKHardeningTest is Test {
 
         // Front-runner replays subs[0] verbatim through the standalone entrypoint.
         sdk.verifyAndUpdate(
-            subs[0].msgHash,
             subs[0].referenceBlockNumber,
             subs[0].storageUpdates,
             subs[0].transitionIndex,
@@ -551,7 +543,7 @@ contract GasKillerSDKHardeningTest is Test {
         assertEq(sdk.stateTransitionCount(), 1, "skipped, not re-applied");
     }
 
-    /// Each batch item must forward its OWN (msgHash, s, Raddr) to the registry: with the
+    /// Each batch item must forward its OWN (digest, s, Raddr) to the registry: with the
     /// strict mock, any cross-item plumbing swap fails verification and reverts the batch.
     function test_batch_forwardsPerItemSignatureArgs() public {
         bytes memory updates0 = _storeUpdate(bytes32(0), bytes32(uint256(11)));
@@ -565,8 +557,8 @@ contract GasKillerSDKHardeningTest is Test {
         subs[1].s = 0xBBB2;
         subs[1].Raddr = address(0xB2);
 
-        mock.expect(subs[0].msgHash, subs[0].s, subs[0].Raddr);
-        mock.expect(subs[1].msgHash, subs[1].s, subs[1].Raddr);
+        mock.expect(_digestOf(subs[0]), subs[0].s, subs[0].Raddr);
+        mock.expect(_digestOf(subs[1]), subs[1].s, subs[1].Raddr);
 
         sdk.verifyAndUpdateBatch(subs);
         assertEq(sdk.stateTransitionCount(), 2, "both verified against their own args");
@@ -748,12 +740,13 @@ contract GasKillerSDKHardeningTest is Test {
         uint256 deposit = 1 ether;
         vm.deal(address(this), 2 * deposit);
         TaskSubmission memory sub = _submission(0, _storeUpdate(bytes32(0), bytes32(deposit)), deposit);
+        _sign(sub);
 
-        vm.expectRevert(GasKillerSDK.InvalidSignature.selector);
+        vm.expectRevert(GasKillerSDK.InvalidQuorumSignature.selector);
         _settle(sub, 0);
-        vm.expectRevert(GasKillerSDK.InvalidSignature.selector);
+        vm.expectRevert(GasKillerSDK.InvalidQuorumSignature.selector);
         _settle(sub, deposit - 1);
-        vm.expectRevert(GasKillerSDK.InvalidSignature.selector);
+        vm.expectRevert(GasKillerSDK.InvalidQuorumSignature.selector);
         _settle(sub, deposit + 1);
 
         _settle(sub, deposit);
@@ -766,7 +759,8 @@ contract GasKillerSDKHardeningTest is Test {
     function test_verifyAndUpdate_zeroValueSignatureRejectsValue() public {
         vm.deal(address(this), 1);
         TaskSubmission memory sub = _submission(0, _storeUpdate(bytes32(0), bytes32(uint256(1))));
-        vm.expectRevert(GasKillerSDK.InvalidSignature.selector);
+        _sign(sub);
+        vm.expectRevert(GasKillerSDK.InvalidQuorumSignature.selector);
         _settle(sub, 1);
     }
 
@@ -800,9 +794,10 @@ contract GasKillerSDKHardeningTest is Test {
     function test_verifyAndUpdate_rejectsSignatureFromAnotherChain() public {
         uint256 chainA = block.chainid;
         TaskSubmission memory sub = _submission(0, _storeUpdate(bytes32(0), bytes32(uint256(1))));
+        _sign(sub);
 
         vm.chainId(chainA + 1);
-        vm.expectRevert(GasKillerSDK.InvalidSignature.selector);
+        vm.expectRevert(GasKillerSDK.InvalidQuorumSignature.selector);
         _settle(sub, 0);
 
         vm.chainId(chainA);
@@ -814,9 +809,10 @@ contract GasKillerSDKHardeningTest is Test {
         vm.deal(address(this), 5);
         uint256 chainA = block.chainid;
         TaskSubmission memory sub = _submission(0, _storeUpdate(bytes32(0), bytes32(uint256(1))), 5);
+        _sign(sub);
 
         vm.chainId(chainA + 1);
-        vm.expectRevert(GasKillerSDK.InvalidSignature.selector);
+        vm.expectRevert(GasKillerSDK.InvalidQuorumSignature.selector);
         _settle(sub, 5);
 
         vm.chainId(chainA);
@@ -846,8 +842,9 @@ contract GasKillerSDKHardeningTest is Test {
     function test_batch_understatedItemValueFailsTheDigest() public {
         TaskSubmission[] memory subs = new TaskSubmission[](1);
         subs[0] = _submission(0, _storeUpdate(bytes32(0), bytes32(uint256(1 ether))), 1 ether);
+        _sign(subs[0]);
         subs[0].value = 0;
-        vm.expectRevert(GasKillerSDK.InvalidSignature.selector);
+        vm.expectRevert(GasKillerSDK.InvalidQuorumSignature.selector);
         sdk.verifyAndUpdateBatch(subs);
     }
 
@@ -869,24 +866,24 @@ contract GasKillerSDKHardeningTest is Test {
 
     // ---- ERC-165 -------------------------------------------------------------------
 
-    /// The router's preflight id is untouched; the batch extension is additive.
+    /// The core and batch IDs are pinned; the batch extension is additive.
     function test_supportsBothInterfaceIds() public view {
-        assertTrue(sdk.supportsInterface(type(IGasKillerSDK).interfaceId), "core id unchanged");
+        assertTrue(sdk.supportsInterface(type(IGasKillerSDK).interfaceId), "core id");
         assertTrue(sdk.supportsInterface(type(IGasKillerSDKBatch).interfaceId), "batch extension id");
         assertEq(
             type(IGasKillerSDK).interfaceId,
             IGasKillerSDK.verifyAndUpdate.selector,
-            "core id is still exactly the verifyAndUpdate selector"
+            "core id is exactly the verifyAndUpdate selector"
         );
-        // Pinned literals. The core ID is what every deployed router preflights, so a change to
-        // it is an interface break for all of them; state mutability is not part of a function
-        // signature, so `payable` leaves it untouched.
-        assertEq(type(IGasKillerSDK).interfaceId, bytes4(0x82b35a01), "core id must not drift");
-        // The batch ID is the `verifyAndUpdateBatch` selector, which covers the `TaskSubmission`
-        // tuple. It moved from 0x2ea5ee1d when submissions gained `value`: batch callers
-        // and probes built for the old struct do not match contracts built from this SDK. Move
-        // it again only as a deliberate, announced break.
-        assertEq(type(IGasKillerSDKBatch).interfaceId, bytes4(0xce8e6efc), "batch id must not drift");
+        // Pinned literals. The router preflights the core ID, so a change to it is an interface
+        // break for every router; state mutability is not part of a function signature, so
+        // `payable` leaves it untouched. It moved from 0x82b35a01 when `verifyAndUpdate` stopped
+        // taking the digest, which is how a router tells these contracts from older ones.
+        assertEq(type(IGasKillerSDK).interfaceId, bytes4(0x57a9b002), "core id must not drift");
+        // The batch ID covers the `TaskSubmission` tuple through the `verifyAndUpdateBatch`
+        // selector. It moved from 0x2ea5ee1d when submissions gained `value`, and from 0xce8e6efc
+        // when they dropped the digest. Move it again only as a deliberate, announced break.
+        assertEq(type(IGasKillerSDKBatch).interfaceId, bytes4(0xe40b0195), "batch id must not drift");
         assertFalse(sdk.supportsInterface(type(IGasKillerNested).interfaceId), "nested is opt-in");
         assertEq(type(IGasKillerNested).interfaceId, bytes4(0x78481874), "nested id must not drift");
         // Value binding has its own ID because the core one didn't move with it: this is how a
@@ -910,7 +907,6 @@ contract GasKillerSDKHardeningTest is Test {
 
         vm.expectRevert(StateChangeHandlerLib.NestedOutsideTree.selector);
         sdk.verifyAndUpdate(
-            sub.msgHash,
             sub.referenceBlockNumber,
             sub.storageUpdates,
             sub.transitionIndex,

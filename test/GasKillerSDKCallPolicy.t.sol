@@ -261,9 +261,8 @@ contract GasKillerSDKCallPolicyTest is Test {
     function _settle(GasKillerSDK target, Program memory p, bytes4 fn, bytes memory revertData) internal {
         bytes memory updates = _encode(p);
         uint256 ti = target.stateTransitionCount();
-        bytes32 h = target.getMessageHash(ti, fn, updates);
         if (revertData.length != 0) vm.expectRevert(revertData);
-        target.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, fn, 1, address(1), new address[](0));
+        target.verifyAndUpdate(uint32(block.number - 1), updates, ti, fn, 1, address(1), new address[](0));
     }
 
     function _funded(Treasury t) internal returns (Treasury) {
@@ -581,17 +580,7 @@ contract GasKillerSDKCallPolicyTest is Test {
             _op(p, StateUpdateType.STORE, abi.encode(TRACKER_SLOT, bytes32(i + 1)));
             _call(p, ATTACKER, 1 ether, "");
             bytes memory updates = _encode(p);
-            subs[i] = TaskSubmission(
-                t.getMessageHash(i, FN, updates),
-                uint32(block.number - 1),
-                updates,
-                i,
-                FN,
-                1,
-                address(1),
-                new address[](0),
-                0
-            );
+            subs[i] = TaskSubmission(uint32(block.number - 1), updates, i, FN, 1, address(1), new address[](0), 0);
         }
         t.verifyAndUpdateBatch(subs);
         assertEq(ATTACKER.balance, 2 ether);

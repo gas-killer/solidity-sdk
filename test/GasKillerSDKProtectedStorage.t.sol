@@ -283,9 +283,8 @@ contract GasKillerSDKProtectedStorageTest is Test {
     function _settle(GasKillerSDK target, Program memory p, bytes memory revertData) internal {
         bytes memory updates = _encode(p);
         uint256 ti = target.stateTransitionCount();
-        bytes32 h = target.getMessageHash(ti, FN, updates);
         if (revertData.length != 0) vm.expectRevert(revertData);
-        target.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
+        target.verifyAndUpdate(uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
     }
 
     function _ownerSlot(address owner_, uint96 nonce_) internal pure returns (bytes32) {
@@ -595,17 +594,7 @@ contract GasKillerSDKProtectedStorageTest is Test {
             _store(p, TRACKER_SLOT, bytes32(i + 1));
             _store(p, bytes32(0), _ownerSlot(ATTACKER, uint96(i)));
             bytes memory updates = _encode(p);
-            subs[i] = TaskSubmission(
-                open.getMessageHash(i, FN, updates),
-                uint32(block.number - 1),
-                updates,
-                i,
-                FN,
-                1,
-                address(1),
-                new address[](0),
-                0
-            );
+            subs[i] = TaskSubmission(uint32(block.number - 1), updates, i, FN, 1, address(1), new address[](0), 0);
         }
         open.verifyAndUpdateBatch(subs);
         assertEq(open.owner(), ATTACKER);
@@ -706,17 +695,7 @@ contract GasKillerSDKProtectedStorageTest is Test {
             _store(p, bytes32(0), bytes32(i + 1));
             _store(p, bytes32(uint256(1)), bytes32(i + 1));
             bytes memory updates = _encode(p);
-            subs[i] = TaskSubmission(
-                d.getMessageHash(n, FN, updates),
-                uint32(block.number - 1),
-                updates,
-                n,
-                FN,
-                1,
-                address(1),
-                new address[](0),
-                0
-            );
+            subs[i] = TaskSubmission(uint32(block.number - 1), updates, n, FN, 1, address(1), new address[](0), 0);
         }
         d.verifyAndUpdateBatch(subs);
         assertEq(d.stateTransitionCount(), 4);
@@ -734,17 +713,7 @@ contract GasKillerSDKProtectedStorageTest is Test {
             if (i == 0) _store(p, bytes32(uint256(1)), bytes32(uint256(42)));
             else _store(p, bytes32(0), _ownerSlot(ATTACKER, 0));
             bytes memory updates = _encode(p);
-            subs[i] = TaskSubmission(
-                vault.getMessageHash(i, FN, updates),
-                uint32(block.number - 1),
-                updates,
-                i,
-                FN,
-                1,
-                address(1),
-                new address[](0),
-                0
-            );
+            subs[i] = TaskSubmission(uint32(block.number - 1), updates, i, FN, 1, address(1), new address[](0), 0);
         }
         vm.expectRevert(_rejection(1, bytes32(0)));
         vault.verifyAndUpdateBatch(subs);

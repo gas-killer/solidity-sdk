@@ -229,11 +229,10 @@ contract CallPolicyGasTest is Test {
         GasKillerSDK target =
             policed ? GasKillerSDK(new PolicedCaller(address(registry))) : new DefaultCaller(address(registry));
         bytes memory updates = _updates(m);
-        bytes32 h = target.getMessageHash(0, FN, updates);
         address[] memory none = new address[](0);
         uint32 ref = uint32(block.number - 1);
         uint256 g = gasleft();
-        target.verifyAndUpdate(h, ref, updates, 0, FN, 1, address(1), none);
+        target.verifyAndUpdate(ref, updates, 0, FN, 1, address(1), none);
         used = g - gasleft();
     }
 
@@ -251,11 +250,10 @@ contract CallPolicyGasTest is Test {
             a[i] = abi.encode(address(sink), uint256(1), "", bytes32(0), type(uint256).max);
         }
         bytes memory updates = abi.encode(t, a);
-        bytes32 h = target.getMessageHash(0, FN, updates);
         address[] memory none = new address[](0);
         uint32 ref = uint32(block.number - 1);
         uint256 g = gasleft();
-        target.verifyAndUpdate(h, ref, updates, 0, FN, 1, address(1), none);
+        target.verifyAndUpdate(ref, updates, 0, FN, 1, address(1), none);
         used = g - gasleft();
     }
 
@@ -296,11 +294,10 @@ contract CallPolicyGasTest is Test {
             a[i] = abi.encode(tokens[0], uint256(0), abi.encodeCall(IERC20.transfer, (address(sink), 1)), bytes32(0), type(uint256).max);
         }
         bytes memory updates = abi.encode(t, a);
-        bytes32 h = target.getMessageHash(0, FN, updates);
         address[] memory none = new address[](0);
         uint32 ref = uint32(block.number - 1);
         uint256 g = gasleft();
-        target.verifyAndUpdate(h, ref, updates, 0, FN, 1, address(1), none);
+        target.verifyAndUpdate(ref, updates, 0, FN, 1, address(1), none);
         used = g - gasleft();
     }
 
@@ -337,11 +334,10 @@ contract CallPolicyGasTest is Test {
             a[i] = abi.encode(address(target), uint256(0), abi.encodeCall(SelfCaller.ping, ()), bytes32(0), type(uint256).max);
         }
         bytes memory updates = abi.encode(t, a);
-        bytes32 h = target.getMessageHash(0, FN, updates);
         address[] memory none = new address[](0);
         uint32 ref = uint32(block.number - 1);
         uint256 g = gasleft();
-        target.verifyAndUpdate(h, ref, updates, 0, FN, 1, address(1), none);
+        target.verifyAndUpdate(ref, updates, 0, FN, 1, address(1), none);
         used = g - gasleft();
     }
 
@@ -361,11 +357,10 @@ contract CallPolicyGasTest is Test {
     function listedGas(uint256 m) external returns (uint256 used) {
         GasKillerSDK target = new ListedCaller(address(registry), address(sink));
         bytes memory updates = _updates(m);
-        bytes32 h = target.getMessageHash(0, FN, updates);
         address[] memory none = new address[](0);
         uint32 ref = uint32(block.number - 1);
         uint256 g = gasleft();
-        target.verifyAndUpdate(h, ref, updates, 0, FN, 1, address(1), none);
+        target.verifyAndUpdate(ref, updates, 0, FN, 1, address(1), none);
         used = g - gasleft();
     }
 

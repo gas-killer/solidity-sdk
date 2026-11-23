@@ -112,7 +112,6 @@ interface IERC20 {
 ///         and the off-chain signing path does not know or care whether a transition settles
 ///         alone or in a batch.
 struct TaskSubmission {
-    bytes32 msgHash;
     uint32 referenceBlockNumber;
     bytes storageUpdates;
     uint256 transitionIndex;
@@ -173,7 +172,9 @@ interface IGasKillerSDKBatch {
 /// @dev `type(IGasKillerSDK).interfaceId` didn't move when the digest started binding the value,
 ///      so this ID is what tells such a consumer apart from one built on an older SDK, which
 ///      accepts a value-bearing signature with any `msg.value`. Single-function, so the ID is the
-///      `getMessageHashWithValue` selector.
+///      `getMessageHashWithValue` selector. The `IGasKillerSDK` ID did move later, when
+///      `verifyAndUpdate` stopped taking the digest, and every consumer that reports the new ID
+///      binds the value and reports this one too.
 interface IGasKillerValueBound {
     /// @notice The digest the quorum signs for a transition settled with `value` wei.
     function getMessageHashWithValue(
@@ -915,10 +916,13 @@ interface IGasKillerSDK is IERC165 {
     ///      `msg.value` cannot be settled without its ETH. Value moved by state updates is fixed
     ///      inside the signed `storageUpdates`; a shortfall reverts the whole transition.
     ///
+    ///      The quorum signs `getMessageHash` (or `getMessageHashWithValue`) over these fields.
+    ///      The caller doesn't pass the digest: the contract rebuilds it from the arguments and
+    ///      `msg.value`, so a payload that differs in any signed field fails the signature check.
+    ///
     ///      `payable` does not change the function selector, so
     ///      `type(IGasKillerSDK).interfaceId` — which the router's ERC-165 preflight
     ///      probes — is unaffected.
-    /// @param msgHash The hash of the message to verify (sha256 of the encoded task)
     /// @param referenceBlockNumber The block number at which operator keys and stake
     ///        weights are evaluated by the stake registry
     /// @param storageUpdates The storage updates to verify and apply
@@ -928,7 +932,6 @@ interface IGasKillerSDK is IERC165 {
     /// @param Raddr Aggregate nonce address `address(R)`
     /// @param nonSigners Operators that did not sign, in strictly ascending order
     function verifyAndUpdate(
-        bytes32 msgHash,
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
@@ -2029,7 +2032,6 @@ abstract contract GasKillerSDK is
     error FutureBlockNumber();
     error StaleBlockNumber();
     error InvalidTransitionIndex();
-    error InvalidSignature();
     error InvalidQuorumSignature();
     error EmptyBatch();
     error InsufficientBatchValue(uint256 sent, uint256 required);
@@ -2053,7 +2055,6 @@ abstract contract GasKillerSDK is
     ///      inside the signed `storageUpdates` and paid out of this contract's balance, which
     ///      includes `msg.value`; a shortfall reverts the whole transition (`RevertingContext` for
     ///      a CALL, `DeploymentFailed` for a CREATE/CREATE2).
-    /// @param msgHash             the task digest (recomputed and checked below).
     /// @param referenceBlockNumber block at which stake/keys are evaluated by the registry.
     /// @param storageUpdates      ABI-encoded `(StateUpdateType[], bytes[])`.
     /// @param transitionIndex     expected `stateTransitionCount() - 1`.
@@ -2062,7 +2063,6 @@ abstract contract GasKillerSDK is
     /// @param Raddr               aggregate nonce address `address(R)`.
     /// @param nonSigners          operators that did not sign, strictly ascending.
     function verifyAndUpdate(
-        bytes32 msgHash,
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
@@ -2072,15 +2072,7 @@ abstract contract GasKillerSDK is
         address[] calldata nonSigners
     ) external payable guardTransition {
         _verifyTransition(
-            msgHash,
-            referenceBlockNumber,
-            storageUpdates,
-            transitionIndex,
-            targetFunction,
-            msg.value,
-            s,
-            Raddr,
-            nonSigners
+            referenceBlockNumber, storageUpdates, transitionIndex, targetFunction, msg.value, s, Raddr, nonSigners
         );
         // Inline rather than a helper: a helper isn't inlined and costs ~22 gas per settlement.
         // Must match `_guardRanges`.
@@ -2140,7 +2132,6 @@ abstract contract GasKillerSDK is
             uint256 unattributed = msg.value > required ? msg.value - required : 0;
             StateChangeHandlerLib._setUnattributedValue(unattributed);
             _verifyTransition(
-                sub.msgHash,
                 sub.referenceBlockNumber,
                 sub.storageUpdates,
                 sub.transitionIndex,
@@ -2168,7 +2159,6 @@ abstract contract GasKillerSDK is
     ///      `guardTransition` latch and apply the program with `_stateChangeHandler` straight
     ///      after, which keeps the order the same as before: count, check, run.
     function _verifyTransition(
-        bytes32 msgHash,
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
@@ -2182,19 +2172,22 @@ abstract contract GasKillerSDK is
         require((uint256(referenceBlockNumber) + _getBlockStaleMeasure()) >= block.number, StaleBlockNumber());
 
         require(transitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
-        require(_digest(transitionIndex, targetFunction, storageUpdates, value) == msgHash, InvalidSignature());
 
-        _verifyQuorum(msgHash, s, Raddr, nonSigners, referenceBlockNumber);
+        // The digest is rebuilt from the submitted fields, never taken from the caller, so a
+        // payload that doesn't match what the quorum signed fails the signature check.
+        _verifyQuorum(
+            _digest(transitionIndex, targetFunction, storageUpdates, value), s, Raddr, nonSigners, referenceBlockNumber
+        );
     }
 
     function _verifyQuorum(
-        bytes32 msgHash,
+        bytes32 digest,
         uint256 s,
         address Raddr,
         address[] calldata nonSigners,
         uint32 referenceBlockNumber
     ) private view {
-        bool ok = _schnorrRegistry().isValidSignature(msgHash, s, Raddr, nonSigners, referenceBlockNumber);
+        bool ok = _schnorrRegistry().isValidSignature(digest, s, Raddr, nonSigners, referenceBlockNumber);
         require(ok, InvalidQuorumSignature());
     }
 

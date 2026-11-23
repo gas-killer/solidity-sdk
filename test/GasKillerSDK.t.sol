@@ -58,33 +58,38 @@ contract GasKillerSDKTest is Test {
         bytes memory updates = _storeUpdate(bytes32(0), bytes32(uint256(42)));
         uint256 ti = sdk.stateTransitionCount(); // 0
         bytes4 fn = bytes4(keccak256("set()"));
-        bytes32 h = _digest(ti, fn, updates);
         address[] memory none = new address[](0);
 
-        sdk.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, fn, 1, address(0x1234), none);
+        sdk.verifyAndUpdate(uint32(block.number - 1), updates, ti, fn, 1, address(0x1234), none);
 
         assertEq(sdk.value(), 42, "STORE applied");
         assertEq(sdk.stateTransitionCount(), ti + 1, "transition tracked");
     }
 
-    function test_verifyAndUpdate_revertsOnBadHash() public {
+    /// The registry is asked about the digest the SDK rebuilds from the submitted fields, so the
+    /// signature can only cover the payload actually being settled.
+    function test_verifyAndUpdate_verifiesRecomputedDigest() public {
         bytes memory updates = _storeUpdate(bytes32(0), bytes32(uint256(1)));
         uint256 ti = sdk.stateTransitionCount();
+        bytes4 fn = bytes4(keccak256("set()"));
         address[] memory none = new address[](0);
-        vm.expectRevert(GasKillerSDK.InvalidSignature.selector);
-        sdk.verifyAndUpdate(
-            bytes32(uint256(1)), uint32(block.number - 1), updates, ti, bytes4(0), 1, address(0x1), none
+        vm.expectCall(
+            address(mock),
+            abi.encodeCall(
+                MockSchnorrRegistry.isValidSignature,
+                (_digest(ti, fn, updates), 1, address(0x1), none, block.number - 1)
+            )
         );
+        sdk.verifyAndUpdate(uint32(block.number - 1), updates, ti, fn, 1, address(0x1), none);
     }
 
     function test_verifyAndUpdate_revertsOnBadTransitionIndex() public {
         bytes memory updates = _storeUpdate(bytes32(0), bytes32(uint256(1)));
         bytes4 fn = bytes4(0);
         uint256 badTi = 5;
-        bytes32 h = _digest(badTi, fn, updates);
         address[] memory none = new address[](0);
         vm.expectRevert(GasKillerSDK.InvalidTransitionIndex.selector);
-        sdk.verifyAndUpdate(h, uint32(block.number - 1), updates, badTi, fn, 1, address(0x1), none);
+        sdk.verifyAndUpdate(uint32(block.number - 1), updates, badTi, fn, 1, address(0x1), none);
     }
 
     function test_verifyAndUpdate_revertsWhenRegistryRejects() public {
@@ -92,19 +97,17 @@ contract GasKillerSDKTest is Test {
         bytes memory updates = _storeUpdate(bytes32(0), bytes32(uint256(7)));
         uint256 ti = sdk.stateTransitionCount();
         bytes4 fn = bytes4(0);
-        bytes32 h = _digest(ti, fn, updates);
         address[] memory none = new address[](0);
         vm.expectRevert(GasKillerSDK.InvalidQuorumSignature.selector);
-        sdk.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, fn, 1, address(0x1), none);
+        sdk.verifyAndUpdate(uint32(block.number - 1), updates, ti, fn, 1, address(0x1), none);
     }
 
     function test_verifyAndUpdate_revertsOnFutureBlock() public {
         bytes memory updates = _storeUpdate(bytes32(0), bytes32(uint256(1)));
         uint256 ti = sdk.stateTransitionCount();
         bytes4 fn = bytes4(0);
-        bytes32 h = _digest(ti, fn, updates);
         address[] memory none = new address[](0);
         vm.expectRevert(GasKillerSDK.FutureBlockNumber.selector);
-        sdk.verifyAndUpdate(h, uint32(block.number), updates, ti, fn, 1, address(0x1), none);
+        sdk.verifyAndUpdate(uint32(block.number), updates, ti, fn, 1, address(0x1), none);
     }
 }

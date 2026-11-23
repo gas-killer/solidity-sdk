@@ -129,9 +129,8 @@ contract GasKillerCallAllowListTest is Test {
         args[0] = abi.encode(TRACKER_SLOT, bytes32(ti + 1));
         (types[1], args[1]) = (kind, arg);
         bytes memory updates = abi.encode(types, args);
-        bytes32 h = target.getMessageHash(ti, FN, updates);
         if (revertData.length != 0) vm.expectRevert(revertData);
-        target.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
+        target.verifyAndUpdate(uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
     }
 
     function _call(GasKillerSDK target, address to, uint256 value, bytes memory data, bytes memory revertData)

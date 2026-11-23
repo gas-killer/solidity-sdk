@@ -136,9 +136,8 @@ contract GasKillerOutgoingRateLimitTest is Test {
     function _settle(GasKillerSDK target, Program memory p, bytes memory revertData) internal {
         bytes memory updates = _encode(p);
         uint256 ti = target.stateTransitionCount();
-        bytes32 h = target.getMessageHash(ti, FN, updates);
         if (revertData.length != 0) vm.expectRevert(revertData);
-        target.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
+        target.verifyAndUpdate(uint32(block.number - 1), updates, ti, FN, 1, address(1), new address[](0));
     }
 
     /// @dev One transition sending `value` to the attacker.
@@ -261,17 +260,7 @@ contract GasKillerOutgoingRateLimitTest is Test {
             _op(p, StateUpdateType.STORE, abi.encode(TRACKER_SLOT, bytes32(i + 1)));
             _send(p, ATTACKER, 0.6 ether);
             bytes memory updates = _encode(p);
-            subs[i] = TaskSubmission(
-                t.getMessageHash(i, FN, updates),
-                uint32(block.number - 1),
-                updates,
-                i,
-                FN,
-                1,
-                address(1),
-                new address[](0),
-                0
-            );
+            subs[i] = TaskSubmission(uint32(block.number - 1), updates, i, FN, 1, address(1), new address[](0), 0);
         }
         vm.expectRevert(_exceeded(1, 0.6 ether, 0.4 ether));
         t.verifyAndUpdateBatch(subs);

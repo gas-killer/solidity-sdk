@@ -46,10 +46,6 @@ contract ArraySummationTest is Test {
         return abi.encode(types, args);
     }
 
-    function _digest(uint256 transitionIndex, bytes4 targetFn, bytes memory updates) internal view returns (bytes32) {
-        return sha256(abi.encode(transitionIndex, block.chainid, address(target), targetFn, updates));
-    }
-
     function test_supportsInterface() public view {
         assertTrue(target.supportsInterface(type(IERC165).interfaceId), "IERC165 not supported");
         assertTrue(target.supportsInterface(type(IGasKillerSDK).interfaceId), "IGasKillerSDK not supported");
@@ -93,10 +89,9 @@ contract ArraySummationTest is Test {
         bytes memory updates = _storeUpdate(bytes32(uint256(0)), bytes32(uint256(1352)));
         uint256 ti = target.stateTransitionCount(); // 0
         bytes4 fn = ArraySummation.sum.selector;
-        bytes32 h = _digest(ti, fn, updates);
         address[] memory none = new address[](0);
 
-        target.verifyAndUpdate(h, uint32(block.number - 1), updates, ti, fn, 1, address(0x1234), none);
+        target.verifyAndUpdate(uint32(block.number - 1), updates, ti, fn, 1, address(0x1234), none);
 
         assertEq(target.currentSum(), 1352, "STORE not applied to currentSum");
         assertEq(target.stateTransitionCount(), ti + 1, "transition not tracked");

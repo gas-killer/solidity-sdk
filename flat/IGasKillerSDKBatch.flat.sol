@@ -9,7 +9,6 @@ pragma solidity ^0.8.27;
 ///         and the off-chain signing path does not know or care whether a transition settles
 ///         alone or in a batch.
 struct TaskSubmission {
-    bytes32 msgHash;
     uint32 referenceBlockNumber;
     bytes storageUpdates;
     uint256 transitionIndex;

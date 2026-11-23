@@ -231,7 +231,7 @@ contract GasKillerSDKNestedTest is Test {
 
         bytes32 digest = twin.getMessageHash(0, TASK, program);
         (uint256 s, address r) = SchnorrSigner.sign(OPERATOR_KEY, 4242, digest);
-        twin.verifyAndUpdate(digest, uint32(block.number - 1), program, 0, TASK, s, r, new address[](0));
+        twin.verifyAndUpdate(uint32(block.number - 1), program, 0, TASK, s, r, new address[](0));
 
         NestedTreeBuilder.Frame[] memory frames = new NestedTreeBuilder.Frame[](1);
         frames[0] = _frame(address(a), address(0), 0, 0, _ops1(_store(SLOT_X, 77)));
