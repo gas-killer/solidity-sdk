@@ -469,8 +469,7 @@ contract StateTracker {
 ///         ranges, so a quorum-signed update cannot overwrite slots such as an `Ownable` owner,
 ///         the `StateTracker` counter, the SDK's own configuration or EIP-1967 proxy slots. The
 ///         SDK protects its own counter and configuration and, behind a proxy, the EIP-1967 slots;
-///         anything else
-///         is protected only if the consumer lists it in `_protectedRanges`.
+///         anything else is protected only if the consumer lists it in `_protectedRanges`.
 ///         `StateChangeHandlerLib._run` calls `advance` right before every STORE executes.
 /// @dev The list denies rather than allows. Honest writes to mappings and dynamic arrays land on
 ///      keccak-derived slots spread across the whole slot space, which an allowlist of ranges
@@ -1257,8 +1256,9 @@ library StateChangeHandlerLib {
 
     /// @dev `_runStateUpdates` without validating `ranges`. **`ranges` must already have passed
     ///      `StorageGuard.validateRanges`**: a malformed list fails open, silently letting writes
-    ///      to protected slots through. `GasKillerSDK` uses it with `_settlementRanges()`, which
-    ///      is a constant of the contract's code and validated by its constructor. An empty list
+    ///      to protected slots through. `GasKillerSDK` uses it with `_settlementRanges()`, one of two
+    ///      constants of the contract's code (with and without the proxy slots), both validated
+    ///      by its constructor. An empty list
     ///      still reverts with `NoProtectedRanges`.
     function _runStateUpdatesPrevalidated(
         StateUpdateType[] memory types,
@@ -1777,6 +1777,7 @@ abstract contract GasKillerSDK is
 
     /// @dev The address this code was deployed to. Running anywhere else means a proxy
     ///      delegatecalled it, and settlement then protects the EIP-1967 slots too.
+    /// @custom:oz-upgrades-unsafe-allow state-variable-immutable state-variable-assignment
     address private immutable _self = address(this);
 
     /// @dev The EIP-1967 proxy slots: behind a proxy, a signed `STORE` to the implementation slot
@@ -2144,6 +2145,8 @@ abstract contract GasKillerSDK is
     ///
     ///      Behind a proxy the SDK already protects the EIP-1967 slots: don't list them, as the
     ///      overlap fails deployment. A tracked function that upgrades the contract can't be settled.
+    ///      Other upgrade or initializer state is still yours to list, such as OpenZeppelin
+    ///      `Initializable`'s slot (resetting it re-opens `initialize`) or a non-EIP-1967 proxy's.
     function _protectedRanges() internal pure virtual returns (StorageGuard.ProtectedRange[] memory) {
         return new StorageGuard.ProtectedRange[](0);
     }
@@ -2152,7 +2155,8 @@ abstract contract GasKillerSDK is
     ///      ranges merged in by start. Not virtual, so a consumer cannot drop the SDK's own
     ///      protection. The constructor validates the result once, so a consumer list that is
     ///      unsorted or collides with an SDK range makes deployment revert instead of failing open.
-    ///      Settlement doesn't re-validate: the list is `pure`, so it is the one that was checked.
+    ///      Settlement doesn't re-validate: the list is one of two constants of the code, with and
+    ///      without the proxy slots, and the constructor checked both.
     ///
     ///      Behind a proxy (this code running at an address other than the one it was deployed
     ///      to, as a delegatecall does) the EIP-1967 implementation, beacon and admin slots are
