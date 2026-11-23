@@ -26,8 +26,28 @@ interface IStateUpdateTypes {
         /// @notice ABI-encoded calldata to pass to the target
         bytes callargs;
         /// @notice `keccak256(abi.encodePacked(success, returndata))` the trace observed, or zero
-        ///         to leave the result unchecked
+        ///         to require success without checking the return data
         bytes32 resultHash;
+    }
+
+    /// @notice Payload for a CREATE operation — deploy with a nonce-derived address
+    struct Create {
+        /// @notice ETH value (in wei) to endow the new contract with
+        uint256 value;
+        /// @notice The initcode to run
+        bytes initcode;
+        /// @notice The address the trace deployed to, or zero to leave it unchecked
+        address expected;
+    }
+
+    /// @notice Payload for a CREATE2 operation — deploy with a salt-derived address
+    struct Create2 {
+        /// @notice The salt
+        bytes32 salt;
+        /// @notice ETH value (in wei) to endow the new contract with
+        uint256 value;
+        /// @notice The initcode to run
+        bytes initcode;
     }
 
     /// @notice Payload for a LOG0 operation — emit a log with no indexed topics

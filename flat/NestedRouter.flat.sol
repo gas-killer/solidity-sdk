@@ -1168,10 +1168,30 @@ struct CallPolicy {
 ///      of its reference block, and the program carries the values it saw there.
 ///
 ///      A result hash is `keccak256(abi.encodePacked(success, returndata))`. Pinning a `CALL` or
-///      `CREATE` is optional: a zero hash or address leaves it unchecked, for results that reach
-///      no write. A pinned `CALL` may revert if the trace saw it revert (a caught revert): its hash
-///      then covers the failure, and the program goes on.
+///      `CREATE` is optional: with a zero hash a `CALL` must still succeed, but its return data
+///      isn't checked, and a zero address leaves a deployment's address unchecked. A pinned
+///      `CALL` that sends no value may revert if the trace saw it revert (a caught revert): its
+///      hash then covers the failure, and the program goes on. Its policy hooks ran before it,
+///      so they charge it as if it had gone through (a deposit `transferFrom` that now fails is
+///      charged as tokens out): never less than it moved. A caught revert whose result depended
+///      on a gas cap (an out-of-gas from `f{gas: n}()`) can't be pinned, as settlement forwards
+///      all gas: the analyzer has to reject the task. The read checks run code at any address
+///      without the call policy (the allow list doesn't cover them); they can't change state.
 library StateChangeHandlerLib {
+    /// @dev keccak256("gasKiller.unattributedValue") - 1. The part of the contract's balance the
+    ///      running program's trace didn't see: in a batch, the value later items brought, and
+    ///      any surplus. A `BALANCE_CHECK` of the contract itself subtracts it.
+    bytes32 internal constant UNATTRIBUTED_VALUE_SLOT =
+        0xf604dfbedb1e391be66692991e94988183c331594e7cf996e89aff22b10f3d1b;
+
+    /// @dev Sets the value `BALANCE_CHECK` subtracts from this contract's own balance. Zero
+    ///      outside a batch.
+    function _setUnattributedValue(uint256 value) internal {
+        assembly {
+            tstore(UNATTRIBUTED_VALUE_SLOT, value)
+        }
+    }
+
     /// keccak256("gasKiller.pendingChild") - 1, following `StateTracker`'s slot convention.
     bytes32 internal constant PENDING_CHILD_SLOT = 0x70b036af5917f7c22df33faec4b5fd311a27d9e8310987dea3cc060d66152963;
 
@@ -1365,6 +1385,8 @@ library StateChangeHandlerLib {
     ///      - CREATE: Contract deployment via CREATE opcode
     ///      - CREATE2: Deterministic contract deployment via CREATE2 opcode
     ///      - NESTED: Hand a callee its own signed frame of the tree in `ctx`
+    ///      - STATICCALL_CHECK, BALANCE_CHECK, CODEHASH_CHECK: check a read against the trace
+    ///      A CALL can pin its result and a CREATE its address (see the library's notes).
     /// @param types Array of StateUpdateType enums indicating the type of each state update operation
     /// @param args Array of ABI-encoded arguments corresponding to each operation type
     /// @param ranges Protected storage. Nonempty when `check` is `StorageGuard.advance`: the
@@ -1488,8 +1510,13 @@ library StateChangeHandlerLib {
     ///      side note.
     ///      A nonzero `resultHash` pins the result: a call that succeeds with other return data,
     ///      or fails when the trace saw it succeed, reverts. A pinned failure lets the program go
-    ///      on; its value was counted against the policy and the rate limits all the same.
+    ///      on, unless the call sends value: a failure with empty data can also be the EVM's own
+    ///      (a value shortfall, call depth), which the trace didn't see, so such a call must
+    ///      succeed.
     function _call(CallPolicy memory policy, uint256 i, bytes memory arg) private {
+        // The pre-#101 layout `(target, value, callargs)` would decode with its calldata length
+        // as the hash: reject anything but the canonical offset.
+        _requireOffset(arg, 0x40, 0x80, i);
         (address target, uint256 value, bytes memory callargs, bytes32 expected) =
             abi.decode(arg, (address, uint256, bytes, bytes32));
         if (target == address(this)) _checkSelfCall(policy, i, callargs);
@@ -1498,7 +1525,7 @@ library StateChangeHandlerLib {
         assembly {
             success := call(gas(), target, value, add(callargs, 0x20), mload(callargs), 0, 0)
         }
-        if (expected != bytes32(0)) {
+        if (expected != bytes32(0) && (success || value == 0)) {
             bytes32 actual = _resultHash(success);
             if (actual == expected) return;
             // A failure is reported with its revert data, which says more than a hash.
@@ -1512,6 +1539,7 @@ library StateChangeHandlerLib {
     ///      can move that outside any program. `CREATE2`'s address is fixed by the signed salt
     ///      and initcode, so it carries none.
     function _create(CallPolicy memory policy, uint256 i, bytes memory arg) private {
+        _requireOffset(arg, 0x20, 0x60, i); // as in `_call`
         (uint256 value, bytes memory initcode, address expected) = abi.decode(arg, (uint256, bytes, address));
         _authorize(policy, i, StateUpdateType.CREATE, address(0), value, initcode);
         address deployed;
@@ -1528,7 +1556,8 @@ library StateChangeHandlerLib {
     ///      - `STATICCALL_CHECK`: `(target, data, resultHash)`. Re-runs the read with all
     ///        remaining gas and compares its result hash; a read that reverted in the trace is
     ///        pinned as a failure the same way.
-    ///      - `BALANCE_CHECK`: `(account, balance)`, this contract included (`SELFBALANCE`).
+    ///      - `BALANCE_CHECK`: `(account, balance)`, this contract included (`SELFBALANCE`),
+    ///        less the value the trace didn't see (`UNATTRIBUTED_VALUE_SLOT`).
     ///      - `CODEHASH_CHECK`: `(account, codehash)`. Pins `EXTCODESIZE` too: the same code hash
     ///        means the same code. An account with no code and no balance or nonce hashes to 0.
     function _check(StateUpdateType kind, uint256 i, bytes memory arg) private view {
@@ -1545,13 +1574,31 @@ library StateChangeHandlerLib {
             actual = _resultHash(success);
         } else if (kind == StateUpdateType.BALANCE_CHECK) {
             (address account, uint256 balance) = abi.decode(arg, (address, uint256));
-            (expected, actual) = (bytes32(balance), bytes32(account.balance));
+            uint256 held = account.balance;
+            if (account == address(this)) {
+                assembly {
+                    held := sub(held, tload(UNATTRIBUTED_VALUE_SLOT))
+                }
+            }
+            (expected, actual) = (bytes32(balance), bytes32(held));
         } else {
             address account;
             (account, expected) = abi.decode(arg, (address, bytes32));
             actual = account.codehash;
         }
         if (actual != expected) revert ObservationMismatch(i, expected, actual);
+    }
+
+    /// @dev Reverts with `MalformedOp` unless the word at `at` in `arg` is `offset`: the head
+    ///      offset of the op's dynamic field in its canonical encoding.
+    function _requireOffset(bytes memory arg, uint256 at, uint256 offset, uint256 i) private pure {
+        uint256 word;
+        if (arg.length >= at + 0x20) {
+            assembly {
+                word := mload(add(add(arg, 0x20), at))
+            }
+        }
+        require(word == offset, MalformedOp(i));
     }
 
     /// @dev `keccak256(abi.encodePacked(success, returndata))` of the last call, hashed in
@@ -1703,6 +1750,11 @@ library StateChangeHandlerLib {
     ///        address, as a word
     /// @param actual What settlement observed, in the same form
     error ObservationMismatch(uint256 index, bytes32 expected, bytes32 actual);
+
+    /// @notice Thrown when a CALL or CREATE payload isn't in its canonical layout, such as the
+    ///         one from before result pinning
+    /// @param index The zero-based position of the operation
+    error MalformedOp(uint256 index);
 }
 
 // src/GasKillerSDK.sol
@@ -1939,6 +1991,8 @@ abstract contract GasKillerSDK is
             // Already settled (e.g. front-run or redelivered) → skip, don't poison the batch.
             if (sub.transitionIndex + 1 <= stateTransitionCount()) continue;
             required += sub.value;
+            // What later items and any surplus brought: this item's trace didn't see it.
+            StateChangeHandlerLib._setUnattributedValue(msg.value > required ? msg.value - required : 0);
             _verifyTransition(
                 sub.msgHash,
                 sub.referenceBlockNumber,
@@ -1952,6 +2006,7 @@ abstract contract GasKillerSDK is
             );
             _stateChangeHandler(sub.storageUpdates, ranges);
         }
+        StateChangeHandlerLib._setUnattributedValue(0);
         require(msg.value >= required, InsufficientBatchValue(msg.value, required));
         if (msg.value > required) {
             // Under the latch, so the refund can't re-enter settlement. A sender that rejects ETH
