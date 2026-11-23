@@ -1919,10 +1919,12 @@ abstract contract GasKillerSDK is
 /// @dev Measured, not decoded. A token can leave through `transfer`, through `transferFrom` by a
 ///      contract holding an allowance (a router pulling during a signed `CALL`), or through
 ///      anything else the token implements, so the library reads `balanceOf(this)` for every
-///      listed token right before the program's first op that runs code (`beforeOp`, from
-///      `_authorizeCall`) and again when the program ends (`endProgram`), and charges the net
-///      decrease. A program that runs no code can't move tokens (see below for this contract
-///      itself) and reads nothing.
+///      listed token right before each op that runs code (`beforeOp`, from `_authorizeCall`) and
+///      again when the program ends (`endProgram`), and charges every decrease between two
+///      readings. Tokens one op receives never offset what another op sends, so a program can't
+///      borrow, unwind a position or take a deposit and send the proceeds out uncharged. A
+///      program that runs no code can't move tokens (see below for this contract itself) and
+///      reads nothing.
 ///
 ///      An approval moves nothing until it is used, possibly after the program. So `beforeOp`
 ///      also records every `approve`, `increaseAllowance` and `decreaseAllowance` call to a
@@ -1938,24 +1940,20 @@ abstract contract GasKillerSDK is
 ///
 ///      Wire it up with `begin` in `_beforeProgram`, `beforeOp` in `_authorizeCall` and
 ///      `endProgram` in `_afterProgram`; the drop-ins in `src/extensions/` do. Programs can nest on
-///      one contract, so the per-program state is kept in transient storage per depth. A
-///      program's charge is its net decrease: tokens it receives count against those it sends.
+///      one contract, so the per-program state is kept in transient storage per depth.
 ///
-///      Because receipts offset sends, a program could pull tokens in from users who approved
-///      this contract and send them on uncharged, so a `transferFrom` into this contract doesn't
-///      offset (see `beforeOp`), and one between two others is flagged. Other receipts still do:
-///      a program can unwind a position held in an unlisted token (an aToken, an LP or staking
-///      token), or borrow against collateral, and send the proceeds out uncharged. So can a
-///      deposit that isn't a signed op: a called contract that calls back into this contract's own
-///      deposit function, which credits the depositor, offsets a send just the same. List position
-///      tokens too, and reject calls to lending and debt markets, or anything else that can pay
-///      this contract out against a future obligation, in `_authorizeCall`; a contract with a
-///      deposit function should not let programs call untrusted contracts. Users' allowances on
-///      unlisted tokens aren't guarded at all.
+///      Within one op, receipts still offset sends: a called contract holding an allowance can
+///      pull tokens out and have a third party pay as much in (a public `harvest()`, a vault
+///      withdrawal it was approved for) in the same `CALL`. So don't let programs hand
+///      allowances to untrusted contracts, on listed tokens or on unlisted position tokens. A
+///      `transferFrom` into this contract is a deposit and offsets nothing even within an op
+///      (see `beforeOp`); one between two others is flagged. Users' allowances on unlisted
+///      tokens aren't guarded at all. A native window (`snapshot`) has no ops, so it charges its
+///      net decrease: what the function receives offsets what it sends.
 ///
 ///      An allowance left standing is charged when the program ends, and again through the
 ///      balance when a later program has the spender pull it. A program or window nested in
-///      another charges its own outflow, and lowers the snapshots around it by that much, so the
+///      another charges its own outflow, and lowers the readings around it by that much, so the
 ///      one around it charges only what it moved beyond that.
 ///
 ///      A token is recognized by the address it is listed under. Don't list a token that can also
@@ -2010,7 +2008,7 @@ library TokenRateLimit {
     ///      - word 0, the head: bit 0 set once the snapshot is taken, bits 1-8 the number of
     ///        tokens in it, bits 16 and up the number of approvals recorded;
     ///      - three words per snapshotted token i, from word `1 + 3i`: the token, its balance at
-    ///        the snapshot, and the allowance increases charged to it so far;
+    ///        the last reading, and what is charged to it so far;
     ///      - three words per approved (token, spender) pair j, from word `_APPROVALS + 3j`: the
     ///        token's index in the snapshot, the spender, and the lowest allowance the spender had
     ///        right before any of its approvals.
@@ -2109,14 +2107,16 @@ library TokenRateLimit {
         }
     }
 
-    /// @notice Call from `_authorizeCall`, before every op that runs code. Takes the snapshot on
-    ///         the program's first such op and records approvals of listed tokens.
+    /// @notice Call from `_authorizeCall`, before every op that runs code. Reads every listed
+    ///         token's balance, charging any decrease since the last reading, and records
+    ///         approvals of listed tokens.
     /// @return unrecognized True for a `CALL` to a listed token with a selector other than
     ///         `transfer`, `approve`, `increaseAllowance`, `decreaseAllowance`, or a `transferFrom`
     ///         from or to this contract (or calldata too short to carry its arguments): a
     ///         `transferFrom` between two others moves tokens users approved this contract for,
     ///         which its balance doesn't show. A `transferFrom` into this contract (a deposit)
-    ///         raises the snapshot by its amount, so what it brings in offsets no send. The
+    ///         raises the last reading by its amount, here and in every program around it, so
+    ///         what it brings in offsets no send, even within the op that runs it. The
     ///         amount is taken from the calldata before the call runs, so a token that delivers
     ///         less (a fee on transfer, a `false` return instead of a revert) is charged the
     ///         difference: never too little. A token that reads a special amount, such as
@@ -2131,7 +2131,9 @@ library TokenRateLimit {
         returns (bool unrecognized)
     {
         uint256 r = _region();
-        uint256 head = _snapshot(t, r);
+        uint256 head = _tload(r);
+        if (head & 1 == 0) head = _snapshot(t, r);
+        else if (head > 1) _measure(r, (head >> 1) & 0xff);
         if (kind != StateUpdateType.CALL) return false;
         bytes4 selector = bytes4(data); // zero-padded when shorter than 4 bytes
         // Moves this contract's tokens, measured through the balance: fine on any target, so a
@@ -2197,33 +2199,72 @@ library TokenRateLimit {
     ///      program credits with a `STORE` can't be withdrawn faster than the budget allows.
     ///      Approvals the function grants aren't recorded: the contract's own code decides those.
     function snapshot(GasKillerSDK.TokenLimits storage t) internal {
-        _snapshot(t, _region());
+        uint256 r = _region();
+        if (_tload(r) & 1 == 0) _snapshot(t, r);
     }
 
-    /// @dev Records `balanceOf(this)` for every listed token in region `r`, unless already done,
-    ///      and returns the region's head.
+    /// @dev Records `balanceOf(this)` for every listed token in region `r` and returns the
+    ///      region's new head.
     function _snapshot(GasKillerSDK.TokenLimits storage t, uint256 r) private returns (uint256 head) {
-        head = _tload(r);
-        if (head & 1 == 0) {
-            uint256 count = t.count;
-            for (uint256 i = 0; i < count; ++i) {
-                address token = t.buckets[i].token;
-                _tstore(r + 1 + 3 * i, uint160(token));
-                _tstore(r + 2 + 3 * i, IERC20(token).balanceOf(address(this)));
+        uint256 count = t.count;
+        for (uint256 i = 0; i < count; ++i) {
+            address token = t.buckets[i].token;
+            _tstore(r + 1 + 3 * i, uint160(token));
+            _tstore(r + 2 + 3 * i, IERC20(token).balanceOf(address(this)));
+        }
+        head = 1 | (count << 1);
+        _tstore(r, head);
+    }
+
+    /// @dev Reads the balance of each of the `n` tokens in region `r`, adds any decrease since
+    ///      the last reading to its charge, and keeps the balance as the new last reading.
+    ///      In assembly, as it runs for every listed token on every op: the Solidity call costs
+    ///      several hundred gas more per token. Bubbles a revert, and reverts on short return data,
+    ///      as the Solidity call would.
+    function _measure(uint256 r, uint256 n) private {
+        assembly ("memory-safe") {
+            let ptr := mload(0x40)
+            mstore(ptr, shl(224, 0x70a08231)) // balanceOf(address)
+            mstore(add(ptr, 4), address())
+            let end := add(r, add(1, mul(3, n)))
+            for { let at := add(r, 1) } lt(at, end) { at := add(at, 3) } {
+                if iszero(staticcall(gas(), tload(at), ptr, 0x24, 0x00, 0x20)) {
+                    returndatacopy(ptr, 0, returndatasize())
+                    revert(ptr, returndatasize())
+                }
+                if lt(returndatasize(), 0x20) { revert(0, 0) }
+                let held := mload(0x00)
+                let last := tload(add(at, 1))
+                if lt(held, last) {
+                    let charged := tload(add(at, 2))
+                    let sum := add(charged, sub(last, held))
+                    // Saturating, as `_add`.
+                    if lt(sum, charged) { sum := not(0) }
+                    tstore(add(at, 2), sum)
+                }
+                tstore(add(at, 1), held)
             }
-            head = 1 | (count << 1);
-            _tstore(r, head);
         }
     }
 
-    /// @notice Ends a program: charges each listed token's net outflow, plus allowances left
-    ///         standing, and reverts with `TokenRateLimitExceeded` if a budget can't cover it. Call
-    ///         from `_afterProgram`.
+    /// @notice Ends a program: charges each listed token's outflow (the decreases over each op
+    ///         and since the last one), plus allowances left standing, and reverts with
+    ///         `TokenRateLimitExceeded` if a budget can't cover it. Call from `_afterProgram`.
     function endProgram(GasKillerSDK.TokenLimits storage t) internal {
         uint256 r = _region();
         uint256 head = _tload(r);
         // `head == 1`: a snapshot of no tokens, so nothing to charge.
         if (head > 1) {
+            uint256 n = (head >> 1) & 0xff;
+            _measure(r, n);
+            // What this program moved out is charged here, so the programs around it don't
+            // charge it again.
+            if (r != uint256(_DEPTH) + (1 << 64)) {
+                for (uint256 i = 0; i < n; ++i) {
+                    uint256 moved = _tload(r + 3 + 3 * i);
+                    if (moved != 0) _lowerSnapshots(i, moved);
+                }
+            }
             // Allowances left above where they were, charged to their token's charge word.
             uint256 end = r + _APPROVALS + 3 * (head >> 16);
             for (uint256 slot = r + _APPROVALS; slot < end; slot += 3) {
@@ -2233,18 +2274,10 @@ library TokenRateLimit {
                 uint256 prior = _tload(slot + 2);
                 if (left > prior) _tstore(at + 2, _add(_tload(at + 2), left - prior));
             }
-            // Net outflow plus those charges, per token.
-            uint256 n = (head >> 1) & 0xff;
-            bool nested = r != uint256(_DEPTH) + (1 << 64);
             for (uint256 at = r + 1; at < r + 1 + 3 * n; at += 3) {
-                address token = address(uint160(_tload(at)));
-                uint256 before = _tload(at + 1);
-                uint256 balance = IERC20(token).balanceOf(address(this));
                 uint256 charge = _tload(at + 2);
-                if (balance < before) charge = _add(charge, before - balance);
-                if (nested && balance < before) _lowerSnapshots((at - r - 1) / 3, before - balance);
                 if (charge != 0) {
-                    _spend(t, token, charge);
+                    _spend(t, address(uint160(_tload(at))), charge);
                     _tstore(at + 2, 0);
                 }
             }
