@@ -2582,10 +2582,13 @@ library OutgoingRateLimit {
 ///      anything else the token implements, so the library reads `balanceOf(this)` for every
 ///      listed token right before each op that runs code (`beforeOp`, from `_authorizeCall`) and
 ///      again when the program ends (`endProgram`), and charges every decrease between two
-///      readings. Tokens one op receives never offset what another op sends, so a program can't
-///      borrow, unwind a position or take a deposit and send the proceeds out uncharged. A
+///      readings. Tokens one op receives never offset what another op sends, so proceeds of a
+///      borrow, an unwound position or a deposit that land here and are sent on are charged. A
 ///      program that runs no code can't move tokens (see below for this contract itself) and
-///      reads nothing.
+///      reads nothing. Only this contract's balance of a listed token is measured: a single
+///      `CALL` that unwinds a position or borrows straight to another recipient moves nothing
+///      here, so list position tokens too, and reject calls to lending and debt markets (anything
+///      that can pay out against this contract's position or credit) in `_authorizeCall`.
 ///
 ///      An approval moves nothing until it is used, possibly after the program. So `beforeOp`
 ///      also records every `approve`, `increaseAllowance` and `decreaseAllowance` call to a
@@ -2613,7 +2616,8 @@ library OutgoingRateLimit {
 ///      `transferFrom` into this contract is a deposit and offsets nothing even within an op
 ///      (see `beforeOp`); one between two others is flagged. Users' allowances on unlisted
 ///      tokens aren't guarded at all. A native window (`snapshot`) has no ops, so it charges its
-///      net decrease: what the function receives offsets what it sends.
+///      net decrease: what the function receives offsets what it sends, also when a signed op
+///      reaches it.
 ///
 ///      An allowance left standing is charged when the program ends, and again through the
 ///      balance when a later program has the spender pull it. A program or window nested in
@@ -2696,7 +2700,8 @@ library TokenRateLimit {
     ///      program carrying the write can never settle. Reverts while a program is running
     ///      (`TokenRateLimitChangedMidProgram`), so a callback can't change the list under it.
     ///      Every op that runs code reads each listed token's `balanceOf` (about 1,200 to 1,500
-    ///      gas per token per op, so size programs' gas for it), and a token whose `balanceOf`
+    ///      gas per token per op for a plain ERC-20, several times that for a proxied or
+    ///      rebasing one; size programs' gas for it), and a token whose `balanceOf`
     ///      can revert (paused, upgraded, self-destructed) blocks all settlement until it is
     ///      cleared. Call it from a constructor, an
     ///      initializer or an admin function that is not `trackState`.
@@ -2913,6 +2918,15 @@ library TokenRateLimit {
                 tstore(add(at, 1), held)
             }
         }
+    }
+
+    /// @notice Charges each listed token's decrease since the last reading, without ending the
+    ///         program: call it before code that might receive tokens, such as a consumer hook
+    ///         after the last op, so what that code receives doesn't offset earlier sends.
+    function checkpoint(GasKillerSDK.TokenLimits storage) internal {
+        uint256 r = _region();
+        uint256 head = _tload(r);
+        if (head > 1) _measure(r, (head >> 1) & 0xff);
     }
 
     /// @notice Ends a program: charges each listed token's outflow (the decreases over each op
@@ -3244,8 +3258,9 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
         bytes memory data
     ) internal virtual {}
 
-    /// @dev For `GasKillerTokenRateLimit`, which adds its own per-op step here. Runs after the ETH
-    ///      limit. Not meant for consumers: put policy in `_authorizeLimitedCall`.
+    /// @dev For `GasKillerTokenRateLimit`, which adds its own per-op step here. Runs before
+    ///      `_authorizeLimitedCall`, so the token reading isn't offset by tokens consumer code
+    ///      receives there. Not meant for consumers: put policy in `_authorizeLimitedCall`.
     function _rateLimitOp(uint256 index, StateUpdateType kind, address target, bytes memory data) internal virtual {}
 
     /// @notice Wrap each of this contract's own functions that can pay out ETH (or, in the token
@@ -3300,9 +3315,9 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
         override
     {
         super._authorizeCall(index, kind, target, value, data);
+        _rateLimitOp(index, kind, target, data);
         _authorizeLimitedCall(index, kind, target, value, data);
         OutgoingRateLimit.spend(_outgoingBucket(), index, target, value);
-        _rateLimitOp(index, kind, target, data);
     }
 }
 
@@ -3394,9 +3409,9 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
         override
     {
         super._authorizeCall(index, kind, target, value, data);
+        _rateLimitOp(index, kind, target, data);
         _authorizeLimitedCall(index, kind, target, value, data);
         OutgoingRateLimit.spend(_outgoingBucket(), index, target, value);
-        _rateLimitOp(index, kind, target, data);
     }
 }
 
@@ -3491,6 +3506,8 @@ abstract contract GasKillerTokenRateLimit is GasKillerOutgoingRateLimit {
     }
 
     function _afterProgram() internal override {
+        // Read first, so tokens the hook receives don't offset what the program sent.
+        TokenRateLimit.checkpoint(_tokenLimits());
         _afterLimitedProgram();
         TokenRateLimit.endProgram(_tokenLimits());
         super._afterProgram();
@@ -3564,6 +3581,8 @@ abstract contract GasKillerNestedTokenRateLimit is GasKillerNestedOutgoingRateLi
     }
 
     function _afterProgram() internal override {
+        // Read first, so tokens the hook receives don't offset what the program sent.
+        TokenRateLimit.checkpoint(_tokenLimits());
         _afterLimitedProgram();
         TokenRateLimit.endProgram(_tokenLimits());
         super._afterProgram();
