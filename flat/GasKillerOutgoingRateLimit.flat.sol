@@ -2359,17 +2359,25 @@ library OutgoingRateLimit {
     ///      sees the same `msg.value`, so excluding it would let one deposit offset the payout of
     ///      each limited function the call runs. So ETH a limited function receives with its call
     ///      and sends on is charged; only ETH that arrives during the window offsets a send.
-    function beginNative() internal view returns (uint256 baseline) {
+    function beginNative() internal returns (uint256 baseline) {
+        assembly ("memory-safe") {
+            tstore(_NATIVE_DEPTH, add(tload(_NATIVE_DEPTH), 1))
+        }
         return address(this).balance;
     }
 
     /// @notice Closes the window `beginNative` opened: spends the net decrease of the contract's
     ///         ETH balance since then.
     /// @dev Net: ETH the function received offsets ETH it sent, so unwrapping WETH held by the
-    ///      contract and sending the ETH on isn't charged here; limit WETH as a token too. A
-    ///      window nested in another (one limited function calling another, possibly through a
-    ///      callback) is charged both to itself and to the window around it.
+    ///      contract and sending the ETH on isn't charged here; limit WETH as a token too. Only
+    ///      the outermost of nested windows charges: its balance already covers the inner ones.
     function endNative(GasKillerSDK.OutgoingBucket storage b, uint256 baseline) internal {
+        uint256 depth;
+        assembly ("memory-safe") {
+            depth := sub(tload(_NATIVE_DEPTH), 1)
+            tstore(_NATIVE_DEPTH, depth)
+        }
+        if (depth != 0) return;
         uint256 balance = address(this).balance;
         if (balance < baseline) spendNative(b, baseline - balance);
     }
@@ -2407,6 +2415,9 @@ library OutgoingRateLimit {
         (available,) = _refilled(word);
         return (available, uint96(word), uint32(word >> 192));
     }
+
+    /// @dev Transient count of open native windows. keccak256("gaskiller.OutgoingRateLimit.nativeDepth").
+    bytes32 private constant _NATIVE_DEPTH = 0x738c23d034da2fcf0846cadee528f30c233175077a1f2de0cc57a44e7b606434;
 
     /// @dev The `limit` and `period` bits of the packed slot.
     uint256 private constant _KEEP = uint256(type(uint96).max) | (uint256(type(uint32).max) << 192);
@@ -2612,8 +2623,8 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
     ///      withdrawals then share the budget, so size `limit` for normal traffic. Measured by
     ///      balance, so every route out of the function counts, including callbacks. The call's
     ///      `msg.value` is in the balance before the function runs, so it doesn't offset what the
-    ///      function sends. A limited function that calls another, directly or through a callback, is
-    ///      charged for both windows: conservative, never under-counted. Reverts with
+    ///      function sends. Windows that nest, directly or through a callback, are charged once, by
+    ///      the outermost. Reverts with
     ///      `OutgoingRateLimit.NativeOutflowRateLimitExceeded` (or
     ///      `TokenRateLimit.TokenRateLimitExceeded`) after the function, rolling it back. In the
     ///      token drop-in the function runs as a program does, so it can't set or clear token
@@ -2706,8 +2717,8 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
     ///      withdrawals then share the budget, so size `limit` for normal traffic. Measured by
     ///      balance, so every route out of the function counts, including callbacks. The call's
     ///      `msg.value` is in the balance before the function runs, so it doesn't offset what the
-    ///      function sends. A limited function that calls another, directly or through a callback, is
-    ///      charged for both windows: conservative, never under-counted. Reverts with
+    ///      function sends. Windows that nest, directly or through a callback, are charged once, by
+    ///      the outermost. Reverts with
     ///      `OutgoingRateLimit.NativeOutflowRateLimitExceeded` (or
     ///      `TokenRateLimit.TokenRateLimitExceeded`) after the function, rolling it back. In the
     ///      token drop-in the function runs as a program does, so it can't set or clear token
