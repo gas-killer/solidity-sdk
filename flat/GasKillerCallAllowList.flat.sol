@@ -62,10 +62,10 @@ struct TaskSubmission {
 ///      that `StateChangeHandlerLib`'s `CALL` update gives its target the gas the trace gave
 ///      it, often all that's left. A greedy or griefing CALL target in an early
 ///      sub-transition can consume enough gas to starve every later sub-transition, reverting
-///      the whole
-///      (atomic) batch — no partial-state hazard, since it's all-or-nothing, but it does
-///      nullify the amortization this extension exists for. Ordering submissions with
-///      untrusted CALL targets last, or excluding them from batches entirely, avoids this.
+///      the whole (atomic) batch — no partial-state hazard, since it's all-or-nothing, but
+///      it does nullify the amortization this extension exists for. Ordering submissions
+///      with untrusted CALL targets last, or excluding them from batches entirely, avoids
+///      this.
 interface IGasKillerSDKBatch {
     /// @notice Verify and apply a sequence of independently signed state transitions.
     /// @dev Transitions apply in calldata order with consecutive `transitionIndex`es.
@@ -1499,8 +1499,8 @@ library StateChangeHandlerLib {
     ///      run real code mid-transition, such as re-entering the consumer's other functions
     ///      while the program is half applied. The EVM adds the 2,300 stipend when value is
     ///      sent, so a `transfer` or `send` (operand 0 with value, 2,300 without) gets the
-    ///      stipend here too. A larger cap is the least gas with which the callee, re-simulated,
-    ///      reproduces the trace, or the traced operand itself.
+    ///      stipend here too. A larger cap is the gas the callee needs at settlement (see
+    ///      below), or the traced operand itself.
     ///      Settlement reverts with `InsufficientCallGas` unless the callee can get all of
     ///      `gasLimit`, so whoever submits the settlement can't starve the callee into another
     ///      path (an inner call that runs out of gas and is caught) while the call still
@@ -1510,11 +1510,13 @@ library StateChangeHandlerLib {
     ///      `type(uint256).max` forwards everything left, unchecked, as before. The settler then
     ///      decides how much gas the callee gets: the fallback for a callee whose needed gas
     ///      wasn't worked out.
-    ///      A callee that runs out of gas returns no data, which can't match a pin, so
-    ///      settlement reverts. A capped callee can run out where it fit in the trace, because
-    ///      an account or slot that was warm there is cold here. More gas doesn't help that; a
-    ///      settlement transaction whose EIP-2930 access list warms what the trace had warm
-    ///      does.
+    ///      The cap has to cover settlement, not just the trace. An account or slot the trace had
+    ///      warm is cold here unless an EIP-2930 access list warms it, and the settler picks the
+    ///      access list. A callee short of gas doesn't always revert: one that catches an inner
+    ///      out-of-gas succeeds down another path, and no pin need notice. So the analyzer sizes
+    ///      `gasLimit` with nothing warm but what the program touched before this op, checks the
+    ///      callee also reproduces with everything it touches warm, and rejects the task
+    ///      otherwise. An access list then only makes the call cheaper.
     ///      Gas spent here also starves later items of a batch (e.g.
     ///      GasKillerSDK.verifyAndUpdateBatch): a greedy or griefing target can make the whole
     ///      atomic batch revert. No partial-state hazard, but it nullifies the batch's cost

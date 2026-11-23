@@ -37,10 +37,10 @@ struct TaskSubmission {
 ///      that `StateChangeHandlerLib`'s `CALL` update gives its target the gas the trace gave
 ///      it, often all that's left. A greedy or griefing CALL target in an early
 ///      sub-transition can consume enough gas to starve every later sub-transition, reverting
-///      the whole
-///      (atomic) batch — no partial-state hazard, since it's all-or-nothing, but it does
-///      nullify the amortization this extension exists for. Ordering submissions with
-///      untrusted CALL targets last, or excluding them from batches entirely, avoids this.
+///      the whole (atomic) batch — no partial-state hazard, since it's all-or-nothing, but
+///      it does nullify the amortization this extension exists for. Ordering submissions
+///      with untrusted CALL targets last, or excluding them from batches entirely, avoids
+///      this.
 interface IGasKillerSDKBatch {
     /// @notice Verify and apply a sequence of independently signed state transitions.
     /// @dev Transitions apply in calldata order with consecutive `transitionIndex`es.
