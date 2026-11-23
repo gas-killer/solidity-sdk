@@ -244,8 +244,10 @@ abstract contract GasKillerSDK is
             // Already settled (e.g. front-run or redelivered) → skip, don't poison the batch.
             if (sub.transitionIndex + 1 <= stateTransitionCount()) continue;
             required += sub.value;
-            // What later items and any surplus brought: this item's trace didn't see it.
-            StateChangeHandlerLib._setUnattributedValue(msg.value > required ? msg.value - required : 0);
+            // What later items and any surplus brought: this item's trace didn't see it, and it
+            // may not spend it.
+            uint256 unattributed = msg.value > required ? msg.value - required : 0;
+            StateChangeHandlerLib._setUnattributedValue(unattributed);
             _verifyTransition(
                 sub.msgHash,
                 sub.referenceBlockNumber,
@@ -258,6 +260,7 @@ abstract contract GasKillerSDK is
                 sub.nonSigners
             );
             _stateChangeHandler(sub.storageUpdates, ranges);
+            require(address(this).balance >= unattributed, StateChangeHandlerLib.UnattributedValueSpent());
         }
         StateChangeHandlerLib._setUnattributedValue(0);
         require(msg.value >= required, InsufficientBatchValue(msg.value, required));

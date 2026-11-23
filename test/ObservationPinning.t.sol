@@ -303,6 +303,35 @@ contract ObservationPinningTest is Test {
         assertEq(address(c).balance, 2 ether);
     }
 
+    /// A batch item can't spend the ETH a later item brought, as it couldn't on its own.
+    function test_batchItemCantSpendALaterItemsValue() public {
+        TaskSubmission[] memory subs = new TaskSubmission[](2);
+        for (uint256 i = 0; i < 2; ++i) {
+            StateUpdateType[] memory t = new StateUpdateType[](i == 0 ? 2 : 1);
+            bytes[] memory a = new bytes[](t.length);
+            a[0] = abi.encode(TRACKER_SLOT, bytes32(i + 1));
+            if (i == 0) {
+                t[1] = StateUpdateType.CALL;
+                a[1] = abi.encode(address(0xBEEF), uint256(1 ether), "", bytes32(0));
+            }
+            bytes memory updates = abi.encode(t, a);
+            uint256 value = i == 0 ? 0 : 1 ether;
+            subs[i] = TaskSubmission(
+                c.getMessageHashWithValue(i, FN, updates, value),
+                uint32(block.number - 1),
+                updates,
+                i,
+                FN,
+                1,
+                address(1),
+                new address[](0),
+                value
+            );
+        }
+        vm.expectRevert(StateChangeHandlerLib.UnattributedValueSpent.selector);
+        c.verifyAndUpdateBatch{value: 1 ether}(subs);
+    }
+
     /// Covers `EXTCODEHASH` and `EXTCODESIZE`: code appearing at an empty address is caught.
     function test_codehashCheck() public {
         address empty = address(0xE0);

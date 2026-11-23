@@ -880,8 +880,9 @@ silently back a credit of the 100 the trace saw.
 - The `*_CHECK` ops pin reads that changed no state: `STATICCALL` (with the same result hash),
   `BALANCE` and `SELFBALANCE`, `EXTCODEHASH` and `EXTCODESIZE`. They run no policy hooks, and
   the call allow-list doesn't cover them: they can't change state. In a batch, the contract's own
-  balance is checked less the value later items brought; each item is traced on top of the ones
-  before it, as the transition counter already requires.
+  balance is checked less the value later items brought, and no item may spend that value
+  (`UnattributedValueSpent`); each item is traced on top of the ones before it, as the transition
+  counter already requires.
 - Pinning makes settlement fail when what it pins moves, and some of it anyone can move: ETH can be
   pushed to any account, even by `SELFDESTRUCT`. Pin only observations a write depends on.
 - Block values (`block.timestamp` and the like) can't be pinned, as settlement lands in a later

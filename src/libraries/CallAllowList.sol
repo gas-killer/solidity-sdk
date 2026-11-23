@@ -67,6 +67,7 @@ library CallAllowList {
             bytes4 selector = IGasKillerNested.applyNested.selector;
             if (!isAllowed(target, selector)) revert CallNotAllowed(index, target, selector);
         } else if (!allowDeployments()) {
+            // `CREATE` or `CREATE2`: the read checks never reach the policy.
             revert DeploymentNotAllowed(index);
         }
     }
