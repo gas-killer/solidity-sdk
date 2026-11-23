@@ -28,6 +28,10 @@ interface IStateUpdateTypes {
         /// @notice `keccak256(abi.encodePacked(success, returndata))` the trace observed, or zero
         ///         to require success without checking the return data
         bytes32 resultHash;
+        /// @notice The gas operand the traced CALL passed, replayed as is: 0 for a `transfer` or
+        ///         `send` (the EVM adds the stipend), the cap for `f{gas: n}()`, and the large
+        ///         `gas()` the trace saw for a call that forwarded everything
+        uint256 gasLimit;
     }
 
     /// @notice Payload for a CREATE operation — deploy with a nonce-derived address
