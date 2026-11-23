@@ -884,8 +884,8 @@ silently back a credit of the 100 the trace saw.
 - A `CALL`'s `gasLimit` is the gas its callee gets, never more than the traced call passed. A
   `transfer` or `send` (operand 0 with value, 2,300 without) reaches its recipient with the
   2,300 stipend only, as in the trace, not with enough gas to re-enter the consumer
-  mid-transition. For other calls the analyzer signs the least gas with which the callee,
-  re-simulated, reproduces the trace, or the traced operand if that's smaller.
+  mid-transition. For other calls the analyzer signs the gas the callee needs at settlement (see
+  below), or the traced operand if that's smaller.
 - Settlement reverts with `InsufficientCallGas` unless the callee can get all of `gasLimit`
   (63/64 of what's left after the `CALL`'s own cost). So whoever submits the settlement can't
   starve a callee into another path, such as an inner call that runs out of gas and is caught,
@@ -894,10 +894,13 @@ silently back a credit of the 100 the trace saw.
   limit, can never settle, so the analyzer clamps it.
 - `gasLimit = type(uint256).max` forwards everything left, unchecked: the fallback when the
   callee's needed gas wasn't worked out. The settler then chooses how much gas that callee gets.
-- If a callee runs out of gas, settlement reverts. A capped callee can run out where it fit in
-  the trace, because an account or slot that was warm there is cold at settlement. More gas
-  doesn't help that, but an EIP-2930 access list on the settlement transaction that warms what
-  the trace had warm does.
+- The cap has to cover settlement, not just the trace. An account or slot the trace had warm is
+  cold at settlement unless an EIP-2930 access list warms it, and the settler picks the access
+  list. A callee short of gas doesn't always revert: one that catches an inner out-of-gas
+  succeeds down another path, and no pin need notice. So the analyzer sizes `gasLimit` with
+  nothing warm but what the program touched before the call, checks the callee also reproduces
+  with everything it touches warm, and rejects the task otherwise. An access list then only
+  makes the call cheaper.
 - `CREATE`'s `expected` pins the deployed address, which moves with the contract's nonce; zero
   leaves it unchecked. `CREATE2`'s address is fixed by its signed salt and initcode.
 - The `*_CHECK` ops pin reads that changed no state: `STATICCALL` (with the same result hash),
