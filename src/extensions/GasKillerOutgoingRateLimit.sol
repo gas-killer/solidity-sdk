@@ -82,7 +82,7 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
     ///      ERC-777 or ERC-1155 hook) can trigger such an inflow, a credited balance can leave
     ///      uncharged, covered by funds that belonged to others. Keep such inflows out of reach
     ///      of the window, or pay out without a callback that can reach them (a pull pattern).
-    ///      Charging gross outflow instead is tracked in #117.
+    ///      Signed programs are charged per op instead; a native function has no ops to split.
     modifier limitsOutflow() {
         (uint256 ethBaseline, uint256 ethCharged) = OutgoingRateLimit.beginNative();
         _beginTokenOutflow();
@@ -176,7 +176,7 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
     ///      ERC-777 or ERC-1155 hook) can trigger such an inflow, a credited balance can leave
     ///      uncharged, covered by funds that belonged to others. Keep such inflows out of reach
     ///      of the window, or pay out without a callback that can reach them (a pull pattern).
-    ///      Charging gross outflow instead is tracked in #117.
+    ///      Signed programs are charged per op instead; a native function has no ops to split.
     modifier limitsOutflow() {
         (uint256 ethBaseline, uint256 ethCharged) = OutgoingRateLimit.beginNative();
         _beginTokenOutflow();

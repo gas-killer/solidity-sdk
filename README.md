@@ -559,8 +559,11 @@ unwinding a position or taking a deposit and then sending the proceeds out is ch
 Within one op the change is net, so a swap that pulls a token and pays it back in the same `CALL`
 is charged nothing. That also means a called contract holding an allowance could pull tokens out
 and have a third party pay as much back in (a public `harvest()`, a vault withdrawal it was
-approved for) in that one `CALL`: don't let programs hand allowances to untrusted contracts, on
-listed tokens or on unlisted position tokens. A `transferFrom` into your contract is a deposit and
+approved for) in that one `CALL`, and a recipient's callback (an ERC-777 hook) could call back into
+your own deposit function, getting credited for tokens that offset the send. Don't let programs
+hand allowances to untrusted contracts, on listed tokens or on unlisted position tokens, and if
+your contract takes deposits, don't let programs call untrusted contracts or send hooked tokens to
+them. A `transferFrom` into your contract is a deposit and
 offsets nothing even within its op; it is counted at its calldata amount, so a token that delivers
 less (a fee on transfer, a `false` return) is charged the difference, and one that reads
 `type(uint256).max` as "the whole balance" reverts the program. A `transferFrom` between two others

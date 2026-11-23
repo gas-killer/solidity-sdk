@@ -172,9 +172,9 @@ contract RateLimitedCaller is GasKillerOutgoingRateLimit {
 ///         limits and for `GasKillerTokenRateLimit` listing k tokens:
 ///
 ///           m   | no limits | k = 0            | k = 1            | k = 4
-///           1   |  62,091   | +4,407 (+7.1%)   | +9,798 (+15.8%)  | +20,578 (+33.1%)
-///           8   |  99,612   | +10,475 (+10.5%) | +26,558 (+26.7%) | +60,713 (+60.9%)
-///           32  | 229,014   | +31,408 (+13.7%) | +84,149 (+36.7%) | +198,446 (+86.7%)
+///           1   |  62,091   | +4,407 (+7.1%)   | +10,179 (+16.4%) | +22,102 (+35.6%)
+///           8   |  99,612   | +10,475 (+10.5%) | +26,939 (+27.0%) | +62,237 (+62.5%)
+///           32  | 229,014   | +31,408 (+13.7%) | +84,530 (+36.9%) | +199,970 (+87.3%)
 ///
 ///         Each listed token costs a `balanceOf` read per op that runs code (about 1,200 to 1,500
 ///         gas, #117), one more at the end and a budget read and write; a program that runs no
@@ -271,7 +271,7 @@ contract CallPolicyGasTest is Test {
         }
     }
 
-    /// @dev The counter copy plus one `transfer` of the first token, for a consumer with no
+    /// @dev The counter copy plus `m` `transfer`s of the first token, for a consumer with no
     ///      limits (`k` = none) or the drop-in limiting `k` tokens.
     function tokenGas(bool limited, uint256 k, uint256 m) external returns (uint256 used) {
         address[] memory tokens = new address[](k == 0 ? 1 : k);

@@ -118,6 +118,20 @@ contract NestingHarness is GasKillerSDK {
         TokenRateLimit.endProgram(_tokenLimits()); // the outer one: nothing more
     }
 
+    /// In one outer op, the inner program receives 20 and sends it on, then the outer one sends 30.
+    function nestedReceiveThenSend(IERC20 token, address to) external {
+        TokenRateLimit.begin();
+        TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
+        TokenRateLimit.begin();
+        TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
+        MintableToken(address(token)).mint(address(this), 20);
+        TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
+        token.transfer(to, 20);
+        TokenRateLimit.endProgram(_tokenLimits()); // the inner program: 20
+        token.transfer(to, 30);
+        TokenRateLimit.endProgram(_tokenLimits()); // the outer one: 30, not hidden by the inner 20
+    }
+
     /// The inner program starts before the outer one has run an op.
     function nestedBeforeOuterOp(IERC20 token, address to) external {
         TokenRateLimit.begin();
@@ -595,6 +609,14 @@ contract TokenRateLimitTest is Test {
         token.mint(address(h), 100);
         h.nestedAfterInflow(token, ATTACKER);
         assertEq(h.available(address(token)), 100 - 20);
+    }
+
+    /// What an inner program received and sent on doesn't hide a send of the outer one.
+    function test_innerReceiptDoesNotHideAnOuterSend() public {
+        NestingHarness h = new NestingHarness(address(token));
+        token.mint(address(h), 100);
+        h.nestedReceiveThenSend(token, ATTACKER);
+        assertEq(h.available(address(token)), 100 - 50);
     }
 
     /// An inner program that starts before the outer one has run an op charges what it moves.
