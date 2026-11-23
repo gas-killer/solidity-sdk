@@ -26,9 +26,10 @@ pragma solidity ^0.8.27;
 ///      when it leaves every protected bit as it is in storage. `mask` is `FULL` to protect the
 ///      whole slot. A narrower mask protects only some bits of one packed slot. Allowing writes
 ///      that change nothing is what lets the SDK protect its own transition counter: gas-analyzer
-///      copies the counter's new value into every program as a STORE, and `trackState` has already
-///      written that same value by the time the program runs. Deciding costs one SLOAD, paid only
-///      by a write that lands in a range.
+///      copies the counter's new value into every program as a STORE, and `trackState` has usually
+///      written that same value by the time the program runs. The counter also accepts a bounded
+///      move forward, for tracked functions that bump it more than once (`COUNTER_SLOT`).
+///      Deciding costs one SLOAD, paid only by a write that lands in a range.
 ///
 ///      `advance` makes one forward pass with a `Cursor`. Writes in ascending slot order walk the
 ///      ranges together, and once a write is past the last range every later ascending write costs
@@ -65,6 +66,19 @@ library StorageGuard {
     }
 
     bytes32 internal constant FULL = bytes32(type(uint256).max);
+
+    /// @notice `StateTracker`'s transition counter slot, which gets its own rule: a write may move
+    ///         the counter forward, by at most `MAX_COUNTER_ADVANCE`, but never back.
+    /// @dev A tracked function that calls another `trackState` function, or is re-entered, bumps
+    ///      the counter more than once natively, and gas-analyzer copies that value into the
+    ///      program. Settlement has bumped it only once, so an unchanged-only rule would reject the
+    ///      copy on every attempt. Moving back is what would let old signed transitions replay, and
+    ///      stays rejected; the bound keeps the counter from ever wrapping round to an old index.
+    ///      Must equal `StateTracker.STATE_TRACKER_STORAGE_LOCATION` (pinned by a test).
+    bytes32 internal constant COUNTER_SLOT = 0xdebfdfd5a50ad117c10898d68b5ccf0893c6b40d4f443f902e2e7646601bdeaf;
+
+    /// @notice Most a single write may move the transition counter forward.
+    uint256 internal constant MAX_COUNTER_ADVANCE = type(uint32).max;
 
     /// @notice A write would change protected bits.
     /// @param index Position of the offending op in its program (or in the caller's own sequence).
@@ -158,13 +172,21 @@ library StorageGuard {
     }
 
     /// @dev `range` points at a range covering `slot`. Reverts unless the write leaves every
-    ///      protected bit as it is in storage.
+    ///      protected bit as it is in storage or, for the transition counter, moves it forward by
+    ///      at most `MAX_COUNTER_ADVANCE` (see `COUNTER_SLOT`).
     function _reject(uint256 range, uint256 index, bytes32 slot, bytes32 value) private view {
         bytes32 mask;
         bytes32 current;
         assembly ("memory-safe") {
             mask := mload(add(range, 0x40))
             current := sload(slot)
+        }
+        if (slot == COUNTER_SLOT) {
+            // Checked separately: the difference alone would let a write wrap round to zero.
+            unchecked {
+                if (value >= current && uint256(value) - uint256(current) <= MAX_COUNTER_ADVANCE) return;
+            }
+            revert ProtectedSlotWrite(index, slot);
         }
         if ((current ^ value) & mask != 0) revert ProtectedSlotWrite(index, slot);
     }

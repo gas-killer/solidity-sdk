@@ -161,21 +161,21 @@ contract NestedCycleTest is Test {
     }
 
     /// Every frame is checked against its own contract's protected storage. A frame whose copy of
-    /// the transition counter disagrees with what `trackState` wrote is rejected, whichever
+    /// the transition counter moves it back from what `trackState` wrote is rejected, whichever
     /// contract in the tree it belongs to.
     function test_framesCannotRewriteTheirTransitionCounter() public {
         bytes memory reason = abi.encodeWithSelector(StorageGuard.ProtectedSlotWrite.selector, 0, TRACKER_SLOT);
 
         // Root frame: its first op is the counter copy.
         NestedTreeBuilder.Frame[] memory frames = _frames(1, false);
-        frames[0].args[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(9)));
+        frames[0].args[0] = abi.encode(TRACKER_SLOT, bytes32(0)); // back from 1
         TreeSubmission memory sub = _toSubmission(frames.build(expiryBlock));
         vm.expectRevert(reason);
         root.verifyAndUpdateTree(sub);
 
         // A callee's frame: the error arrives wrapped in the parent's RevertingContext.
         frames = _frames(1, false);
-        frames[1].args[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(9)));
+        frames[1].args[0] = abi.encode(TRACKER_SLOT, bytes32(0));
         sub = _toSubmission(frames.build(expiryBlock));
         try root.verifyAndUpdateTree(sub) {
             fail("tree settled");
@@ -200,7 +200,7 @@ contract NestedCycleTest is Test {
 
         vm.revertToState(snapshot);
         frames = _frames(1, false);
-        frames[0].args[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(9)));
+        frames[0].args[0] = abi.encode(TRACKER_SLOT, bytes32(0)); // a rewind
         TreeSubmission memory sub = _toSubmission(frames.build(expiryBlock));
         vm.expectRevert(abi.encodeWithSelector(StorageGuard.ProtectedSlotWrite.selector, 0, TRACKER_SLOT));
         root.verifyAndUpdateTree(sub);

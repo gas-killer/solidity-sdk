@@ -348,6 +348,47 @@ contract StorageGuardTest is Test {
         assertTrue(rejected);
     }
 
+    /// @dev The transition counter may move forward by at most `MAX_COUNTER_ADVANCE`, never back:
+    ///      a tracked function that bumps it twice natively leaves a copy one ahead of settlement.
+    function test_counter_movesForwardOnlyWithinTheBound() public {
+        bytes32 slot = h.stateTrackerSlot();
+        h.poke(slot, bytes32(uint256(10)));
+        bytes32[] memory s = new bytes32[](1);
+        bytes32[] memory v = new bytes32[](1);
+        s[0] = slot;
+        StorageGuard.ProtectedRange[] memory rs = _one(uint256(slot), uint256(slot));
+        uint256 max = StorageGuard.MAX_COUNTER_ADVANCE;
+
+        uint256[4] memory allowed = [uint256(10), 11, 12, 10 + max];
+        for (uint256 i = 0; i < allowed.length; ++i) {
+            v[0] = bytes32(allowed[i]);
+            (bool rejected,) = _all(rs, s, v);
+            assertFalse(rejected, "forward within the bound");
+        }
+        uint256[4] memory refused = [uint256(9), 0, 11 + max, type(uint256).max];
+        for (uint256 i = 0; i < refused.length; ++i) {
+            v[0] = bytes32(refused[i]);
+            (bool rejected,) = _all(rs, s, v);
+            assertTrue(rejected, "rewind or too far");
+        }
+    }
+
+    /// @dev Near the top of the range the bound still holds, and a write can't wrap the counter.
+    function test_counter_cannotWrap() public {
+        bytes32 slot = h.stateTrackerSlot();
+        h.poke(slot, bytes32(type(uint256).max - 1));
+        bytes32[] memory s = new bytes32[](1);
+        bytes32[] memory v = new bytes32[](1);
+        s[0] = slot;
+        StorageGuard.ProtectedRange[] memory rs = _one(uint256(slot), uint256(slot));
+        v[0] = bytes32(type(uint256).max);
+        (bool rejected,) = _all(rs, s, v);
+        assertFalse(rejected);
+        v[0] = bytes32(0);
+        (rejected,) = _all(rs, s, v);
+        assertTrue(rejected, "wrapping to zero is a rewind");
+    }
+
     function test_maskedSlot_allowsUnprotectedBitsOnly() public {
         // Slot 7 packs `address owner` (low 160 bits, protected) with a `uint96` counter.
         bytes32 ownerMask = bytes32(uint256(type(uint160).max));
@@ -442,6 +483,7 @@ contract StorageGuardTest is Test {
             0x1d6f9f139320a34a32f3b29eb8638270178e831962a74100c9e8b433f21e1200
         );
         assertEq(uint256(h.stateTrackerSlot()), 0xdebfdfd5a50ad117c10898d68b5ccf0893c6b40d4f443f902e2e7646601bdeaf);
+        assertEq(StorageGuard.COUNTER_SLOT, h.stateTrackerSlot(), "the guard's counter slot is StateTracker's");
     }
 
     function test_realistic_rejectsEveryProtectedSlot() public view {
@@ -449,6 +491,8 @@ contract StorageGuardTest is Test {
         for (uint256 i = 0; i < rs.length; ++i) {
             for (uint256 slot = rs[i].start; slot <= rs[i].end; ++slot) {
                 (bytes32[] memory s, bytes32[] memory v) = _w(slot);
+                // Too far for the counter's forward rule, a change for every other slot.
+                v[0] = bytes32(type(uint256).max);
                 (bool rejected,) = _all(rs, s, v);
                 assertTrue(rejected);
             }

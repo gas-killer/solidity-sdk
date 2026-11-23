@@ -47,7 +47,9 @@ import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
 ///      storage: the transition counter and the whole ERC-7201 namespace of the configuration
 ///      struct (AVS address, registry, stale-block window). Consumers add theirs, such as an `Ownable` owner slot, by
 ///      overriding `_protectedRanges()`. A write that leaves protected bits unchanged passes,
-///      which is what keeps the counter copy gas-analyzer puts in every program working.
+///      which is what keeps the counter copy gas-analyzer puts in every program working. The
+///      counter may also move forward, never back, so a tracked function that bumps it more than
+///      once natively still settles (`StorageGuard.COUNTER_SLOT`).
 abstract contract GasKillerSDK is
     StateTracker,
     TransitionGuard,
@@ -195,10 +197,10 @@ abstract contract GasKillerSDK is
     ///      validated, not applied) rather than reverting the batch: settlement is
     ///      permissionless, so a third party who lifts one submission from the mempool
     ///      and settles it standalone could otherwise nullify the whole batch with one
-    ///      cheap front-run. An index can only ever be consumed by a quorum-signed
-    ///      transition for this contract, so a skipped item's transition has already
-    ///      happened. Reverts (`InvalidTransitionIndex`) only on a genuine gap — an index
-    ///      above the next expected one.
+    ///      cheap front-run. An index below the counter was either settled or jumped over
+    ///      by a transition that moved the counter forward, so it can never settle.
+    ///      Reverts (`InvalidTransitionIndex`) only on a genuine gap — an index above the
+    ///      next expected one.
     ///
     ///      Batch assemblers: a `CALL` state update forwards all remaining gas to its target
     ///      with no cap (see `StateChangeHandlerLib`). A greedy/griefing target in an early
@@ -440,11 +442,11 @@ abstract contract GasKillerSDK is
     }
 
     /// @notice **Unsafe.** Override to return true to stop settlement checking signed STOREs
-    ///         against protected storage. Saves about 1,400 gas per call, 500 more per declared
-    ///         range, and about 280 per STORE (see `bench/SettlementGas.t.sol`).
+    ///         against protected storage. Saves about 1,400 gas per call, 70 per transition, 500 per
+    ///         declared range, and about 280 per STORE (see `bench/SettlementGas.t.sol`).
     /// @dev With the check off, a quorum that signs a malicious program can overwrite any slot of
-    ///      this contract: an owner, an upgrade slot, the transition counter (replaying or
-    ///      skipping transitions) and the SDK's own configuration, including the registry that
+    ///      this contract: an owner, an upgrade slot, the transition counter (replaying old
+    ///      transitions) and the SDK's own configuration, including the registry that
     ///      verifies signatures and the rate-limit budgets (`OutgoingRateLimit`, `TokenRateLimit`),
     ///      which a program could then refill before spending them: the rate limits stay in the
     ///      code but bound nothing. Opt out only if the contract's correctness already rests on

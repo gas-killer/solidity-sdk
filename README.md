@@ -270,6 +270,10 @@ function _protectedRanges() internal pure override returns (StorageGuard.Protect
 **The rule: no protected bit may change.** A write that leaves every protected bit as it is in
 storage passes. That is what keeps honest programs working: gas-analyzer copies the counter's new
 value into every program, and `trackState` has already written that value when the program runs.
+The transition counter has one exception: a write may move it **forward**, by at most 2³² − 1, but
+never back. A tracked function that calls another `trackState` function, or is re-entered, bumps the
+counter more than once natively, while settlement bumps it once, and the program's copy then has to
+catch up. A rewind, which could replay old transitions, is still rejected.
 Each `STORE` is judged against storage at the moment it executes. So if a `CALL` legitimately changes
 protected storage, for example by having the pending owner claim ownership, a later `STORE` that
 quietly restores the old value is rejected, and one that keeps the new value passes.
@@ -312,7 +316,8 @@ for a consumer declaring k ranges, or opted out.
 | 32 | 773,288 | +1,933 (+0.2%) | +12,820 (+1.7%) | +13,317 (+1.7%) | +14,912 (+1.9%) |
 
 Protected, that is about 340 gas per `STORE` (the counter copy included), about 500 per declared
-range per settlement call (building and merging the list), and about 1,400 fixed. Opted out, about
+range per settlement call (building and merging the list), and about 1,400 fixed, plus about 70 per
+transition for the counter's forward rule (measured after these figures). Opted out, about
 60 per `STORE` remains, the cost of skipping the check. A `verifyAndUpdateBatch` builds the list
 once for all of its items. A 20-item batch of single-`STORE` transitions, over 653,659 before,
 costs +34,750 (+5.3%) at k = 0, +46,963 (+7.2%) at k = 4, and +8,323 (+1.3%) opted out.

@@ -264,9 +264,10 @@ contract StateTracker {
 ///      when it leaves every protected bit as it is in storage. `mask` is `FULL` to protect the
 ///      whole slot. A narrower mask protects only some bits of one packed slot. Allowing writes
 ///      that change nothing is what lets the SDK protect its own transition counter: gas-analyzer
-///      copies the counter's new value into every program as a STORE, and `trackState` has already
-///      written that same value by the time the program runs. Deciding costs one SLOAD, paid only
-///      by a write that lands in a range.
+///      copies the counter's new value into every program as a STORE, and `trackState` has usually
+///      written that same value by the time the program runs. The counter also accepts a bounded
+///      move forward, for tracked functions that bump it more than once (`COUNTER_SLOT`).
+///      Deciding costs one SLOAD, paid only by a write that lands in a range.
 ///
 ///      `advance` makes one forward pass with a `Cursor`. Writes in ascending slot order walk the
 ///      ranges together, and once a write is past the last range every later ascending write costs
@@ -303,6 +304,19 @@ library StorageGuard {
     }
 
     bytes32 internal constant FULL = bytes32(type(uint256).max);
+
+    /// @notice `StateTracker`'s transition counter slot, which gets its own rule: a write may move
+    ///         the counter forward, by at most `MAX_COUNTER_ADVANCE`, but never back.
+    /// @dev A tracked function that calls another `trackState` function, or is re-entered, bumps
+    ///      the counter more than once natively, and gas-analyzer copies that value into the
+    ///      program. Settlement has bumped it only once, so an unchanged-only rule would reject the
+    ///      copy on every attempt. Moving back is what would let old signed transitions replay, and
+    ///      stays rejected; the bound keeps the counter from ever wrapping round to an old index.
+    ///      Must equal `StateTracker.STATE_TRACKER_STORAGE_LOCATION` (pinned by a test).
+    bytes32 internal constant COUNTER_SLOT = 0xdebfdfd5a50ad117c10898d68b5ccf0893c6b40d4f443f902e2e7646601bdeaf;
+
+    /// @notice Most a single write may move the transition counter forward.
+    uint256 internal constant MAX_COUNTER_ADVANCE = type(uint32).max;
 
     /// @notice A write would change protected bits.
     /// @param index Position of the offending op in its program (or in the caller's own sequence).
@@ -396,13 +410,21 @@ library StorageGuard {
     }
 
     /// @dev `range` points at a range covering `slot`. Reverts unless the write leaves every
-    ///      protected bit as it is in storage.
+    ///      protected bit as it is in storage or, for the transition counter, moves it forward by
+    ///      at most `MAX_COUNTER_ADVANCE` (see `COUNTER_SLOT`).
     function _reject(uint256 range, uint256 index, bytes32 slot, bytes32 value) private view {
         bytes32 mask;
         bytes32 current;
         assembly ("memory-safe") {
             mask := mload(add(range, 0x40))
             current := sload(slot)
+        }
+        if (slot == COUNTER_SLOT) {
+            // Checked separately: the difference alone would let a write wrap round to zero.
+            unchecked {
+                if (value >= current && uint256(value) - uint256(current) <= MAX_COUNTER_ADVANCE) return;
+            }
+            revert ProtectedSlotWrite(index, slot);
         }
         if ((current ^ value) & mask != 0) revert ProtectedSlotWrite(index, slot);
     }
@@ -1233,7 +1255,9 @@ library StateChangeHandlerLib {
 ///      storage: the transition counter and the whole ERC-7201 namespace of the configuration
 ///      struct (AVS address, registry, stale-block window). Consumers add theirs, such as an `Ownable` owner slot, by
 ///      overriding `_protectedRanges()`. A write that leaves protected bits unchanged passes,
-///      which is what keeps the counter copy gas-analyzer puts in every program working.
+///      which is what keeps the counter copy gas-analyzer puts in every program working. The
+///      counter may also move forward, never back, so a tracked function that bumps it more than
+///      once natively still settles (`StorageGuard.COUNTER_SLOT`).
 abstract contract GasKillerSDK is
     StateTracker,
     TransitionGuard,
@@ -1381,10 +1405,10 @@ abstract contract GasKillerSDK is
     ///      validated, not applied) rather than reverting the batch: settlement is
     ///      permissionless, so a third party who lifts one submission from the mempool
     ///      and settles it standalone could otherwise nullify the whole batch with one
-    ///      cheap front-run. An index can only ever be consumed by a quorum-signed
-    ///      transition for this contract, so a skipped item's transition has already
-    ///      happened. Reverts (`InvalidTransitionIndex`) only on a genuine gap — an index
-    ///      above the next expected one.
+    ///      cheap front-run. An index below the counter was either settled or jumped over
+    ///      by a transition that moved the counter forward, so it can never settle.
+    ///      Reverts (`InvalidTransitionIndex`) only on a genuine gap — an index above the
+    ///      next expected one.
     ///
     ///      Batch assemblers: a `CALL` state update forwards all remaining gas to its target
     ///      with no cap (see `StateChangeHandlerLib`). A greedy/griefing target in an early
@@ -1626,11 +1650,11 @@ abstract contract GasKillerSDK is
     }
 
     /// @notice **Unsafe.** Override to return true to stop settlement checking signed STOREs
-    ///         against protected storage. Saves about 1,400 gas per call, 500 more per declared
-    ///         range, and about 280 per STORE (see `bench/SettlementGas.t.sol`).
+    ///         against protected storage. Saves about 1,400 gas per call, 70 per transition, 500 per
+    ///         declared range, and about 280 per STORE (see `bench/SettlementGas.t.sol`).
     /// @dev With the check off, a quorum that signs a malicious program can overwrite any slot of
-    ///      this contract: an owner, an upgrade slot, the transition counter (replaying or
-    ///      skipping transitions) and the SDK's own configuration, including the registry that
+    ///      this contract: an owner, an upgrade slot, the transition counter (replaying old
+    ///      transitions) and the SDK's own configuration, including the registry that
     ///      verifies signatures and the rate-limit budgets (`OutgoingRateLimit`, `TokenRateLimit`),
     ///      which a program could then refill before spending them: the rate limits stay in the
     ///      code but bound nothing. Opt out only if the contract's correctness already rests on
