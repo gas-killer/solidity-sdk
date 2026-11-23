@@ -883,10 +883,14 @@ silently back a credit of the 100 the trace saw.
   can't be pinned either: an out-of-gas returns no data.
 - A `CALL`'s `gasLimit` is the gas operand the traced call passed, and settlement passes it
   unchanged. The EVM caps it at 63/64 of the gas left and adds the 2,300 stipend to a call with
-  value, as in the trace. So a `transfer` (operand 0) reaches its recipient with the stipend
-  only, not with enough gas to re-enter the consumer mid-transition, and a call that forwarded
-  everything in the trace (a large operand) gets everything left. A settler that sends too
-  little gas makes the call run out and the settlement revert; it can retry with more.
+  value, as in the trace. So a `transfer` or `send` (operand 0 with value, 2,300 without) reaches
+  its recipient with the stipend only, not with enough gas to re-enter the consumer
+  mid-transition. A call that forwarded all its gas in the trace should be encoded as
+  `type(uint256).max`, and gets everything left. If a callee runs out of gas, settlement reverts.
+  For a call with a large operand, a settler can retry with a higher gas limit. A capped callee
+  can also run out where it fit in the trace, because an account or slot that was warm there is
+  cold at settlement; more gas doesn't help that, but an EIP-2930 access list on the settlement
+  transaction that warms what the trace had warm does.
 - `CREATE`'s `expected` pins the deployed address, which moves with the contract's nonce; zero
   leaves it unchecked. `CREATE2`'s address is fixed by its signed salt and initcode.
 - The `*_CHECK` ops pin reads that changed no state: `STATICCALL` (with the same result hash),
