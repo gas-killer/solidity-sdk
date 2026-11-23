@@ -168,10 +168,17 @@ contract RateLimitedCaller is GasKillerOutgoingRateLimit {
 ///         so the budget slot is already warm here; a real settlement also pays about 5,000 once,
 ///         for the first read (2,100, cold) and write (2,900) of the slot.
 ///
-///         `test_tokenLimit`: the counter copy plus one ERC-20 `transfer`, for a consumer with no
-///         limits (59,146) and for `GasKillerTokenRateLimit` listing k tokens: k = 0 +4,242 (+7.2%),
-///         k = 1 +9,336 (+15.8%), k = 4 +20,628 (+34.9%). Each listed token costs two `balanceOf`
-///         calls and a budget read and write; a program that runs no code reads no balances.
+///         `test_tokenLimit`: the counter copy plus m ERC-20 `transfer`s, for a consumer with no
+///         limits and for `GasKillerTokenRateLimit` listing k tokens:
+///
+///           m   | no limits | k = 0            | k = 1            | k = 4
+///           1   |  62,091   | +4,407 (+7.1%)   | +9,798 (+15.8%)  | +20,578 (+33.1%)
+///           8   |  99,612   | +10,475 (+10.5%) | +26,558 (+26.7%) | +60,713 (+60.9%)
+///           32  | 229,014   | +31,408 (+13.7%) | +84,149 (+36.7%) | +198,446 (+86.7%)
+///
+///         Each listed token costs a `balanceOf` read per op that runs code (about 1,200 to 1,500
+///         gas, #117), one more at the end and a budget read and write; a program that runs no
+///         code reads no balances.
 ///
 ///         `test_selfCalls`: the counter copy plus m allowed CALLs to the consumer's own `ping()`,
 ///         allowing every self-call or a one-selector list:
@@ -266,7 +273,7 @@ contract CallPolicyGasTest is Test {
 
     /// @dev The counter copy plus one `transfer` of the first token, for a consumer with no
     ///      limits (`k` = none) or the drop-in limiting `k` tokens.
-    function tokenGas(bool limited, uint256 k) external returns (uint256 used) {
+    function tokenGas(bool limited, uint256 k, uint256 m) external returns (uint256 used) {
         address[] memory tokens = new address[](k == 0 ? 1 : k);
         for (uint256 i = 0; i < tokens.length; ++i) {
             tokens[i] = address(new BenchToken());
@@ -281,11 +288,13 @@ contract CallPolicyGasTest is Test {
         for (uint256 i = 0; i < tokens.length; ++i) {
             BenchToken(tokens[i]).mint(address(target), 1000);
         }
-        StateUpdateType[] memory t = new StateUpdateType[](2);
-        bytes[] memory a = new bytes[](2);
+        StateUpdateType[] memory t = new StateUpdateType[](m + 1);
+        bytes[] memory a = new bytes[](m + 1);
         a[0] = abi.encode(TRACKER_SLOT, bytes32(uint256(1)));
-        t[1] = StateUpdateType.CALL;
-        a[1] = abi.encode(tokens[0], uint256(0), abi.encodeCall(IERC20.transfer, (address(sink), 1)));
+        for (uint256 i = 1; i <= m; ++i) {
+            t[i] = StateUpdateType.CALL;
+            a[i] = abi.encode(tokens[0], uint256(0), abi.encodeCall(IERC20.transfer, (address(sink), 1)));
+        }
         bytes memory updates = abi.encode(t, a);
         bytes32 h = target.getMessageHash(0, FN, updates);
         address[] memory none = new address[](0);
@@ -297,11 +306,24 @@ contract CallPolicyGasTest is Test {
 
     function test_tokenLimit() public {
         this.settleGas(false, 1); // warm the registry
-        console2.log("settlement gas, counter copy + 1 token transfer");
-        console2.log("no limits  |  ", vm.toString(this.tokenGas(false, 0)));
-        console2.log("drop-in, k = 0  |  ", vm.toString(this.tokenGas(true, 0)));
-        console2.log("drop-in, k = 1  |  ", vm.toString(this.tokenGas(true, 1)));
-        console2.log("drop-in, k = 4  |  ", vm.toString(this.tokenGas(true, 4)));
+        uint256[3] memory ms = [uint256(1), 8, 32];
+        console2.log("settlement gas, counter copy + m token transfers");
+        console2.log("m  |  no limits  |  k = 0  |  k = 1  |  k = 4");
+        for (uint256 i = 0; i < 3; ++i) {
+            console2.log(
+                string.concat(
+                    vm.toString(ms[i]),
+                    "  |  ",
+                    vm.toString(this.tokenGas(false, 0, ms[i])),
+                    "  |  ",
+                    vm.toString(this.tokenGas(true, 0, ms[i])),
+                    "  |  ",
+                    vm.toString(this.tokenGas(true, 1, ms[i])),
+                    "  |  ",
+                    vm.toString(this.tokenGas(true, 4, ms[i]))
+                )
+            );
+        }
     }
 
     /// @dev The counter copy plus m CALLs to the consumer's own `ping`.

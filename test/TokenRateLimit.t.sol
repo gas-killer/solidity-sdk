@@ -20,6 +20,14 @@ contract Puller {
     }
 }
 
+/// Pulls tokens with an allowance it holds and pays as many back, in one call.
+contract RoundTrip {
+    function run(MintableToken token, address from, uint256 amount) external {
+        token.transferFrom(from, address(this), amount);
+        token.mint(from, amount);
+    }
+}
+
 /// A legacy-style token whose `decreaseAllowance` subtracts unchecked, so it can wrap.
 contract WrappingToken is MintableToken {
     function decreaseAllowance(address spender, uint256 subtracted) public override returns (bool) {
@@ -500,11 +508,30 @@ contract TokenRateLimitTest is Test {
         assertEq(_available(), 60);
     }
 
-    /// The charge is the net outflow: tokens received in the program offset tokens sent.
-    function test_inflowOffsetsOutflow() public {
+    /// Tokens one op receives don't offset what another op sends (#117): a borrow, or a
+    /// position unwound, then sent on is charged in full. A mint stands in for the receipt.
+    function test_inflowDoesNotOffsetALaterSend() public {
+        Program memory p = _tracked(2);
+        _call(p, address(token), abi.encodeCall(MintableToken.mint, (address(v), 150)));
+        _transfer(p, token, ATTACKER, 150);
+        _settle(p, _exceeded(150, 100));
+    }
+
+    /// Nor an earlier one.
+    function test_inflowDoesNotOffsetAnEarlierSend() public {
         Program memory p = _tracked(2);
         _transfer(p, token, ATTACKER, 150);
         _call(p, address(token), abi.encodeCall(MintableToken.mint, (address(v), 150)));
+        _settle(p, _exceeded(150, 100));
+    }
+
+    /// Within one op the change is net: a swap that pulls the token and pays it back in the
+    /// same `CALL` is charged nothing.
+    function test_receiptWithinTheSameOpOffsets() public {
+        RoundTrip router = new RoundTrip();
+        v.approveNatively(token, address(router), 150);
+        Program memory p = _tracked(1);
+        _call(p, address(router), abi.encodeCall(RoundTrip.run, (token, address(v), 150)));
         _settle(p, "");
         assertEq(_available(), 100);
     }
