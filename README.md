@@ -615,8 +615,8 @@ and `_afterLimitedProgram` instead.
   clear it.
   `gasKillerTokenAllowance(token)` returns the budget.
 - An approval left standing is charged when its program ends, and the spender's later pull is
-  charged again through the balance. Programs that nest on the same contract are charged once, by
-  the outermost.
+  charged again through the balance. A program nested in another on the same contract charges its
+  own outflow; the one around it charges only what it moved beyond that.
 - A contract that already inherits another SDK base can use the `TokenRateLimit` library directly:
   `begin` in `_beforeProgram`, `beforeOp` in `_authorizeCall`, `endProgram` in `_afterProgram`.
   Reject the op when `beforeOp` returns true (an unrecognized call to a listed token), and make sure
@@ -684,11 +684,12 @@ contract Vault is GasKillerTokenRateLimit {
   a payable limited function that receives ETH and sends it on (a swap, a forwarder) is charged for
   what it sends. Excluding it would let one deposit offset every limited function a call runs.
 - **Nested windows.** A limited function that calls another, directly or through a callback, is
-  charged once, by the outermost window. For tokens the same holds for a limited function an
-  allowed self-call reaches inside a signed program: the program charges it.
-- **Cost.** About +1,600 gas for an ETH payout with the budget slot warm, plus about 2,100 for the
-  first (cold) read of it in a transaction. A token payout costs about +4,600 with no tokens listed,
-  +9,700 with one and +27,000 with four: two `balanceOf` calls and a budget write per listed token.
+  charged once: each window charges its own outflow, and the one around it only what it sent
+  beyond that, so an inflow to the outer window can't cover an inner payout. For tokens the same
+  holds for a limited function an allowed self-call reaches inside a signed program.
+- **Cost.** About +1,500 gas for an ETH payout with the budget slot warm, plus about 2,100 for the
+  first (cold) read of it in a transaction. A token payout costs about +4,500 with no tokens listed,
+  +9,500 with one and +26,800 with four: two `balanceOf` calls and a budget write per listed token.
 
 ### Allow-listing calls
 

@@ -84,9 +84,25 @@ contract ForwardingVault is GasKillerOutgoingRateLimit {
         _payout(amount);
     }
 
+    /// Takes ETH in from `source` during the window, then pays out through a nested one.
+    function refillThenPayNested(EthSource source, uint256 amount) external limitsOutflow {
+        source.drain();
+        _payout(amount);
+    }
+
     function _payout(uint256 amount) internal limitsOutflow {
         (bool ok,) = msg.sender.call{value: amount}("");
         require(ok, "send");
+    }
+}
+
+/// Sends its whole balance to whoever calls `drain`.
+contract EthSource {
+    receive() external payable {}
+
+    function drain() external {
+        (bool ok,) = msg.sender.call{value: address(this).balance}("");
+        require(ok, "drain");
     }
 }
 
@@ -301,6 +317,18 @@ contract GasKillerPayoutLimitTest is Test {
         vm.prank(USER);
         vm.expectRevert(_ethExceeded(0.6 ether, 0.4 ether));
         v.payNested(0.6 ether);
+    }
+
+    /// ETH the outer window takes in doesn't cover what a window inside it pays out.
+    function test_outerInflowDoesNotCoverAnInnerPayout() public {
+        ForwardingVault v = new ForwardingVault(address(registry));
+        vm.deal(address(v), 50 ether);
+        EthSource source = new EthSource();
+        vm.deal(address(source), 0.6 ether);
+        vm.prank(USER);
+        v.refillThenPayNested(source, 0.6 ether);
+        (uint256 available,,) = v.gasKillerOutgoingAllowance();
+        assertEq(available, 0.4 ether, "the inner payout is charged");
     }
 
     // ---------------------------------------------------------------- tokens

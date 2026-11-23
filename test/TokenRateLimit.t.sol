@@ -88,20 +88,32 @@ contract NestingHarness is GasKillerSDK {
     }
 
     function nested(IERC20 token, address to) external {
-        TokenRateLimit.begin(_tokenLimits());
+        TokenRateLimit.begin();
         TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
         token.transfer(to, 10);
-        TokenRateLimit.begin(_tokenLimits());
+        TokenRateLimit.begin();
         TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
         token.transfer(to, 20);
         TokenRateLimit.endProgram(_tokenLimits()); // the inner program: nothing
         TokenRateLimit.endProgram(_tokenLimits()); // the outer one: 10 + 20
     }
 
+    /// The outer program receives 20 (a mint stands in for any inflow), then the inner one sends 20.
+    function nestedAfterInflow(IERC20 token, address to) external {
+        TokenRateLimit.begin();
+        TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
+        MintableToken(address(token)).mint(address(this), 20);
+        TokenRateLimit.begin();
+        TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
+        token.transfer(to, 20);
+        TokenRateLimit.endProgram(_tokenLimits()); // the inner program: 20
+        TokenRateLimit.endProgram(_tokenLimits()); // the outer one: nothing more
+    }
+
     /// The inner program starts before the outer one has run an op.
     function nestedBeforeOuterOp(IERC20 token, address to) external {
-        TokenRateLimit.begin(_tokenLimits());
-        TokenRateLimit.begin(_tokenLimits());
+        TokenRateLimit.begin();
+        TokenRateLimit.begin();
         TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
         token.transfer(to, 20);
         TokenRateLimit.endProgram(_tokenLimits()); // the inner program: nothing
@@ -110,10 +122,10 @@ contract NestingHarness is GasKillerSDK {
 
     /// The outer program sends 50; the inner one pulls 50 in from `user` as a deposit.
     function nestedDeposit(IERC20 token, address user, address to) external {
-        TokenRateLimit.begin(_tokenLimits());
+        TokenRateLimit.begin();
         TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(0), "");
         token.transfer(to, 50);
-        TokenRateLimit.begin(_tokenLimits());
+        TokenRateLimit.begin();
         bytes memory pull = abi.encodeCall(IERC20.transferFrom, (user, address(this), 50));
         require(!TokenRateLimit.beforeOp(_tokenLimits(), StateUpdateType.CALL, address(token), pull));
         token.transferFrom(user, address(this), 50);
@@ -123,12 +135,12 @@ contract NestingHarness is GasKillerSDK {
 
     /// A limit changed while a program is running, as a callback would.
     function setMidProgram(address token) external {
-        TokenRateLimit.begin(_tokenLimits());
+        TokenRateLimit.begin();
         TokenRateLimit.set(_tokenLimits(), token, 50, 1 hours);
     }
 
     function clearMidProgram(address token) external {
-        TokenRateLimit.begin(_tokenLimits());
+        TokenRateLimit.begin();
         TokenRateLimit.clear(_tokenLimits(), token);
     }
 
@@ -549,8 +561,15 @@ contract TokenRateLimitTest is Test {
         assertEq(h.available(address(token)), 100 - 30);
     }
 
-    /// The outer program is snapshotted when an inner one begins, even before its own first op, so
-    /// what the inner one moves is still charged.
+    /// An inflow to the outer program doesn't cover what the inner one sends.
+    function test_outerInflowDoesNotCoverAnInnerSend() public {
+        NestingHarness h = new NestingHarness(address(token));
+        token.mint(address(h), 100);
+        h.nestedAfterInflow(token, ATTACKER);
+        assertEq(h.available(address(token)), 100 - 20);
+    }
+
+    /// An inner program that starts before the outer one has run an op charges what it moves.
     function test_innerProgramBeforeTheOuterOpIsCharged() public {
         NestingHarness h = new NestingHarness(address(token));
         token.mint(address(h), 100);

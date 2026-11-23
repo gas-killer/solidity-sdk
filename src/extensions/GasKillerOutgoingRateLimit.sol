@@ -62,8 +62,8 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
     ///      withdrawals then share the budget, so size `limit` for normal traffic. Measured by
     ///      balance, so every route out of the function counts, including callbacks. The call's
     ///      `msg.value` is in the balance before the function runs, so it doesn't offset what the
-    ///      function sends. Windows that nest, directly or through a callback, are charged once, by
-    ///      the outermost. Reverts with
+    ///      function sends. Windows that nest, directly or through a callback, each charge their own
+    ///      outflow, and the window around one charges only what it sent beyond that. Reverts with
     ///      `OutgoingRateLimit.NativeOutflowRateLimitExceeded` (or
     ///      `TokenRateLimit.TokenRateLimitExceeded`) after the function, rolling it back. In the
     ///      token drop-in the function runs as a program does, so it can't set or clear token
@@ -84,11 +84,11 @@ abstract contract GasKillerOutgoingRateLimit is GasKillerSDK {
     ///      of the window, or pay out without a callback that can reach them (a pull pattern).
     ///      Charging gross outflow instead is tracked in #117.
     modifier limitsOutflow() {
-        uint256 ethBaseline = OutgoingRateLimit.beginNative();
+        (uint256 ethBaseline, uint256 ethCharged) = OutgoingRateLimit.beginNative();
         _beginTokenOutflow();
         _;
         _endTokenOutflow();
-        OutgoingRateLimit.endNative(_outgoingBucket(), ethBaseline);
+        OutgoingRateLimit.endNative(_outgoingBucket(), ethBaseline, ethCharged);
     }
 
     /// @dev For `GasKillerTokenRateLimit`, which opens and closes its token window here, inside
@@ -156,8 +156,8 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
     ///      withdrawals then share the budget, so size `limit` for normal traffic. Measured by
     ///      balance, so every route out of the function counts, including callbacks. The call's
     ///      `msg.value` is in the balance before the function runs, so it doesn't offset what the
-    ///      function sends. Windows that nest, directly or through a callback, are charged once, by
-    ///      the outermost. Reverts with
+    ///      function sends. Windows that nest, directly or through a callback, each charge their own
+    ///      outflow, and the window around one charges only what it sent beyond that. Reverts with
     ///      `OutgoingRateLimit.NativeOutflowRateLimitExceeded` (or
     ///      `TokenRateLimit.TokenRateLimitExceeded`) after the function, rolling it back. In the
     ///      token drop-in the function runs as a program does, so it can't set or clear token
@@ -178,11 +178,11 @@ abstract contract GasKillerNestedOutgoingRateLimit is GasKillerNestedSDK {
     ///      of the window, or pay out without a callback that can reach them (a pull pattern).
     ///      Charging gross outflow instead is tracked in #117.
     modifier limitsOutflow() {
-        uint256 ethBaseline = OutgoingRateLimit.beginNative();
+        (uint256 ethBaseline, uint256 ethCharged) = OutgoingRateLimit.beginNative();
         _beginTokenOutflow();
         _;
         _endTokenOutflow();
-        OutgoingRateLimit.endNative(_outgoingBucket(), ethBaseline);
+        OutgoingRateLimit.endNative(_outgoingBucket(), ethBaseline, ethCharged);
     }
 
     /// @dev For `GasKillerTokenRateLimit`, which opens and closes its token window here, inside
