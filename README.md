@@ -134,12 +134,26 @@ without `block.chainid`. The `IGasKillerSDK` interface ID tells the two apart (s
 
 The settler doesn't pass the digest. `verifyAndUpdate` and each `TaskSubmission` carry only the
 signed fields, the contract rebuilds the digest from them, and the registry checks the signature
-against that. A `transitionIndex` other than the next one fails first, with
-`InvalidTransitionIndex`. A payload that differs in any other signed field fails with
-`InvalidQuorumSignature`, the same error as a bad signature. To tell an encoding mismatch from a
-bad signature, compare the digest your signer computed with `getMessageHash` or
-`getMessageHashWithValue` in an `eth_call`. Matching digests rule out only the digest's fields: a
-wrong `referenceBlockNumber`, `nonSigners`, `s` or `Raddr` also fails with `InvalidQuorumSignature`.
+against that. The checks run in this order:
+
+1. A `referenceBlockNumber` that isn't in the past fails with `FutureBlockNumber`, and one older
+   than the stale window with `StaleBlockNumber`.
+2. A `transitionIndex` other than the next one fails with `InvalidTransitionIndex`. In
+   `verifyAndUpdateBatch`, a submission whose index is already settled is skipped instead, and
+   only an index above the next one reverts.
+3. The registry checks the signature. With the bundled `SchnorrStakeRegistry`, a
+   `referenceBlockNumber` from before the last operator-set change fails with `StaleSnapshot`,
+   unsorted or duplicate `nonSigners` with `NonSignersNotSorted`, and an unregistered non-signer
+   with `NotRegistered`.
+
+Past these, a payload that differs in any signed field fails with `InvalidQuorumSignature`, the
+same error as a bad signature. So does a wrong `s` or `Raddr`, or a `nonSigners` list that leaves
+the signed weight below the threshold. To tell an encoding mismatch from a bad signature, compare
+the digest your signer computed with one from an `eth_call` to the deployed consumer itself, on the
+chain the transition settles on: the digest binds `block.chainid` and the consumer's address, so a
+fork deployment or another consumer gives a different one. Pass the same `transitionIndex`, and
+use `getMessageHashWithValue` with the task's `value` whenever it carries ETH; `getMessageHash`
+gives only the zero-value digest.
 
 The `IGasKillerSDK` interface ID is the `verifyAndUpdate` selector, so it identifies the format:
 
