@@ -134,24 +134,35 @@ without `block.chainid`. The `IGasKillerSDK` interface ID tells the two apart (s
 
 The settler doesn't pass the digest. `verifyAndUpdate` and each `TaskSubmission` carry only the
 signed fields, the contract rebuilds the digest from them, and the registry checks the signature
-against that. A payload that differs in any signed field fails with `InvalidQuorumSignature`.
+against that. A `transitionIndex` other than the next one fails first, with
+`InvalidTransitionIndex`. A payload that differs in any other signed field fails with
+`InvalidQuorumSignature`, the same error as a bad signature. To tell an encoding mismatch from a
+bad signature, compare the digest your signer computed with `getMessageHash` or
+`getMessageHashWithValue` in an `eth_call`. Matching digests rule out only the digest's fields: a
+wrong `referenceBlockNumber`, `nonSigners`, `s` or `Raddr` also fails with `InvalidQuorumSignature`.
 
 The `IGasKillerSDK` interface ID is the `verifyAndUpdate` selector, so it identifies the format:
 
 | `IGasKillerSDK` ID | `verifyAndUpdate` takes the digest | Digest binds the chain id |
 |---|---|---|
-| `0x57a9b002` (this release) | no | yes |
+| `0x57a9b002` (v0.2.0 and later) | no | yes |
 | `0x82b35a01` (v0.1.0 and earlier) | yes, as its first argument | no |
 
-Unreleased builds from `main` between v0.1.0 and this change report `0x82b35a01` but do bind the
+Unreleased builds from `main` between v0.1.0 and v0.2.0 report `0x82b35a01` but do bind the
 chain id. If one of those could be deployed, call its `getMessageHash` and compare the result with
 both encodings computed off-chain.
+
+`TaskSubmission` lost its digest field in v0.2.0, so the `IGasKillerSDKBatch` ID moved too: a
+v0.2.0 consumer reports `0xe40b0195`, a v0.1.0 one `0xce8e6efc`. A build from before submissions
+carried `value` reports `0x2ea5ee1d`, under the same `0x82b35a01` core ID. Probe for the batch ID
+that matches the submission layout you send.
 
 The ID didn't move when the digest started binding the value, so among `0x82b35a01` consumers it
 can't tell one that binds the value from one that accepts a value-bearing signature with any
 `msg.value`. Consumers that bind it also report `IGasKillerValueBound` (`0x0fd29ece`, the
-`getMessageHashWithValue` selector) through ERC-165. Every consumer that reports `0x57a9b002`
-binds the value and reports it too.
+`getMessageHashWithValue` selector) through ERC-165. Check for it before sending a task with value
+to a `0x82b35a01` consumer. Every consumer that reports `0x57a9b002` binds the value and reports it
+too.
 
 This is what makes inbound value safe. A tracked function that credits `msg.value` (a deposit, a
 mint for ETH, a payable purchase) replays as plain `STORE` updates, so without the binding anyone

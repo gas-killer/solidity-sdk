@@ -13,7 +13,7 @@ import {StateChangeHandlerLib, StateUpdateType} from "../src/StateChangeHandlerL
 
 /// Registry stub with a settable verdict — the guard/latch/batch control flow under test
 /// is independent of real signature verification (covered in SchnorrStakeRegistry.t.sol).
-/// In strict mode the verdict is "the arguments match what was staged per digest", so a
+/// In strict mode the verdict is "this digest was staged and the arguments match it", so a
 /// batch item that forwarded a neighbor's (s, Raddr) fails verification. (The stub cannot
 /// RECORD calls — the SDK invokes it via STATICCALL.)
 contract MockSchnorrRegistry is ISchnorrStakeRegistry {
@@ -21,6 +21,7 @@ contract MockSchnorrRegistry is ISchnorrStakeRegistry {
     bool public strict;
     mapping(bytes32 => uint256) public expectedS;
     mapping(bytes32 => address) public expectedRaddr;
+    mapping(bytes32 => bool) public staged;
 
     function setVerdict(bool v) external {
         verdict = v;
@@ -28,6 +29,7 @@ contract MockSchnorrRegistry is ISchnorrStakeRegistry {
 
     function expect(bytes32 message, uint256 s, address Raddr) external {
         strict = true;
+        staged[message] = true;
         expectedS[message] = s;
         expectedRaddr[message] = Raddr;
     }
@@ -37,7 +39,8 @@ contract MockSchnorrRegistry is ISchnorrStakeRegistry {
         view
         returns (bool)
     {
-        if (strict) return expectedS[message] == s && expectedRaddr[message] == Raddr;
+        // A digest nobody staged fails even with a zero `s` and `Raddr`, the unset mapping values.
+        if (strict) return staged[message] && expectedS[message] == s && expectedRaddr[message] == Raddr;
         return verdict;
     }
 }
@@ -752,6 +755,17 @@ contract GasKillerSDKHardeningTest is Test {
         _settle(sub, deposit);
         assertEq(sdk.value(), deposit);
         assertEq(address(sdk).balance, deposit, "credited exactly what arrived");
+    }
+
+    /// Strict mode rejects a digest nobody staged even with a zero `s` and `Raddr`, the values an
+    /// unstaged digest reads back, so a tampered payload can't pass by sending zeros.
+    function test_strictRegistry_rejectsUnstagedDigestWithZeroSignature() public {
+        _sign(_submission(0, _storeUpdate(bytes32(0), bytes32(uint256(1)))));
+        TaskSubmission memory tampered = _submission(0, _storeUpdate(bytes32(0), bytes32(uint256(2))));
+        tampered.s = 0;
+        tampered.Raddr = address(0);
+        vm.expectRevert(GasKillerSDK.InvalidQuorumSignature.selector);
+        _settle(tampered, 0);
     }
 
     /// A signature over a zero-value task cannot settle a transition that brings ETH either,
