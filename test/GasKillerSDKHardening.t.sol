@@ -757,6 +757,17 @@ contract GasKillerSDKHardeningTest is Test {
         assertEq(address(sdk).balance, deposit, "credited exactly what arrived");
     }
 
+    /// Strict mode rejects a digest nobody staged even with a zero `s` and `Raddr`, the values an
+    /// unstaged digest reads back, so a tampered payload can't pass by sending zeros.
+    function test_strictRegistry_rejectsUnstagedDigestWithZeroSignature() public {
+        _sign(_submission(0, _storeUpdate(bytes32(0), bytes32(uint256(1)))));
+        TaskSubmission memory tampered = _submission(0, _storeUpdate(bytes32(0), bytes32(uint256(2))));
+        tampered.s = 0;
+        tampered.Raddr = address(0);
+        vm.expectRevert(GasKillerSDK.InvalidQuorumSignature.selector);
+        _settle(tampered, 0);
+    }
+
     /// A signature over a zero-value task cannot settle a transition that brings ETH either,
     /// so a caller cannot slip value past what the operators analyzed.
     function test_verifyAndUpdate_zeroValueSignatureRejectsValue() public {

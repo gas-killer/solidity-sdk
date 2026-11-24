@@ -134,9 +134,12 @@ without `block.chainid`. The `IGasKillerSDK` interface ID tells the two apart (s
 
 The settler doesn't pass the digest. `verifyAndUpdate` and each `TaskSubmission` carry only the
 signed fields, the contract rebuilds the digest from them, and the registry checks the signature
-against that. A payload that differs in any signed field fails with `InvalidQuorumSignature`,
-the same error as a bad signature. To tell an encoding mismatch from a bad signature, compare the
-digest your signer computed with `getMessageHash` or `getMessageHashWithValue` in an `eth_call`.
+against that. A `transitionIndex` other than the next one fails first, with
+`InvalidTransitionIndex`. A payload that differs in any other signed field fails with
+`InvalidQuorumSignature`, the same error as a bad signature. To tell an encoding mismatch from a
+bad signature, compare the digest your signer computed with `getMessageHash` or
+`getMessageHashWithValue` in an `eth_call`. Matching digests rule out only the digest's fields: a
+wrong `referenceBlockNumber`, `nonSigners`, `s` or `Raddr` also fails with `InvalidQuorumSignature`.
 
 The `IGasKillerSDK` interface ID is the `verifyAndUpdate` selector, so it identifies the format:
 
@@ -150,8 +153,9 @@ chain id. If one of those could be deployed, call its `getMessageHash` and compa
 both encodings computed off-chain.
 
 `TaskSubmission` lost its digest field in v0.2.0, so the `IGasKillerSDKBatch` ID moved too: a
-v0.2.0 consumer reports `0xe40b0195`, a v0.1.0 one `0xce8e6efc`. Probe for the batch ID that matches
-the format the consumer's `IGasKillerSDK` ID names.
+v0.2.0 consumer reports `0xe40b0195`, a v0.1.0 one `0xce8e6efc`. A build from before submissions
+carried `value` reports `0x2ea5ee1d`, under the same `0x82b35a01` core ID. Probe for the batch ID
+that matches the submission layout you send.
 
 The ID didn't move when the digest started binding the value, so among `0x82b35a01` consumers it
 can't tell one that binds the value from one that accepts a value-bearing signature with any
